@@ -1,0 +1,34 @@
+:root {
+  color: rgba(255, 255, 255, 0.9);
+  background: #0e0d12;
+  font-family: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  --display-font: "Aptos Display", "Segoe UI Variable Display", "PingFang SC", sans-serif;
+  --text: rgba(255, 255, 255, 0.92);
+  --text-muted: rgba(255, 255, 255, 0.68);
+  --text-subtle: rgba(255, 255, 255, 0.43);
+  --accent: #81d8d0;
+  --accent-soft: #a7e7e2;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { min-width: 320px; min-height: 100%; margin: 0; }
+body { overflow: hidden; }
+button, input { font: inherit; }
+button:disabled { cursor: not-allowed; }
+::selection { background: rgba(129, 216, 208, 0.35); color: #fff; }
+
+@media (max-width: 720px) {
+  body { overflow: auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
