@@ -1,6 +1,6 @@
 export type MusicServer = 'netease' | 'tencent'
 export type PlayMode = 'sequence' | 'loop' | 'single' | 'shuffle'
-export type LyricAvailability = 'loading' | 'available' | 'unavailable'
+export type LyricAvailability = 'available' | 'unavailable'
 
 export interface MetingPlaylistConfig {
   server: MusicServer
@@ -48,14 +48,12 @@ export interface LyricLine {
   time: number | null
   text: string
   translation?: string
-  kind?: 'lyric' | 'gap'
-  endTime?: number
 }
 
 export interface LyricsSnapshot {
   lines: LyricLine[]
   activeIndex: number
-  status: 'idle' | 'loading' | 'ready' | 'empty' | 'error'
+  status: 'idle' | 'ready' | 'empty' | 'error'
 }
 
 export interface PlayerSettings {
@@ -68,6 +66,7 @@ export interface PlayerSettings {
   backgroundSaturation: number
   beatBrightness: number
   lyricFontSize: number
-  lyricAutoScroll: boolean
+  lyricAnimation: boolean
   skipOnError: boolean
+  autoHideChrome: boolean
 }

@@ -15,8 +15,9 @@ const defaultSettings: PlayerSettings = {
   backgroundSaturation: 1.15,
   beatBrightness: 0.28,
   lyricFontSize: 20,
-  lyricAutoScroll: true,
+  lyricAnimation: true,
   skipOnError: true,
+  autoHideChrome: true,
 }
 
 function loadSettings(): PlayerSettings {

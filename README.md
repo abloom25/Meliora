@@ -1,5 +1,7 @@
 # Meliora
 
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fabloom25%2FMeliora)
+
 基于 Vue 3、TypeScript、Pinia 和 SCSS 的沉浸式单页音乐播放器。所有远程歌单和本地音乐会合并为一个匿名曲库，页面不会显示歌单名称、平台或来源。
 
 ## 开发
@@ -93,6 +95,8 @@ pnpm preview
 Vite 使用相对资源路径，因此普通项目仓库和 `username.github.io` 仓库都可以直接部署。
 
 ## Vercel 自动部署
+
+点击顶部的 `Deploy with Vercel` 按钮即可一键克隆并部署到自己的 Vercel 账号。
 
 仓库已经包含 `vercel.json`。在 Vercel 中选择 `Add New > Project` 并导入此 GitHub 仓库，无需修改构建参数：
 

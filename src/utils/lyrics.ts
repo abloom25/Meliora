@@ -125,7 +125,7 @@ function isCreditLine(line: LyricLine): boolean {
 
 export function hasMeaningfulLyrics(lines: LyricLine[]): boolean {
   return lines.some((line) => {
-    if (line.kind === 'gap' || isCreditLine(line)) return false
+    if (isCreditLine(line)) return false
     if (isInstrumentalPlaceholder(line.text)) return false
     if (line.translation && isInstrumentalPlaceholder(line.translation)) return false
     return Boolean(line.text.trim())
@@ -148,31 +148,4 @@ export function findActiveLyricIndex(lines: LyricLine[], currentTime: number): n
     }
   }
   return active
-}
-
-export function insertLyricGapMarkers(
-  lines: LyricLine[],
-  minimumGap = 8,
-): LyricLine[] {
-  if (lines.some((line) => line.time === null)) return lines
-
-  const result: LyricLine[] = []
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]
-    if (!line) continue
-    result.push(line)
-
-    const nextLine = lines[index + 1]
-    if (line.time === null || nextLine?.time === null || nextLine?.time === undefined) continue
-    const gap = nextLine.time - line.time
-    if (gap < minimumGap) continue
-
-    result.push({
-      time: nextLine.time - 3,
-      text: '...',
-      kind: 'gap',
-      endTime: nextLine.time,
-    })
-  }
-  return result
 }

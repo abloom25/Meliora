@@ -1,13 +1,11 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Music2 } from '@lucide/vue'
 import { usePlayerStore } from '../stores/player'
 import { hasCachedLyrics, loadLyricsText } from '../services/lyrics'
 import {
   findActiveLyricIndex,
   hasMeaningfulLyrics,
-  insertLyricGapMarkers,
   parseLyrics,
 } from '../utils/lyrics'
 import type { LyricAvailability, LyricLine, LyricsSnapshot } from '../types/music'
@@ -23,7 +21,7 @@ const { currentTrack, currentTime, settings } = storeToRefs(store)
 const lines = ref<LyricLine[]>([])
 const activeIndex = ref(-1)
 const targetIndex = ref(-1)
-const status = ref<'idle' | 'loading' | 'ready' | 'empty' | 'error'>('idle')
+const status = ref<'idle' | 'ready' | 'empty' | 'error'>('idle')
 const scroller = ref<HTMLElement>()
 const lineElements = ref<HTMLElement[]>([])
 const userScrolling = ref(false)
@@ -37,9 +35,7 @@ function updateStatus(nextStatus: typeof status.value) {
   status.value = nextStatus
   const availability: LyricAvailability = nextStatus === 'ready'
     ? 'available'
-    : nextStatus === 'loading'
-      ? 'loading'
-      : 'unavailable'
+    : 'unavailable'
   emit('availability', availability)
   emitSnapshot()
 }
@@ -64,7 +60,7 @@ async function loadLyrics(url?: string) {
     updateStatus('empty')
     return
   }
-  if (!hasCachedLyrics(url)) updateStatus('loading')
+  if (!hasCachedLyrics(url)) updateStatus('empty')
   lyricsController = new AbortController()
   try {
     const text = await loadLyricsText(url)
@@ -75,7 +71,7 @@ async function loadLyrics(url?: string) {
       updateStatus('empty')
       return
     }
-    lines.value = insertLyricGapMarkers(parsedLines)
+    lines.value = parsedLines
     updateStatus('ready')
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') return
@@ -99,7 +95,7 @@ function cancelLineAnimations() {
 }
 
 function scrollToIndex(index: number, onComplete?: () => void) {
-  if (!settings.value.lyricAutoScroll || userScrolling.value || index < 0) {
+  if (userScrolling.value || index < 0) {
     onComplete?.()
     return
   }
@@ -117,7 +113,7 @@ function scrollToIndex(index: number, onComplete?: () => void) {
     ),
   )
 
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  if (!settings.value.lyricAnimation || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     container.scrollTop = target
     onComplete?.()
     return
@@ -202,26 +198,6 @@ function seekLine(line: LyricLine) {
   if (line.time !== null) emit('seek', line.time)
 }
 
-function visibleCountdownDots(line: LyricLine) {
-  if (line.kind !== 'gap' || line.endTime === undefined) return 0
-  const elapsed = currentTime.value - (line.time ?? currentTime.value)
-  return Math.max(1, Math.min(3, Math.floor(elapsed) + 1))
-}
-
-function gapStyle(line: LyricLine) {
-  if (line.kind !== 'gap' || line.time === null || line.endTime === undefined) return {}
-  const elapsed = currentTime.value - line.time
-  const remaining = line.endTime - currentTime.value
-  const enterProgress = Math.max(0, Math.min(1, elapsed / 0.38))
-  const leaveProgress = Math.max(0, Math.min(1, remaining / 0.48))
-  const visibility = Math.min(enterProgress, leaveProgress)
-  return {
-    '--gap-opacity': visibility.toFixed(3),
-    '--gap-shift': `${((1 - enterProgress) * 5) - ((1 - leaveProgress) * 8)}px`,
-    '--gap-scale': (0.86 + visibility * 0.14).toFixed(3),
-  }
-}
-
 function lyricStyle(index: number) {
   if (activeIndex.value < 0) {
     return {
@@ -254,27 +230,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="lyrics-panel" :class="{ browsing: userScrolling }" aria-label="歌词">
+  <section class="lyrics-panel" :class="{ browsing: userScrolling, 'animation-disabled': !settings.lyricAnimation }" aria-label="歌词">
     <div ref="scroller" class="lyrics-scroll" @wheel.passive="handleScroll" @touchmove.passive="handleScroll">
       <Transition name="lyric-state-change" mode="out-in">
-        <div v-if="status === 'loading'" key="loading" class="lyric-stage">
-          <div class="lyric-state loading-state">
-            <span class="activity-indicator" aria-hidden="true">
-              <i v-for="index in 8" :key="index" :style="{ '--spoke': index - 1 }" />
-            </span>
-            <span>载入歌词</span>
-          </div>
-        </div>
-        <div v-else-if="status === 'empty' || status === 'idle'" key="empty" class="lyric-stage">
-          <div class="lyric-state">
-            <Music2 :size="30" /><strong>暂无歌词</strong><span>让旋律自己说话</span>
-          </div>
-        </div>
-        <div v-else-if="status === 'error'" key="error" class="lyric-stage">
-          <div class="lyric-state">
-            <Music2 :size="30" /><strong>歌词暂时无法载入</strong><span>音乐播放不会受到影响</span>
-          </div>
-        </div>
+        <div v-if="status === 'empty' || status === 'idle' || status === 'error'" key="empty" class="lyric-stage" />
         <div v-else key="lyrics" class="lyric-stage">
           <div class="lyrics-content">
             <button
@@ -285,32 +244,17 @@ onBeforeUnmount(() => {
               :class="{
                 active: index === activeIndex,
                 timed: line.time !== null,
-                gap: line.kind === 'gap',
                 targeted: index === targetIndex,
               }"
               :style="{
                 '--lyric-size': `${settings.lyricFontSize}px`,
                 ...lyricStyle(index),
-                ...gapStyle(line),
               }"
-              :disabled="line.time === null || line.kind === 'gap'"
+              :disabled="line.time === null"
               @click="seekLine(line)"
             >
-              <span
-                v-if="line.kind === 'gap' && index === activeIndex"
-                class="waiting-dots"
-                :aria-label="`下一句还有 ${visibleCountdownDots(line)} 秒`"
-              >
-                <i
-                  v-for="dot in 3"
-                  :key="dot"
-                  :class="{ pending: dot > visibleCountdownDots(line) }"
-                />
-              </span>
-              <template v-else-if="line.kind !== 'gap'">
-                <span class="lyric-original">{{ line.text }}</span>
-                <span v-if="line.translation" class="lyric-translation">{{ line.translation }}</span>
-              </template>
+              <span class="lyric-original">{{ line.text }}</span>
+              <span v-if="line.translation" class="lyric-translation">{{ line.translation }}</span>
             </button>
           </div>
         </div>
@@ -413,25 +357,6 @@ onBeforeUnmount(() => {
       0 8px 34px rgba(0, 0, 0, 0.3);
   }
 
-  &.gap {
-    min-height: 34px;
-    filter: none;
-    opacity: 0.48;
-  }
-
-  &.gap:not(.active):not(.targeted) {
-    display: none;
-  }
-
-  &.gap.targeted:not(.active) {
-    display: block;
-    visibility: hidden;
-  }
-
-  &.gap.active {
-    opacity: 1;
-    text-shadow: none;
-  }
 }
 
 .lyric-original,
@@ -456,34 +381,6 @@ onBeforeUnmount(() => {
   opacity: 0.76;
 }
 
-.waiting-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  opacity: var(--gap-opacity, 0);
-  transform:
-    translateY(var(--gap-shift, 0))
-    scale(var(--gap-scale, 0.86));
-  transition: opacity 90ms linear, transform 90ms linear;
-
-  i {
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
-    background: currentColor;
-    opacity: 0.92;
-    transform: scale(1);
-    transition:
-      opacity 320ms cubic-bezier(0.22, 1, 0.36, 1),
-      transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
-
-    &.pending {
-      opacity: 0;
-      transform: scale(0.35);
-    }
-  }
-}
-
 .lyrics-panel.browsing .lyric-line {
   opacity: 0.72;
   filter: blur(0);
@@ -499,51 +396,24 @@ onBeforeUnmount(() => {
   }
 }
 
-.lyric-state {
-  display: flex;
-  height: 100%;
-  align-items: flex-start;
-  justify-content: center;
-  flex-direction: column;
-  gap: 10px;
-  padding-left: 6%;
-  color: var(--text-subtle);
-
-  strong { color: var(--text); font-size: 1.15rem; }
-  span { font-size: 0.82rem; }
-}
-
-.loading-state {
-  gap: 12px;
-  color: rgba(255, 255, 255, 0.38);
-}
-
-.activity-indicator {
-  position: relative;
-  width: 22px;
-  height: 22px;
-
-  i {
-    position: absolute;
-    top: 9px;
-    left: 9px;
-    width: 4px;
-    height: 4px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.9);
-    opacity: 0.16;
-    transform:
-      rotate(calc(var(--spoke) * 45deg))
-      translateY(-8px);
-    animation: activity-spoke 880ms linear infinite;
-    animation-delay: calc(var(--spoke) * -110ms);
+.lyrics-panel.animation-disabled {
+  .lyric-state-change-enter-active,
+  .lyric-state-change-leave-active,
+  .lyric-line,
+  .lyric-original,
+  .lyric-translation {
+    transition-duration: 0ms;
+    animation-duration: 0ms;
   }
-}
 
-@keyframes activity-spoke {
-  0% { opacity: 0.92; }
-  25% { opacity: 0.48; }
-  100% { opacity: 0.14; }
+  .lyric-line {
+    will-change: auto;
+  }
+
+  .lyric-line.active .lyric-original,
+  .lyric-line.active .lyric-translation {
+    scale: 1;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -554,10 +424,6 @@ onBeforeUnmount(() => {
 
   .lyric-line {
     transition-duration: 0ms;
-  }
-
-  .activity-indicator i {
-    animation-duration: 1.6s;
   }
 
 }

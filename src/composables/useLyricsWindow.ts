@@ -83,19 +83,7 @@ export function useLyricsWindow({
     background.style.backgroundImage = track?.cover ? `url("${track.cover.replaceAll('"', '\\"')}")` : 'none'
     lyrics.replaceChildren()
 
-    if (snapshot.value.status === 'loading') {
-      const state = document.createElement('div')
-      state.className = 'state'
-      state.textContent = '载入歌词…'
-      lyrics.append(state)
-      return
-    }
-
     if (snapshot.value.status !== 'ready' || !snapshot.value.lines.length) {
-      const state = document.createElement('div')
-      state.className = 'state'
-      state.textContent = '暂无歌词'
-      lyrics.append(state)
       return
     }
 
@@ -103,7 +91,6 @@ export function useLyricsWindow({
     const start = Math.max(0, active - 1)
     const end = Math.min(snapshot.value.lines.length, active + 3)
     snapshot.value.lines.slice(start, end).forEach((line, offset) => {
-      if (line.kind === 'gap') return
       const index = start + offset
       const element = document.createElement('div')
       element.className = `line ${index === active ? 'active' : index < active ? 'before' : 'after'}`

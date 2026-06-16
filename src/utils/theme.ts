@@ -11,6 +11,7 @@ interface RGB {
 }
 
 const themeCache = new Map<string, ThemeColor | null>()
+const PALETTE_BUCKET_SIZE = 28
 
 function rgbToHsl({ r, g, b }: RGB) {
   const red = r / 255
@@ -59,8 +60,9 @@ function hslToRgb(hue: number, saturation: number, lightness: number): RGB {
 
 export function createThemeColor(color: RGB): ThemeColor {
   const { hue, saturation } = rgbToHsl(color)
-  const accent = hslToRgb(hue, Math.max(0.58, saturation), 0.62)
-  const soft = hslToRgb(hue, Math.max(0.42, saturation * 0.78), 0.74)
+  const resolvedSaturation = Math.max(0.32, Math.min(0.56, saturation * 0.82))
+  const accent = hslToRgb(hue, resolvedSaturation, 0.62)
+  const soft = hslToRgb(hue, Math.max(0.24, resolvedSaturation * 0.68), 0.75)
   return {
     accent: `rgb(${accent.r} ${accent.g} ${accent.b})`,
     accentSoft: `rgb(${soft.r} ${soft.g} ${soft.b})`,
@@ -68,20 +70,27 @@ export function createThemeColor(color: RGB): ThemeColor {
   }
 }
 
+function colorBucketKey({ r, g, b }: RGB) {
+  return [
+    Math.round(r / PALETTE_BUCKET_SIZE),
+    Math.round(g / PALETTE_BUCKET_SIZE),
+    Math.round(b / PALETTE_BUCKET_SIZE),
+  ].join(':')
+}
+
 export function extractThemeColor(image: HTMLImageElement): ThemeColor | null {
   const canvas = document.createElement('canvas')
-  canvas.width = 32
-  canvas.height = 32
+  canvas.width = 48
+  canvas.height = 48
   const context = canvas.getContext('2d', { willReadFrequently: true })
   if (!context) return null
 
   try {
     context.drawImage(image, 0, 0, canvas.width, canvas.height)
     const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data
-    let best: RGB | null = null
-    let bestScore = -1
+    const palette = new Map<string, { color: RGB, count: number, saturation: number, lightness: number }>()
 
-    for (let index = 0; index < pixels.length; index += 16) {
+    for (let index = 0; index < pixels.length; index += 4) {
       const alpha = pixels[index + 3] ?? 0
       if (alpha < 180) continue
       const color = {
@@ -90,8 +99,43 @@ export function extractThemeColor(image: HTMLImageElement): ThemeColor | null {
         b: pixels[index + 2] ?? 0,
       }
       const { saturation, lightness } = rgbToHsl(color)
-      if (lightness < 0.16 || lightness > 0.88 || saturation < 0.16) continue
-      const score = saturation * 1.45 + (1 - Math.abs(lightness - 0.52)) * 0.7
+      if (lightness < 0.16 || lightness > 0.9 || saturation < 0.12) continue
+
+      const key = colorBucketKey(color)
+      const bucket = palette.get(key)
+      if (bucket) {
+        bucket.color.r += color.r
+        bucket.color.g += color.g
+        bucket.color.b += color.b
+        bucket.count += 1
+        bucket.saturation += saturation
+        bucket.lightness += lightness
+      } else {
+        palette.set(key, {
+          color: { ...color },
+          count: 1,
+          saturation,
+          lightness,
+        })
+      }
+    }
+
+    let best: RGB | null = null
+    let bestScore = -1
+    const total = [...palette.values()].reduce((sum, bucket) => sum + bucket.count, 0)
+
+    for (const bucket of palette.values()) {
+      const color = {
+        r: Math.round(bucket.color.r / bucket.count),
+        g: Math.round(bucket.color.g / bucket.count),
+        b: Math.round(bucket.color.b / bucket.count),
+      }
+      const saturation = bucket.saturation / bucket.count
+      const lightness = bucket.lightness / bucket.count
+      const coverage = total ? bucket.count / total : 0
+      const score = Math.sqrt(coverage) * 2.2
+        + Math.min(saturation, 0.72) * 0.85
+        + (1 - Math.abs(lightness - 0.5)) * 0.65
       if (score > bestScore) {
         best = color
         bestScore = score

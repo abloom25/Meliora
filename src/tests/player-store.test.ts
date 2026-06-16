@@ -4,9 +4,27 @@ import { usePlayerStore } from '../stores/player'
 import type { Track } from '../types/music'
 
 const tracks: Track[] = [
-  { id: '1', title: 'One', artist: 'A', audioUrl: '/1.mp3', kind: 'local' },
-  { id: '2', title: 'Two', artist: 'B', audioUrl: '/2.mp3', kind: 'local' },
-  { id: '3', title: 'Three', artist: 'C', audioUrl: '/3.mp3', kind: 'local' },
+  {
+    id: '1',
+    title: 'One',
+    artist: 'A',
+    audioUrl: '/1.mp3',
+    kind: 'local',
+  },
+  {
+    id: '2',
+    title: 'Two',
+    artist: 'B',
+    audioUrl: '/2.mp3',
+    kind: 'local',
+  },
+  {
+    id: '3',
+    title: 'Three',
+    artist: 'C',
+    audioUrl: '/3.mp3',
+    kind: 'local',
+  },
 ]
 
 describe('player store', () => {

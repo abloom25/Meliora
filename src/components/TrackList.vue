@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { ComponentPublicInstance } from 'vue'
 import { ListMusic, Music, Play, RefreshCw, Search, Shuffle, X } from '@lucide/vue'
 import type { Track } from '../types/music'
+import { splitDisplayTitle } from '../utils/title'
 
-defineProps<{
+const props = defineProps<{
   tracks: Track[]
   total: number
   currentTrackId: string | null
@@ -23,7 +25,11 @@ const emit = defineEmits<{
 const loadedCovers = ref(new Set<string>())
 const failedCovers = ref(new Set<string>())
 const isScrolling = ref(false)
+const trackList = ref<HTMLElement | null>(null)
+const activeTrackElement = ref<HTMLElement | null>(null)
+const focusPulseTrackId = ref<string | null>(null)
 let scrollTimer = 0
+let focusTimer = 0
 
 function markCoverLoaded(trackId: string) {
   loadedCovers.value = new Set(loadedCovers.value).add(trackId)
@@ -41,7 +47,37 @@ function handleListScroll() {
   }, 850)
 }
 
-onBeforeUnmount(() => window.clearTimeout(scrollTimer))
+function bindActiveTrackElement(trackId: string, element: Element | ComponentPublicInstance | null) {
+  if (trackId !== props.currentTrackId) return
+  activeTrackElement.value = element instanceof HTMLElement ? element : null
+}
+
+async function scrollActiveTrackIntoView(animate = true) {
+  if (!props.currentTrackId) return
+  await nextTick()
+  const scroller = trackList.value
+  const activeElement = activeTrackElement.value
+  if (!scroller || !activeElement) return
+
+  const targetTop = activeElement.offsetTop - (scroller.clientHeight - activeElement.offsetHeight) / 2
+  scroller.scrollTo({
+    top: Math.max(0, targetTop),
+    behavior: animate ? 'smooth' : 'auto',
+  })
+  focusPulseTrackId.value = props.currentTrackId
+  window.clearTimeout(focusTimer)
+  focusTimer = window.setTimeout(() => {
+    if (focusPulseTrackId.value === props.currentTrackId) focusPulseTrackId.value = null
+  }, 1200)
+}
+
+onMounted(() => void scrollActiveTrackIntoView(false))
+watch(() => props.currentTrackId, () => void scrollActiveTrackIntoView())
+watch(() => props.tracks.map((track) => track.id).join('|'), () => void scrollActiveTrackIntoView(false))
+onBeforeUnmount(() => {
+  window.clearTimeout(scrollTimer)
+  window.clearTimeout(focusTimer)
+})
 </script>
 
 <template>
@@ -53,33 +89,36 @@ onBeforeUnmount(() => window.clearTimeout(scrollTimer))
       </div>
     </header>
 
-    <div class="search-row">
-      <label class="search-box">
-        <Search :size="16" />
-        <input
-          :value="query"
-          type="search"
-          placeholder="搜索"
-          @input="emit('update:query', ($event.target as HTMLInputElement).value)"
-        />
-        <button v-if="query" aria-label="清空搜索" @click="emit('update:query', '')"><X :size="14" /></button>
-      </label>
-      <button class="reload-button" aria-label="重新加载歌曲" title="重新加载歌曲" :disabled="loading" @click="emit('reload')">
-        <RefreshCw :size="16" :class="{ spinning: loading }" />
-      </button>
+    <div class="list-toolbar">
+      <div class="search-row">
+        <label class="search-box">
+          <Search :size="16" />
+          <input
+            :value="query"
+            type="search"
+            placeholder="搜索"
+            @input="emit('update:query', ($event.target as HTMLInputElement).value)"
+          />
+          <button v-if="query" aria-label="清空搜索" @click="emit('update:query', '')"><X :size="14" /></button>
+        </label>
+        <button class="reload-button" aria-label="重新加载歌曲" title="重新加载歌曲" :disabled="loading" @click="emit('reload')">
+          <RefreshCw :size="16" :class="{ spinning: loading }" />
+        </button>
+      </div>
+
+      <div class="list-actions">
+        <button :disabled="!tracks.length" @click="emit('playAll')"><Play :size="15" fill="currentColor" />播放</button>
+        <button :disabled="!tracks.length" @click="emit('shuffle')"><Shuffle :size="15" />随机播放</button>
+      </div>
     </div>
 
-    <div class="list-actions">
-      <button :disabled="!tracks.length" @click="emit('playAll')"><Play :size="15" fill="currentColor" />播放</button>
-      <button :disabled="!tracks.length" @click="emit('shuffle')"><Shuffle :size="15" />随机播放</button>
-    </div>
-
-    <div class="track-list" :class="{ scrolling: isScrolling }" @scroll.passive="handleListScroll">
+    <div ref="trackList" class="track-list" :class="{ scrolling: isScrolling }" @scroll.passive="handleListScroll">
       <button
         v-for="(track, index) in tracks"
         :key="track.id"
+        :ref="(element) => bindActiveTrackElement(track.id, element)"
         class="track-item"
-        :class="{ active: track.id === currentTrackId }"
+        :class="{ active: track.id === currentTrackId, focused: track.id === focusPulseTrackId }"
         @click="emit('select', track)"
       >
         <span class="thumb" :class="{ loaded: loadedCovers.has(track.id) }">
@@ -94,7 +133,21 @@ onBeforeUnmount(() => window.clearTimeout(scrollTimer))
           />
         </span>
         <span class="track-copy">
-          <strong>{{ track.title }}</strong>
+          <strong>
+            <span class="track-title-main">{{ splitDisplayTitle(track.title).title }}</span>
+            <span
+              v-if="splitDisplayTitle(track.title).versions.length"
+              class="track-title-versions"
+            >
+              <span
+                v-for="version in splitDisplayTitle(track.title).versions"
+                :key="version"
+                class="track-title-version"
+              >
+                {{ version }}
+              </span>
+            </span>
+          </strong>
           <small>{{ track.artist }}</small>
         </span>
         <span class="track-status">
@@ -160,6 +213,15 @@ onBeforeUnmount(() => window.clearTimeout(scrollTimer))
 
   &:hover { background: rgba(255, 255, 255, 0.13); color: #fff; }
   &:disabled { cursor: wait; opacity: 0.55; }
+}
+
+.list-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: 0 -4px;
+  padding: 0 4px 6px;
+  background: transparent;
 }
 
 .search-row {
@@ -238,8 +300,16 @@ onBeforeUnmount(() => window.clearTimeout(scrollTimer))
   min-height: 0;
   flex: 1;
   overflow-y: auto;
+  padding-bottom: 18px;
   scrollbar-color: transparent transparent;
   scrollbar-width: thin;
+  mask-image: linear-gradient(
+    180deg,
+    transparent 0,
+    #000 24px,
+    #000 calc(100% - 34px),
+    transparent 100%
+  );
   transition: scrollbar-color 180ms ease;
 
   &.scrolling {
@@ -287,6 +357,14 @@ onBeforeUnmount(() => window.clearTimeout(scrollTimer))
 
     .track-copy strong,
     .track-status { color: var(--accent); }
+
+    .track-title-version {
+      color: color-mix(in srgb, var(--accent) 68%, rgba(255, 255, 255, 0.52));
+    }
+  }
+
+  &.focused {
+    animation: focus-glow 1.15s ease both;
   }
 }
 
@@ -340,7 +418,47 @@ onBeforeUnmount(() => window.clearTimeout(scrollTimer))
     white-space: nowrap;
   }
 
-  strong { color: rgba(255, 255, 255, 0.93); font-size: 0.78rem; font-weight: 560; }
+  strong {
+    display: flex;
+    max-width: 100%;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+    color: rgba(255, 255, 255, 0.93);
+    font-size: 0.78rem;
+    font-weight: 560;
+  }
+
+  .track-title-main {
+    min-width: 0;
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .track-title-versions {
+    display: inline-flex;
+    max-width: 118px;
+    flex: 0 999 118px;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 24px), transparent);
+  }
+
+  .track-title-version {
+    display: inline-block;
+    flex: 0 0 auto;
+    color: rgba(255, 255, 255, 0.62);
+    font-size: 0.78em;
+    font-weight: 620;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
   small { color: var(--text-subtle); font-size: 0.66rem; }
 }
 
@@ -391,6 +509,11 @@ onBeforeUnmount(() => window.clearTimeout(scrollTimer))
 .spinning { animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes equalize { to { height: 20%; } }
+@keyframes focus-glow {
+  0% { background: color-mix(in srgb, var(--accent) 28%, transparent); transform: scale(0.992); }
+  45% { background: color-mix(in srgb, var(--accent) 22%, transparent); transform: scale(1); }
+  100% { background: color-mix(in srgb, var(--accent) 14%, transparent); transform: scale(1); }
+}
 
 @media (max-width: 720px) {
   .track-panel {

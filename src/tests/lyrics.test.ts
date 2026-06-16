@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   findActiveLyricIndex,
   hasMeaningfulLyrics,
-  insertLyricGapMarkers,
   isInstrumentalPlaceholder,
   parseLyrics,
   splitLyricTranslation,
@@ -57,16 +56,6 @@ describe('parseLyrics', () => {
     expect(findActiveLyricIndex(lines, 0.5)).toBe(-1)
     expect(findActiveLyricIndex(lines, 3.2)).toBe(1)
     expect(findActiveLyricIndex(lines, 20)).toBe(2)
-  })
-
-  it('inserts a waiting marker between lyrics with a long gap', () => {
-    const lines = parseLyrics('[00:02]One\n[00:14]Two\n[00:18]Three')
-    expect(insertLyricGapMarkers(lines)).toEqual([
-      { time: 2, text: 'One' },
-      { time: 11, text: '...', kind: 'gap', endTime: 14 },
-      { time: 14, text: 'Two' },
-      { time: 18, text: 'Three' },
-    ])
   })
 
   it('extracts only the final balanced translation group', () => {

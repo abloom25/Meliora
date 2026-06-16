@@ -3,8 +3,20 @@ import { deduplicateTracks, filterTracks, mapMetingTrack } from '../utils/tracks
 import type { Track } from '../types/music'
 
 const tracks: Track[] = [
-  { id: '1', title: 'Echoes in the Sky', artist: 'ABloom', audioUrl: '/one.mp3', kind: 'local' },
-  { id: '2', title: 'Neon Mirage', artist: 'Night Drive', audioUrl: '/two.mp3', kind: 'local' },
+  {
+    id: '1',
+    title: 'Echoes in the Sky',
+    artist: 'ABloom',
+    audioUrl: '/one.mp3',
+    kind: 'local',
+  },
+  {
+    id: '2',
+    title: 'Neon Mirage',
+    artist: 'Night Drive',
+    audioUrl: '/two.mp3',
+    kind: 'local',
+  },
 ]
 
 describe('track utilities', () => {
@@ -22,7 +34,9 @@ describe('track utilities', () => {
   it('rejects incomplete Meting entries', () => {
     expect(mapMetingTrack({ title: 'Missing URL' }, 'source', 0)).toBeNull()
     expect(mapMetingTrack({ title: 'Song', author: '', url: '/audio' }, 'source', 1)).toMatchObject({
-      title: 'Song', artist: '未知艺术家', kind: 'meting',
+      title: 'Song',
+      artist: '未知艺术家',
+      kind: 'meting',
     })
   })
 })

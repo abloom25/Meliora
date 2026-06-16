@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import {
   Pause,
@@ -21,7 +21,9 @@ const props = withDefaults(defineProps<{
 
 const store = usePlayerStore()
 const { isPlaying, currentTime, duration } = storeToRefs(store)
-const progress = computed(() => (duration.value ? (currentTime.value / duration.value) * 100 : 0))
+const draftTime = ref<number | null>(null)
+const displayTime = computed(() => draftTime.value ?? currentTime.value)
+const progress = computed(() => (duration.value ? (displayTime.value / duration.value) * 100 : 0))
 
 function formatTime(value: number) {
   if (!Number.isFinite(value)) return '0:00'
@@ -30,13 +32,27 @@ function formatTime(value: number) {
 
 function formatRemaining() {
   if (!Number.isFinite(duration.value) || duration.value <= 0) return '-0:00'
-  return `-${formatTime(Math.max(0, duration.value - currentTime.value))}`
+  return `-${formatTime(Math.max(0, duration.value - displayTime.value))}`
 }
 
 function updateProgress(event: Event) {
-  props.onSeek(Number((event.target as HTMLInputElement).value))
+  draftTime.value = Number((event.target as HTMLInputElement).value)
 }
 
+function beginProgressDrag(event: Event) {
+  draftTime.value = Number((event.target as HTMLInputElement).value)
+}
+
+function commitProgress(event: Event) {
+  if (draftTime.value === null) return
+  const nextTime = Number((event.target as HTMLInputElement).value)
+  draftTime.value = null
+  props.onSeek(nextTime)
+}
+
+watch(currentTime, () => {
+  if (draftTime.value !== null && !Number.isFinite(draftTime.value)) draftTime.value = null
+})
 </script>
 
 <template>
@@ -56,21 +72,24 @@ function updateProgress(event: Event) {
       </div>
 
       <div v-if="variant !== 'bar'" class="progress-row">
-        <span v-if="variant === 'progress'" class="time elapsed">{{ formatTime(currentTime) }}</span>
+        <span v-if="variant === 'progress'" class="time elapsed">{{ formatTime(displayTime) }}</span>
         <input
           class="range progress"
           type="range"
           min="0"
           :max="duration || 0"
           step="0.1"
-          :value="currentTime"
+          :value="displayTime"
           :style="{ '--range-progress': `${progress}%` }"
           aria-label="播放进度"
+          @pointerdown="beginProgressDrag"
           @input="updateProgress"
+          @change="commitProgress"
+          @pointerup="commitProgress"
         />
         <span v-if="variant === 'progress'" class="time remaining">{{ formatRemaining() }}</span>
         <div v-else class="time-row">
-          <span>{{ formatTime(currentTime) }}</span>
+          <span>{{ formatTime(displayTime) }}</span>
           <span>{{ formatRemaining() }}</span>
         </div>
       </div>
@@ -133,7 +152,7 @@ function updateProgress(event: Event) {
   place-items: center;
   border: 0;
   background: transparent;
-  color: var(--text);
+  color: rgba(255, 255, 255, 0.66);
   cursor: pointer;
   transition: opacity 160ms ease, transform 160ms ease, background 160ms ease;
 
@@ -152,18 +171,19 @@ function updateProgress(event: Event) {
   width: 34px;
   height: 32px;
   border-radius: 50%;
-  opacity: 0.82;
+  opacity: 0.78;
 }
 
 .play-button {
   width: 38px;
   height: 38px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.96);
-  color: #171719;
+  background: rgba(255, 255, 255, 0.88);
+  color: rgba(18, 18, 20, 0.86);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.38);
 
   &:hover {
-    background: #fff;
+    background: rgba(255, 255, 255, 0.94);
   }
 }
 
@@ -218,17 +238,37 @@ function updateProgress(event: Event) {
 }
 
 .range {
+  --track-height: 11px;
   width: 100%;
-  height: 7px;
+  height: 16px;
   margin: 0;
   appearance: none;
   border-radius: 99px;
-  background: linear-gradient(
-    to right,
-    rgba(255, 255, 255, 0.88) 0 var(--range-progress),
-    rgba(255, 255, 255, 0.19) var(--range-progress) 100%
-  );
+  background: transparent;
   cursor: pointer;
+  transition: background 160ms ease;
+
+  &::-webkit-slider-runnable-track {
+    height: var(--track-height);
+    border-radius: 99px;
+    background: linear-gradient(
+      to right,
+      rgba(255, 255, 255, 0.56) 0 var(--range-progress),
+      rgba(255, 255, 255, 0.19) var(--range-progress) 100%
+    );
+    transition: height 160ms ease, background 160ms ease;
+  }
+
+  &::-moz-range-track {
+    height: var(--track-height);
+    border-radius: 99px;
+    background: linear-gradient(
+      to right,
+      rgba(255, 255, 255, 0.56) 0 var(--range-progress),
+      rgba(255, 255, 255, 0.19) var(--range-progress) 100%
+    );
+    transition: height 160ms ease, background 160ms ease;
+  }
 
   &::-webkit-slider-thumb {
     width: 0;
@@ -238,6 +278,12 @@ function updateProgress(event: Event) {
   }
 
   &::-moz-range-thumb { width: 0; height: 0; border: 0; }
+}
+
+.progress-row:hover .range,
+.range:focus-visible,
+.range:active {
+  --track-height: 14px;
 }
 
 .is-page {
@@ -259,11 +305,11 @@ function updateProgress(event: Event) {
   .play-button {
     width: 58px;
     height: 58px;
-    background: rgba(255, 255, 255, 0.95);
-    color: #161618;
+    background: rgba(255, 255, 255, 0.86);
+    color: rgba(18, 18, 20, 0.86);
 
     &:hover {
-      background: #fff;
+      background: rgba(255, 255, 255, 0.94);
     }
   }
 
@@ -292,8 +338,8 @@ function updateProgress(event: Event) {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: #fff;
-  color: #171719;
+  background: rgba(255, 255, 255, 0.86);
+  color: rgba(18, 18, 20, 0.86);
 }
 
 .is-mini .mini-play {
@@ -319,10 +365,28 @@ function updateProgress(event: Event) {
   }
 
   .is-page .range {
-    height: 9px;
+    --track-height: 11px;
+  }
+
+  .is-page .progress-row:hover .range,
+  .is-page .range:focus-visible,
+  .is-page .range:active {
+    --track-height: 14px;
+  }
+
+  .is-page .range::-webkit-slider-runnable-track {
     background: linear-gradient(
       to right,
-      rgba(255, 255, 255, 0.94) 0 var(--range-progress),
+      rgba(255, 255, 255, 0.58) 0 var(--range-progress),
+      rgba(255, 255, 255, 0.22) var(--range-progress) 100%
+    );
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.16);
+  }
+
+  .is-page .range::-moz-range-track {
+    background: linear-gradient(
+      to right,
+      rgba(255, 255, 255, 0.58) 0 var(--range-progress),
       rgba(255, 255, 255, 0.22) var(--range-progress) 100%
     );
     box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.16);
@@ -352,6 +416,9 @@ function updateProgress(event: Event) {
   .is-page .transport-buttons { gap: 28px; }
   .is-page .play-button { width: 54px; height: 54px; }
   .is-page .control-button { width: 40px; height: 40px; }
-  .is-page .range { height: 8px; }
+  .is-page .range { --track-height: 10px; }
+  .is-page .progress-row:hover .range,
+  .is-page .range:focus-visible,
+  .is-page .range:active { --track-height: 13px; }
 }
 </style>
