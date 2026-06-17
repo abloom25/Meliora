@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1-rc.1] - 2026-06-17
+
+### Added
+
+- 曲库全部加载失败时显示居中空态文案,并保留重新加载入口
+- 断网与恢复联网时复用顶部 toast 提示当前网络状态
+- 移动端曲库/设置抽屉支持全屏、半屏、关闭三段吸附与把手拖拽
+
+### Changed
+
+- 移动端抽屉关闭改为更接近 iOS 的手势判定:慢速下滑停到半屏,快速下甩直接关闭
+- 进度条与设置滑杆扩大触摸热区,减少移动端滑动误触抽屉
+
+### Fixed
+
+- 修复 `Esc` 关闭移动端抽屉时缺少滑下动画的问题
+- 修复移动端抽屉拖拽后切换到桌面宽度可能残留 inline transform 的问题
+
 ## [0.1.0] - 2026-06-17
 
 首个公开版本。
@@ -44,4 +62,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 修复方向键 seek 行为错误:`←` / `→` 之前会被当作绝对时间(直接跳到第 0 秒 / 第 5 秒),现已正确实现"相对当前位置 ±5 秒"的语义
 
+[0.1.1-rc.1]: https://github.com/abloom25/Meliora/releases/tag/v0.1.1-rc.1
 [0.1.0]: https://github.com/abloom25/Meliora/releases/tag/v0.1.0

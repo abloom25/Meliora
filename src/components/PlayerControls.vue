@@ -50,6 +50,10 @@
     props.onSeek(nextTime)
   }
 
+  function cancelProgressDrag() {
+    draftTime.value = null
+  }
+
   watch(currentTime, () => {
     if (draftTime.value !== null && !Number.isFinite(draftTime.value)) draftTime.value = null
   })
@@ -88,6 +92,9 @@
           @input="updateProgress"
           @change="commitProgress"
           @pointerup="commitProgress"
+          @pointercancel="cancelProgressDrag"
+          @touchstart.stop
+          @touchmove.stop
         />
         <span v-if="variant === 'progress'" class="time remaining">{{ formatRemaining() }}</span>
         <div v-else class="time-row">
@@ -249,12 +256,14 @@
   .range {
     --track-height: 11px;
     width: 100%;
-    height: 16px;
+    height: 28px;
     margin: 0;
     appearance: none;
     border-radius: 99px;
     background: transparent;
     cursor: pointer;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
     transition: background 160ms ease;
 
     &::-webkit-slider-runnable-track {
@@ -284,16 +293,23 @@
     }
 
     &::-webkit-slider-thumb {
-      width: 0;
-      height: 0;
+      width: 24px;
+      height: 24px;
       appearance: none;
       border: 0;
+      border-radius: 50%;
+      background: transparent;
+      margin-top: calc((var(--track-height) - 24px) / 2);
+      cursor: pointer;
     }
 
     &::-moz-range-thumb {
-      width: 0;
-      height: 0;
+      width: 24px;
+      height: 24px;
       border: 0;
+      border-radius: 50%;
+      background: transparent;
+      cursor: pointer;
     }
   }
 

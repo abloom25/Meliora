@@ -33,6 +33,7 @@
   import { useKeyboardShortcuts } from './composables/useKeyboardShortcuts'
   import { useCoverCache } from './composables/useCoverCache'
   import { useFocusTrap } from './composables/useFocusTrap'
+  import { useDrawerSheet } from './composables/useDrawerSheet'
   import LyricsPanel from './components/LyricsPanel.vue'
   import PlayerControls from './components/PlayerControls.vue'
   import TrackList from './components/TrackList.vue'
@@ -117,6 +118,7 @@
 
   const query = ref('')
   const loading = ref(true)
+  const loadFailed = ref(false)
   const failedSources = ref(0)
   const settingsOpen = ref(false)
   const listOpen = ref(false)
@@ -141,12 +143,79 @@
   // Focus trap refs
   const libraryDrawerRef = ref<HTMLElement | null>(null)
   const settingsDrawerRef = ref<HTMLElement | null>(null)
+  const libraryHandleRef = ref<HTMLElement | null>(null)
+  const settingsHandleRef = ref<HTMLElement | null>(null)
   const libraryOpenerRef = ref<HTMLElement | null>(null)
   const settingsOpenerRef = ref<HTMLElement | null>(null)
 
   // Focus trap for drawers
-  useFocusTrap(libraryDrawerRef, listOpen, closePanels)
-  useFocusTrap(settingsDrawerRef, settingsOpen, closePanels)
+  useFocusTrap(libraryDrawerRef, listOpen, closePanelsAnimated)
+  useFocusTrap(settingsDrawerRef, settingsOpen, closePanelsAnimated)
+
+  // Pull-to-dismiss gesture (mobile only)
+  const isMobileViewport = () => phoneDevice.value || compactViewport.value
+  function getSheetHeight(el: HTMLElement | null): number {
+    if (!el) return window.innerHeight
+    const h = el.getBoundingClientRect().height
+    return h > 0 ? h : window.innerHeight
+  }
+  const {
+    detent: libraryDetent,
+    dragging: libraryDragging,
+    translateY: libraryTranslateY,
+    resetPosition: resetLibraryDrawerPosition,
+    dismissAnimated: libraryDismissAnimated,
+  } = useDrawerSheet({
+    containerRef: libraryDrawerRef,
+    handleRef: libraryHandleRef,
+    active: listOpen,
+    onDismiss: closePanels,
+    sheetHeight: () => getSheetHeight(libraryDrawerRef.value),
+    enabled: isMobileViewport,
+  })
+  const {
+    detent: settingsDetent,
+    dragging: settingsDragging,
+    translateY: settingsTranslateY,
+    resetPosition: resetSettingsDrawerPosition,
+    dismissAnimated: settingsDismissAnimated,
+  } = useDrawerSheet({
+    containerRef: settingsDrawerRef,
+    handleRef: settingsHandleRef,
+    active: settingsOpen,
+    onDismiss: closePanels,
+    sheetHeight: () => getSheetHeight(settingsDrawerRef.value),
+    enabled: isMobileViewport,
+  })
+  const libraryDrawerStyle = computed(() => {
+    if (!isMobileViewport()) return {}
+    return {
+      transform: `translateY(${libraryTranslateY.value}px)`,
+      transition: libraryDragging.value ? 'none' : undefined,
+    }
+  })
+  const settingsDrawerStyle = computed(() => {
+    if (!isMobileViewport()) return {}
+    return {
+      transform: `translateY(${settingsTranslateY.value}px)`,
+      transition: settingsDragging.value ? 'none' : undefined,
+    }
+  })
+  const anyDrawerHalf = computed(
+    () => libraryDetent.value === 'half' || settingsDetent.value === 'half',
+  )
+
+  function resetDrawerPositions() {
+    resetLibraryDrawerPosition(listOpen.value ? 'full' : 'closed')
+    resetSettingsDrawerPosition(settingsOpen.value ? 'full' : 'closed')
+  }
+
+  function onTopbarClick(e: MouseEvent) {
+    if (!listOpen.value && !settingsOpen.value) return
+    const target = e.target as HTMLElement | null
+    if (target && target.closest('button, a, [role="button"], input, label')) return
+    closePanelsAnimated()
+  }
 
   const filteredTracks = computed(() => filterTracks(store.tracks, query.value))
   const currentDisplayTitle = computed(() =>
@@ -200,9 +269,18 @@
     window.clearTimeout(noticeTimer)
   }
 
+  function showOfflineNotice() {
+    showNotice('已进入离线模式,正在使用缓存内容')
+  }
+
+  function showOnlineNotice() {
+    showNotice('网络已恢复')
+  }
+
   async function loadTracks() {
     loading.value = true
     sourceWarning.value = ''
+    loadFailed.value = false
     clearNotice()
     try {
       const result = await loadConfiguredTracks()
@@ -215,9 +293,13 @@
         sourceWarning.value = `${result.failedSources} 个音乐源暂时无法载入`
         showNotice(sourceWarning.value)
       }
-      if (!result.tracks.length) showNotice('没有载入到可播放的歌曲')
+      if (!result.tracks.length) {
+        loadFailed.value = true
+        showNotice('没有载入到可播放的歌曲')
+      }
     } catch {
-      showNotice('音乐列表载入失败，请稍后重试')
+      loadFailed.value = true
+      showNotice('音乐列表载入失败,请稍后重试')
     } finally {
       loading.value = false
     }
@@ -234,18 +316,59 @@
     settingsOpen.value = false
   }
 
+  function closePanelsAnimated() {
+    if (!isMobileViewport()) {
+      closePanels()
+      return
+    }
+    triggerHaptic('light')
+    if (listOpen.value) {
+      libraryDismissAnimated()
+    }
+    if (settingsOpen.value) {
+      settingsDismissAnimated()
+    }
+  }
+
   function toggleLibrary() {
     triggerHaptic('light')
-    const nextOpen = !listOpen.value
-    listOpen.value = nextOpen
-    if (nextOpen) settingsOpen.value = false
+    if (listOpen.value) {
+      // Closing the currently-open library
+      if (isMobileViewport()) {
+        libraryDismissAnimated()
+      } else {
+        listOpen.value = false
+      }
+      return
+    }
+    listOpen.value = true
+    if (settingsOpen.value) {
+      if (isMobileViewport()) {
+        settingsDismissAnimated()
+      } else {
+        settingsOpen.value = false
+      }
+    }
   }
 
   function toggleSettings() {
     triggerHaptic('light')
-    const nextOpen = !settingsOpen.value
-    settingsOpen.value = nextOpen
-    if (nextOpen) listOpen.value = false
+    if (settingsOpen.value) {
+      if (isMobileViewport()) {
+        settingsDismissAnimated()
+      } else {
+        settingsOpen.value = false
+      }
+      return
+    }
+    settingsOpen.value = true
+    if (listOpen.value) {
+      if (isMobileViewport()) {
+        libraryDismissAnimated()
+      } else {
+        listOpen.value = false
+      }
+    }
   }
 
   watch([listOpen, settingsOpen], ([libraryVisible, settingsVisible]) => {
@@ -264,6 +387,7 @@
 
   function updateCompactViewport(event: MediaQueryListEvent | MediaQueryList) {
     compactViewport.value = event.matches
+    resetDrawerPositions()
   }
 
   function updateDeviceKind() {
@@ -283,6 +407,7 @@
       /Android|iPhone|iPad|iPod|Mobile|Tablet|Windows Phone/i.test(userAgent) ||
       (coarsePointer && touchPoints > 0)
     phoneDevice.value = !iPadDesktopMode && phoneLike
+    resetDrawerPositions()
   }
 
   function triggerHaptic(style: HapticStyle = 'light') {
@@ -394,7 +519,11 @@
     updateDeviceKind()
     compactViewportQuery.addEventListener('change', updateCompactViewport)
     window.addEventListener('resize', updateDeviceKind)
-    void loadTracks()
+    window.addEventListener('offline', showOfflineNotice)
+    window.addEventListener('online', showOnlineNotice)
+    void loadTracks().finally(() => {
+      if (!navigator.onLine) showOfflineNotice()
+    })
     window.setTimeout(() => void checkReleaseUpdateOnce(), 1400)
   })
   onBeforeUnmount(() => {
@@ -403,6 +532,8 @@
     window.clearTimeout(panelsSoftenedTimer)
     compactViewportQuery?.removeEventListener('change', updateCompactViewport)
     window.removeEventListener('resize', updateDeviceKind)
+    window.removeEventListener('offline', showOfflineNotice)
+    window.removeEventListener('online', showOnlineNotice)
   })
 
   watch(currentTrackId, () => {
@@ -440,7 +571,11 @@
 <template>
   <main
     class="app-shell"
-    :class="{ 'background-disabled': !settings.dynamicBackground, 'chrome-hidden': chromeHidden }"
+    :class="{
+      'background-disabled': !settings.dynamicBackground,
+      'chrome-hidden': chromeHidden,
+      'drawer-open': listOpen || settingsOpen,
+    }"
     :style="beatStyle"
     @mousemove="revealChrome"
   >
@@ -454,7 +589,7 @@
     </Transition>
     <div class="background-overlay" />
 
-    <header class="topbar">
+    <header class="topbar" @click="onTopbarClick">
       <div class="brand">
         <span>{{ musicConfig.siteName }}</span>
       </div>
@@ -648,7 +783,12 @@
     </footer>
 
     <Transition name="backdrop">
-      <div v-if="listOpen || settingsOpen" class="drawer-backdrop" @click="closePanels" />
+      <div
+        v-if="listOpen || settingsOpen"
+        class="drawer-backdrop"
+        :class="{ 'is-half': anyDrawerHalf }"
+        @click="closePanelsAnimated"
+      />
     </Transition>
 
     <Transition name="library-sheet">
@@ -656,16 +796,25 @@
         v-if="listOpen"
         ref="libraryDrawerRef"
         class="side-drawer library-drawer"
+        :class="{ 'is-dragging': libraryDragging }"
+        :style="libraryDrawerStyle"
         role="dialog"
         aria-modal="true"
         aria-label="曲库"
       >
+        <span
+          ref="libraryHandleRef"
+          class="drawer-grab-handle"
+          aria-hidden="true"
+          role="presentation"
+        />
         <TrackList
           :tracks="filteredTracks"
           :total="store.tracks.length"
           :current-track-id="currentTrackId"
           :is-playing="isPlaying"
           :loading="loading"
+          :load-failed="loadFailed"
           :query="query"
           :spectrum-levels="spectrumLevels"
           @update:query="query = $event"
@@ -712,10 +861,18 @@
         v-if="settingsOpen"
         ref="settingsDrawerRef"
         class="side-drawer settings-drawer"
+        :class="{ 'is-dragging': settingsDragging }"
+        :style="settingsDrawerStyle"
         role="dialog"
         aria-modal="true"
         aria-label="播放器设置"
       >
+        <span
+          ref="settingsHandleRef"
+          class="drawer-grab-handle"
+          aria-hidden="true"
+          role="presentation"
+        />
         <header>
           <div>
             <h2>播放设置</h2>
@@ -1369,6 +1526,10 @@
     transform: translateY(-14px);
     pointer-events: none;
   }
+  .drawer-open .topbar {
+    z-index: 42;
+    background: transparent;
+  }
   .chrome-hidden .player-dock {
     opacity: 0;
     transform: translateY(24px);
@@ -1541,8 +1702,16 @@
     box-shadow: 0 26px 90px rgba(0, 0, 0, 0.24);
     backdrop-filter: blur(56px) saturate(185%) brightness(1.05);
   }
-  .mobile-drawer-close {
+  .drawer-grab-handle {
     display: none;
+  }
+  .side-drawer {
+    transition:
+      transform 320ms cubic-bezier(0.16, 1, 0.3, 1),
+      opacity 320ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .side-drawer.is-dragging {
+    transition: none !important;
   }
   .library-drawer {
     top: 72px;
@@ -1744,28 +1913,53 @@
     cursor: default;
   }
   .setting-range {
+    display: block;
     width: 100%;
-    height: 7px;
-    margin-top: 16px;
+    height: 28px;
+    margin-top: 12px;
+    padding: 0;
     appearance: none;
+    border-radius: 99px;
+    background: transparent;
+    cursor: pointer;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .setting-range::-webkit-slider-runnable-track {
+    height: 7px;
     border-radius: 99px;
     background: linear-gradient(
       to right,
       rgba(255, 255, 255, 0.88) 0 var(--setting-progress),
       rgba(255, 255, 255, 0.18) var(--setting-progress) 100%
     );
-    cursor: pointer;
+  }
+  .setting-range::-moz-range-track {
+    height: 7px;
+    border-radius: 99px;
+    background: linear-gradient(
+      to right,
+      rgba(255, 255, 255, 0.88) 0 var(--setting-progress),
+      rgba(255, 255, 255, 0.18) var(--setting-progress) 100%
+    );
   }
   .setting-range::-webkit-slider-thumb {
-    width: 0;
-    height: 0;
+    width: 24px;
+    height: 24px;
     appearance: none;
     border: 0;
+    border-radius: 50%;
+    background: transparent;
+    margin-top: -8.5px;
+    cursor: pointer;
   }
   .setting-range::-moz-range-thumb {
-    width: 0;
-    height: 0;
+    width: 24px;
+    height: 24px;
     border: 0;
+    border-radius: 50%;
+    background: transparent;
+    cursor: pointer;
   }
   .value-button {
     padding: 7px 10px;
@@ -2117,36 +2311,53 @@
       box-shadow: 0 -18px 64px rgba(0, 0, 0, 0.34);
       backdrop-filter: blur(52px) saturate(180%);
     }
-    .mobile-drawer-close {
+    .drawer-grab-handle {
       position: absolute;
-      top: 13px;
-      right: 13px;
-      z-index: 3;
-      display: grid;
-      width: 36px;
-      height: 36px;
-      place-items: center;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 50%;
-      background: rgba(255, 255, 255, 0.08);
-      color: rgba(255, 255, 255, 0.78);
-      cursor: pointer;
-      backdrop-filter: blur(18px) saturate(150%);
-      transition:
-        background 0.18s ease,
-        color 0.18s ease,
-        transform 0.18s ease;
+      top: 7px;
+      left: 50%;
+      z-index: 4;
+      display: block;
+      width: 44px;
+      height: 18px;
+      padding: 7px 0;
+      transform: translateX(-50%);
+      background: transparent;
+      cursor: grab;
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
     }
-    .mobile-drawer-close:active {
-      transform: scale(0.96);
-      background: rgba(255, 255, 255, 0.13);
-      color: #fff;
+    .drawer-grab-handle::before {
+      content: '';
+      display: block;
+      width: 38px;
+      height: 4px;
+      margin: 0 auto;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.32);
+      transition:
+        background 160ms ease,
+        width 160ms ease;
+    }
+    .drawer-grab-handle:active {
+      cursor: grabbing;
+    }
+    .drawer-grab-handle:active::before {
+      background: rgba(255, 255, 255, 0.6);
+      width: 44px;
     }
     .drawer-backdrop {
       display: block;
       inset: calc(62px + env(safe-area-inset-top)) 0 0;
       z-index: 38;
       background: rgba(0, 0, 0, 0.08);
+      transition:
+        inset 280ms cubic-bezier(0.16, 1, 0.3, 1),
+        background 280ms ease;
+    }
+    .drawer-backdrop.is-half {
+      inset: 0;
+      background: rgba(0, 0, 0, 0.32);
     }
     .library-drawer {
       top: calc(62px + env(safe-area-inset-top));
@@ -2160,7 +2371,7 @@
       padding-bottom: 0;
     }
     .library-drawer :deep(.track-header) {
-      padding-right: 48px;
+      padding-right: 0;
     }
     .library-sheet-enter-from,
     .library-sheet-leave-to {
@@ -2184,7 +2395,7 @@
     }
     .settings-drawer header {
       margin-bottom: 12px;
-      padding: 0 48px 0 2px;
+      padding: 0 2px;
     }
     .settings-drawer h2 {
       font-size: 1.22rem;
@@ -2311,12 +2522,6 @@
     }
     .settings-drawer {
       padding: 15px 12px max(14px, env(safe-area-inset-bottom));
-    }
-    .mobile-drawer-close {
-      top: 10px;
-      right: 10px;
-      width: 34px;
-      height: 34px;
     }
     .settings-drawer header {
       margin-bottom: 8px;

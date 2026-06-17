@@ -1,7 +1,7 @@
 <script setup lang="ts">
   import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
   import type { ComponentPublicInstance } from 'vue'
-  import { ListMusic, Music, RefreshCw, Search, X } from '@lucide/vue'
+  import { Music, RefreshCw, Search, X } from '@lucide/vue'
   import type { Track } from '../types/music'
   import { splitDisplayTitle } from '../utils/title'
   import { useCoverCache } from '../composables/useCoverCache'
@@ -14,6 +14,7 @@
     loading: boolean
     query: string
     spectrumLevels: number[]
+    loadFailed?: boolean
   }>()
 
   const emit = defineEmits<{
@@ -207,8 +208,11 @@
       <div :style="{ height: `${virtualItems.bottomOffset}px` }" />
 
       <div v-if="loading && !total" class="list-state"><span class="loader" />正在载入音乐</div>
+      <div v-else-if="loadFailed && !tracks.length" class="list-state">
+        <span class="empty-line">音乐列表载入失败,请稍后重试</span>
+      </div>
       <div v-else-if="!tracks.length" class="list-state">
-        <ListMusic :size="25" />{{ query ? '没有找到匹配的歌曲' : '暂无歌曲' }}
+        <span class="empty-line">{{ query ? '没有找到匹配的歌曲' : '暂无歌曲' }}</span>
       </div>
     </div>
   </section>
