@@ -27,6 +27,8 @@ body,
 
 html {
   -webkit-user-select: none;
+  -webkit-text-size-adjust: 100%;
+  touch-action: manipulation;
   user-select: none;
 }
 
@@ -37,6 +39,29 @@ body {
 button,
 input {
   font: inherit;
+}
+
+button,
+a,
+input,
+label,
+[role='button'] {
+  touch-action: manipulation;
+}
+
+button,
+a,
+input,
+label {
+  -webkit-tap-highlight-color: transparent;
+}
+
+@media (max-width: 720px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
 }
 
 button:disabled {

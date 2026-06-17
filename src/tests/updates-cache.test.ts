@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('../generated/app-version', () => ({ APP_VERSION: '1.0.0' }))
+const mockedAppVersion = vi.hoisted(() => ({ value: '1.0.0' }))
+
+vi.mock('../generated/app-version', () => ({
+  get APP_VERSION() {
+    return mockedAppVersion.value
+  },
+}))
 
 import { checkForUpdate } from '../services/updates'
 
@@ -33,6 +39,7 @@ describe('checkForUpdate TTL cache', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.stubEnv('PROD', true)
+    mockedAppVersion.value = '1.0.0'
     localStorage.clear()
   })
 
@@ -129,6 +136,28 @@ describe('checkForUpdate TTL cache', () => {
 
     expect(fetchMock).not.toHaveBeenCalled()
     expect(result).toBeNull()
+  })
+
+  it('returns null when GitHub latest release is older than the current prerelease build', async () => {
+    mockedAppVersion.value = '0.1.1-rc.1'
+    const fetchMock = vi.fn().mockResolvedValueOnce(makeReleaseResponse('v0.1.0'))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await checkForUpdate()
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(result).toBeNull()
+    expect(readCache()?.latest?.latestVersion).toBe('v0.1.0')
+  })
+
+  it('returns prerelease updates when they are newer than the current prerelease build', async () => {
+    mockedAppVersion.value = '0.1.1-rc.1'
+    const fetchMock = vi.fn().mockResolvedValueOnce(makeReleaseResponse('v0.1.1-rc.2'))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await checkForUpdate()
+
+    expect(result?.latestVersion).toBe('v0.1.1-rc.2')
   })
 
   it('does not write cache when request is aborted', async () => {

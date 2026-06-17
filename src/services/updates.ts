@@ -26,6 +26,13 @@ interface UpdateCacheEntry {
   latest: CachedLatest | null
 }
 
+interface ParsedVersion {
+  major: number
+  minor: number
+  patch: number
+  prerelease: string[]
+}
+
 const REPOSITORY = 'abloom25/Meliora'
 const UPDATE_CACHE_KEY = 'meliora:update-cache'
 const UPDATE_CACHE_TTL_MS = 6 * 60 * 60 * 1000
@@ -40,6 +47,61 @@ function normalizeVersion(version: string) {
 function isComparableVersion(version: string) {
   const normalized = normalizeVersion(version)
   return normalized.length > 0
+}
+
+function parseVersion(version: string): ParsedVersion | null {
+  const normalized = normalizeVersion(version).replace(/\+.*$/, '')
+  const match = normalized.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/)
+  if (!match) return null
+
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] ? match[4].split('.') : [],
+  }
+}
+
+function comparePrereleaseIdentifier(left: string, right: string): number {
+  const leftNumeric = /^\d+$/.test(left)
+  const rightNumeric = /^\d+$/.test(right)
+
+  if (leftNumeric && rightNumeric) return Number(left) - Number(right)
+  if (leftNumeric) return -1
+  if (rightNumeric) return 1
+  return left.localeCompare(right)
+}
+
+function compareVersions(leftVersion: string, rightVersion: string): number {
+  const left = parseVersion(leftVersion)
+  const right = parseVersion(rightVersion)
+  if (!left || !right) {
+    return normalizeVersion(leftVersion).localeCompare(normalizeVersion(rightVersion))
+  }
+
+  const stableDiff =
+    left.major - right.major || left.minor - right.minor || left.patch - right.patch
+  if (stableDiff !== 0) return stableDiff
+
+  if (!left.prerelease.length && !right.prerelease.length) return 0
+  if (!left.prerelease.length) return 1
+  if (!right.prerelease.length) return -1
+
+  const length = Math.max(left.prerelease.length, right.prerelease.length)
+  for (let i = 0; i < length; i += 1) {
+    const leftPart = left.prerelease[i]
+    const rightPart = right.prerelease[i]
+    if (leftPart === undefined) return -1
+    if (rightPart === undefined) return 1
+    const partDiff = comparePrereleaseIdentifier(leftPart, rightPart)
+    if (partDiff !== 0) return partDiff
+  }
+
+  return 0
+}
+
+function isNewerVersion(latestVersion: string, currentVersion: string) {
+  return compareVersions(latestVersion, currentVersion) > 0
 }
 
 function isAbortError(err: unknown): boolean {
@@ -103,13 +165,13 @@ export async function checkForUpdate(
     const cache = readUpdateCache()
     if (cache && Date.now() - cache.fetchedAt < UPDATE_CACHE_TTL_MS) {
       if (!cache.latest) return null
-      return normalizeVersion(APP_VERSION) === normalizeVersion(cache.latest.latestVersion)
-        ? null
-        : {
+      return isNewerVersion(cache.latest.latestVersion, APP_VERSION)
+        ? {
             currentVersion: APP_VERSION,
             latestVersion: cache.latest.latestVersion,
             url: cache.latest.url,
           }
+        : null
     }
   }
 
@@ -133,7 +195,5 @@ export async function checkForUpdate(
   writeUpdateCache(latest ? { latestVersion: latest.latestVersion, url: latest.url } : null)
 
   if (!latest) return null
-  return normalizeVersion(latest.currentVersion) === normalizeVersion(latest.latestVersion)
-    ? null
-    : latest
+  return isNewerVersion(latest.latestVersion, latest.currentVersion) ? latest : null
 }

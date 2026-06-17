@@ -608,7 +608,7 @@
 
       input {
         height: 38px;
-        font-size: 0.78rem;
+        font-size: 16px;
       }
     }
 
@@ -676,7 +676,7 @@
 
       input {
         height: 34px;
-        font-size: 0.74rem;
+        font-size: 16px;
       }
     }
 
