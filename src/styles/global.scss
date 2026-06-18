@@ -13,6 +13,27 @@
   --accent-soft: #a7e7e2;
 }
 
+// 注册 CSS 变量为 @property，使浏览器能够原生过渡 color 类型（需 Chrome 85+ / Safari 16.4+）
+// 对于不支持 @property 的浏览器，useThemeAccent 仍使用 JS 动画降级
+@property --accent {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #81d8d0;
+}
+
+@property --accent-soft {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #a7e7e2;
+}
+
+:root {
+  // 当浏览器支持 @property 时，由 CSS 原生处理颜色过渡（GPU 加速）
+  transition:
+    --accent 0.72s cubic-bezier(0.16, 1, 0.3, 1),
+    --accent-soft 0.72s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
 * {
   box-sizing: border-box;
 }

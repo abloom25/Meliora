@@ -55,6 +55,8 @@ export function usePreloadPool(options: PreloadPoolOptions) {
   }
   const preloadMessage = ref('')
   const failedTrackIds = new Set<string>()
+  const pendingPreloadTimeouts = new Set<number>()
+  const isPoolUnmounted = ref(false)
 
   function findCachedTrack(direction: PreloadDirection): Track | null {
     const track = preloadSlots[direction].track
@@ -117,11 +119,17 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     clearSlot(preloadSlots.next)
   }
 
+  function clearPreloadMessage() {
+    preloadMessage.value = ''
+  }
+
   function findSlotByTrack(track: Track): PreloadSlot | null {
     return Object.values(preloadSlots).find((slot) => slot.track?.id === track.id) ?? null
   }
 
   function loadSlot(direction: PreloadDirection, track: Track): Promise<boolean> {
+    // 卸载后不再发起新的预加载，避免定时器或事件监听器泄漏。
+    if (isPoolUnmounted.value) return Promise.resolve(false)
     const slot = preloadSlots[direction]
     if (slot.track?.id === track.id && slot.ready) return slot.ready
 
@@ -133,26 +141,33 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     slot.audio.volume = 0
     slot.ready = new Promise<boolean>((resolve) => {
       const timeout = window.setTimeout(() => {
-        cleanup()
+        pendingPreloadTimeouts.delete(timeout)
+        // 卸载后不再修改 slot 状态（slot 对象可能已被释放）。
+        if (isPoolUnmounted.value) {
+          resolve(false)
+          return
+        }
         if (slot.track?.id === track.id) {
           slot.track = null
           slot.ready = null
         }
         resolve(false)
       }, PRELOAD_READY_TIMEOUT)
+      pendingPreloadTimeouts.add(timeout)
       const cleanup = () => {
+        pendingPreloadTimeouts.delete(timeout)
         window.clearTimeout(timeout)
         slot.audio.removeEventListener('canplay', handleReady)
         slot.audio.removeEventListener('loadeddata', handleReady)
         slot.audio.removeEventListener('error', handleError)
       }
       const handleReady = () => {
-        if (slot.track?.id !== track.id) return
+        if (isPoolUnmounted.value || slot.track?.id !== track.id) return
         cleanup()
         resolve(true)
       }
       const handleError = () => {
-        if (slot.track?.id !== track.id) return
+        if (isPoolUnmounted.value || slot.track?.id !== track.id) return
         cleanup()
         failedTrackIds.add(track.id)
         preloadMessage.value = `已跳过暂时无法播放的歌曲，正在继续播放`
@@ -167,7 +182,9 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     })
     slot.audio.src = track.audioUrl
     slot.audio.load()
-    void preloadCover(track.cover)
+    if (direction === 'next') {
+      void preloadCover(track.cover)
+    }
     void preloadLyrics(track.lyricsUrl)
     return slot.ready
   }
@@ -199,10 +216,17 @@ export function usePreloadPool(options: PreloadPoolOptions) {
   }
 
   onBeforeUnmount(() => {
+    isPoolUnmounted.value = true
     if (scheduledHandle) {
       window.clearTimeout(scheduledHandle)
       scheduledHandle = 0
     }
+    // 清理所有挂起的预加载超时定时器，避免卸载后触发状态变更。
+    if (pendingPreloadTimeouts.size) {
+      for (const timeout of pendingPreloadTimeouts) window.clearTimeout(timeout)
+      pendingPreloadTimeouts.clear()
+    }
+    clearPreloads()
   })
 
   return {
@@ -213,6 +237,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     predictPreviousTrack,
     clearPreloads,
     clearSlot,
+    clearPreloadMessage,
     findSlotByTrack,
     slotCanStart,
     loadSlot,

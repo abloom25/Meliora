@@ -1,7 +1,7 @@
 {
   "name": "meliora",
   "private": true,
-  "version": "0.1.1-rc.2",
+  "version": "0.1.1-rc.3",
   "description": "沉浸式 · 视听一体的网页音乐播放器,基于 Vue 3 + TypeScript + Pinia + SCSS。",
   "license": "AGPL-3.0-or-later",
   "author": "abloom25",
@@ -31,6 +31,7 @@
   "packageManager": "pnpm@11.5.3",
   "type": "module",
   "scripts": {
+    "predev": "pnpm generate",
     "dev": "vite",
     "generate": "node scripts/generate-app-version.mjs",
     "prebuild": "pnpm generate",

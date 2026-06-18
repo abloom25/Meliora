@@ -24,7 +24,9 @@
     lineElements.value = []
   })
   const userScrolling = ref(false)
+  let isPanelMounted = false
   let scrollTimer = 0
+  let scrollRaf = 0
   let requestId = 0
   let lyricsController: AbortController | null = null
   const lineAnimations = new Set<Animation>()
@@ -39,6 +41,7 @@
     prefersReducedMotion = event.matches
   }
   onMounted(() => {
+    isPanelMounted = true
     reducedMotionQuery?.addEventListener('change', handleReducedMotionChange)
   })
 
@@ -111,7 +114,12 @@
     const container = scroller.value
     const element = lineElements.value[index]
     if (!container || !element) {
-      onComplete?.()
+      if (!isPanelMounted) {
+        onComplete?.()
+        return
+      }
+      window.cancelAnimationFrame(scrollRaf)
+      scrollRaf = window.requestAnimationFrame(() => scrollToIndex(index, onComplete))
       return
     }
     const target = Math.max(
@@ -231,7 +239,9 @@
     })
   })
   onBeforeUnmount(() => {
+    isPanelMounted = false
     window.clearTimeout(scrollTimer)
+    window.cancelAnimationFrame(scrollRaf)
     window.clearTimeout(highlightTimer)
     lyricsController?.abort()
     cancelLineAnimations()

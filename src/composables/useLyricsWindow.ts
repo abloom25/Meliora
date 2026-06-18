@@ -121,6 +121,7 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     if (!target || target.closed) {
       if (lyricsWindow) {
         isOpen.value = false
+        lyricsWindow = null
         clearCache()
       }
       return

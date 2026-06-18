@@ -1,229 +1,126 @@
 import { LruCache } from './lru-cache'
+import { extractThemeColorFromPixels, type ThemeColor } from './theme-core'
 
-export interface ThemeColor {
-  accent: string
-  accentSoft: string
-  rgb: string
-}
-
-interface RGB {
-  r: number
-  g: number
-  b: number
-}
+export type { ThemeColor } from './theme-core'
+export { createThemeColor } from './theme-core'
 
 const themeCache = new LruCache<string, ThemeColor | null>(64)
-const PALETTE_BUCKET_SIZE = 24
+const SAMPLE_SIZE = 72
+const WORKER_TIMEOUT_MS = 1500
 
-function rgbToHsl({ r, g, b }: RGB) {
-  const red = r / 255
-  const green = g / 255
-  const blue = b / 255
-  const max = Math.max(red, green, blue)
-  const min = Math.min(red, green, blue)
-  const delta = max - min
-  let hue = 0
+// ===== Worker 单例（懒加载） =====
+let workerInstance: Worker | null = null
+let workerCreationFailed = false
+let nextRequestId = 0
+const pendingRequests = new Map<
+  number,
+  { resolve: (theme: ThemeColor | null) => void; timer: number }
+>()
 
-  if (delta) {
-    if (max === red) hue = ((green - blue) / delta) % 6
-    else if (max === green) hue = (blue - red) / delta + 2
-    else hue = (red - green) / delta + 4
-    hue = Math.round(hue * 60)
-    if (hue < 0) hue += 360
-  }
-
-  const lightness = (max + min) / 2
-  const saturation = delta ? delta / (1 - Math.abs(2 * lightness - 1)) : 0
-  return { hue, saturation, lightness }
-}
-
-function hslToRgb(hue: number, saturation: number, lightness: number): RGB {
-  const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation
-  const segment = hue / 60
-  const secondary = chroma * (1 - Math.abs((segment % 2) - 1))
-  let red = 0
-  let green = 0
-  let blue = 0
-
-  if (segment < 1) [red, green] = [chroma, secondary]
-  else if (segment < 2) [red, green] = [secondary, chroma]
-  else if (segment < 3) [green, blue] = [chroma, secondary]
-  else if (segment < 4) [green, blue] = [secondary, chroma]
-  else if (segment < 5) [red, blue] = [secondary, chroma]
-  else [red, blue] = [chroma, secondary]
-
-  const match = lightness - chroma / 2
-  return {
-    r: Math.round((red + match) * 255),
-    g: Math.round((green + match) * 255),
-    b: Math.round((blue + match) * 255),
-  }
-}
-
-export function createThemeColor(color: RGB): ThemeColor {
-  const { hue, saturation, lightness } = rgbToHsl(color)
-  const resolvedSaturation = Math.max(0.28, Math.min(0.52, saturation * 0.76 + 0.08))
-  const resolvedLightness = Math.max(0.54, Math.min(0.66, 0.6 + (0.48 - lightness) * 0.16))
-  const accent = hslToRgb(hue, resolvedSaturation, resolvedLightness)
-  const soft = hslToRgb(
-    hue,
-    Math.max(0.2, resolvedSaturation * 0.62),
-    Math.min(0.78, resolvedLightness + 0.13),
-  )
-  return {
-    accent: `rgb(${accent.r} ${accent.g} ${accent.b})`,
-    accentSoft: `rgb(${soft.r} ${soft.g} ${soft.b})`,
-    rgb: `${accent.r}, ${accent.g}, ${accent.b}`,
-  }
-}
-
-function colorBucketKey({ r, g, b }: RGB) {
-  return [
-    Math.round(r / PALETTE_BUCKET_SIZE),
-    Math.round(g / PALETTE_BUCKET_SIZE),
-    Math.round(b / PALETTE_BUCKET_SIZE),
-  ].join(':')
-}
-
-function relativeLuminance({ r, g, b }: RGB) {
-  const channel = (value: number) => {
-    const normalized = value / 255
-    return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4
-  }
-  return channel(r) * 0.2126 + channel(g) * 0.7152 + channel(b) * 0.0722
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value))
-}
-
-function colorDistance(first: RGB, second: RGB) {
-  const redMean = (first.r + second.r) / 2
-  const red = first.r - second.r
-  const green = first.g - second.g
-  const blue = first.b - second.b
-  return Math.sqrt(
-    (2 + redMean / 256) * red * red + 4 * green * green + (2 + (255 - redMean) / 256) * blue * blue,
+function supportsWorker(): boolean {
+  return (
+    typeof Worker !== 'undefined' &&
+    typeof OffscreenCanvas !== 'undefined' &&
+    typeof createImageBitmap !== 'undefined'
   )
 }
 
-export function extractThemeColor(image: HTMLImageElement): ThemeColor | null {
-  const canvas = document.createElement('canvas')
-  canvas.width = 72
-  canvas.height = 72
-  const context = canvas.getContext('2d', { willReadFrequently: true })
-  if (!context) return null
-
+function getWorker(): Worker | null {
+  if (workerCreationFailed) return null
+  if (workerInstance) return workerInstance
+  if (!supportsWorker()) return null
   try {
-    context.drawImage(image, 0, 0, canvas.width, canvas.height)
-    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data
-    const palette = new Map<
-      string,
-      {
-        color: RGB
-        count: number
-        saturation: number
-        lightness: number
-        luminance: number
-        weight: number
-      }
-    >()
-
-    for (let index = 0; index < pixels.length; index += 4) {
-      const alpha = pixels[index + 3] ?? 0
-      if (alpha < 180) continue
-      const pixelIndex = index / 4
-      const x = pixelIndex % canvas.width
-      const y = Math.floor(pixelIndex / canvas.width)
-      const color = {
-        r: pixels[index] ?? 0,
-        g: pixels[index + 1] ?? 0,
-        b: pixels[index + 2] ?? 0,
-      }
-      const { saturation, lightness } = rgbToHsl(color)
-      const luminance = relativeLuminance(color)
-      if (lightness < 0.12 || lightness > 0.88 || saturation < 0.08) continue
-
-      const centerX = Math.abs((x + 0.5) / canvas.width - 0.5) * 2
-      const centerY = Math.abs((y + 0.5) / canvas.height - 0.5) * 2
-      const centerWeight = 1 - clamp((centerX * centerX + centerY * centerY) / 1.7, 0, 0.58)
-      const lightnessWeight = 1 - clamp(Math.abs(lightness - 0.48) / 0.42, 0, 0.78)
-      const saturationWeight = clamp(saturation, 0.16, 0.68)
-      const luminanceWeight = 1 - clamp(Math.abs(luminance - 0.28) / 0.34, 0, 0.72)
-      const weight =
-        centerWeight *
-        (0.48 + lightnessWeight * 0.52) *
-        (0.54 + saturationWeight * 0.78) *
-        (0.64 + luminanceWeight * 0.36)
-
-      const key = colorBucketKey(color)
-      const bucket = palette.get(key)
-      if (bucket) {
-        bucket.color.r += color.r * weight
-        bucket.color.g += color.g * weight
-        bucket.color.b += color.b * weight
-        bucket.count += 1
-        bucket.saturation += saturation
-        bucket.lightness += lightness
-        bucket.luminance += luminance
-        bucket.weight += weight
-      } else {
-        palette.set(key, {
-          color: { r: color.r * weight, g: color.g * weight, b: color.b * weight },
-          count: 1,
-          saturation,
-          lightness,
-          luminance,
-          weight,
-        })
-      }
+    workerInstance = new Worker(new URL('../workers/theme-extractor.worker.ts', import.meta.url), {
+      type: 'module',
+    })
+    workerInstance.onmessage = (event: MessageEvent<{ id: number; theme: ThemeColor | null }>) => {
+      const { id, theme } = event.data
+      const pending = pendingRequests.get(id)
+      if (!pending) return
+      window.clearTimeout(pending.timer)
+      pendingRequests.delete(id)
+      pending.resolve(theme)
     }
-
-    let best: RGB | null = null
-    let bestScore = -1
-    const buckets = [...palette.values()]
-    const totalWeight = buckets.reduce((sum, bucket) => sum + bucket.weight, 0)
-    const average = buckets.reduce<RGB>(
-      (sum, bucket) => ({
-        r: sum.r + bucket.color.r,
-        g: sum.g + bucket.color.g,
-        b: sum.b + bucket.color.b,
-      }),
-      { r: 0, g: 0, b: 0 },
-    )
-    if (totalWeight) {
-      average.r /= totalWeight
-      average.g /= totalWeight
-      average.b /= totalWeight
-    }
-
-    for (const bucket of buckets) {
-      if (!bucket.weight) continue
-      const color = {
-        r: Math.round(bucket.color.r / bucket.weight),
-        g: Math.round(bucket.color.g / bucket.weight),
-        b: Math.round(bucket.color.b / bucket.weight),
+    workerInstance.onerror = () => {
+      // Worker 异常：把所有 pending 都 resolve 为 null（让上层走 fallback）
+      for (const [, pending] of pendingRequests) {
+        window.clearTimeout(pending.timer)
+        pending.resolve(null)
       }
-      const saturation = bucket.saturation / bucket.count
-      const lightness = bucket.lightness / bucket.count
-      const luminance = bucket.luminance / bucket.count
-      const coverage = totalWeight ? bucket.weight / totalWeight : 0
-      const distinctness = totalWeight ? clamp(colorDistance(color, average) / 180, 0, 1) : 0
-      const score =
-        Math.sqrt(coverage) * 1.7 +
-        Math.min(saturation, 0.7) * 0.95 +
-        (1 - Math.abs(lightness - 0.48)) * 0.72 +
-        (1 - Math.abs(luminance - 0.28)) * 0.42 +
-        distinctness * 0.26
-      if (score > bestScore) {
-        best = color
-        bestScore = score
-      }
+      pendingRequests.clear()
+      workerInstance?.terminate()
+      workerInstance = null
+      workerCreationFailed = true
     }
-    return best ? createThemeColor(best) : null
+    return workerInstance
+  } catch {
+    workerCreationFailed = true
+    return null
+  }
+}
+
+async function extractViaWorker(image: HTMLImageElement): Promise<ThemeColor | null> {
+  const worker = getWorker()
+  if (!worker) return null
+  let bitmap: ImageBitmap
+  try {
+    bitmap = await createImageBitmap(image, {
+      resizeWidth: SAMPLE_SIZE,
+      resizeHeight: SAMPLE_SIZE,
+      resizeQuality: 'low',
+    })
   } catch {
     return null
   }
+  const id = ++nextRequestId
+  return new Promise<ThemeColor | null>((resolve) => {
+    // 1.5s 超时兜底：Worker 卡住时回退到主线程
+    const timer = window.setTimeout(() => {
+      if (!pendingRequests.has(id)) return
+      pendingRequests.delete(id)
+      resolve(null)
+    }, WORKER_TIMEOUT_MS)
+    pendingRequests.set(id, { resolve, timer })
+    try {
+      worker.postMessage({ id, imageBitmap: bitmap }, [bitmap])
+    } catch {
+      window.clearTimeout(timer)
+      pendingRequests.delete(id)
+      bitmap.close?.()
+      resolve(null)
+    }
+  })
+}
+
+function extractOnMainThread(image: HTMLImageElement): ThemeColor | null {
+  const canvas = document.createElement('canvas')
+  canvas.width = SAMPLE_SIZE
+  canvas.height = SAMPLE_SIZE
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+  if (!context) return null
+  try {
+    context.drawImage(image, 0, 0, SAMPLE_SIZE, SAMPLE_SIZE)
+    const pixels = context.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE).data
+    return extractThemeColorFromPixels(pixels, SAMPLE_SIZE, SAMPLE_SIZE)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 从 <img> 元素提取主题色。
+ * - 支持 Worker 的浏览器：通过 Worker 处理（主线程仅 createImageBitmap + postMessage）
+ * - 不支持时：主线程同步采样（与改造前行为一致）
+ *
+ * 返回 Promise 是因为新增了异步路径；上层 await 即可。
+ */
+export async function extractThemeColor(image: HTMLImageElement): Promise<ThemeColor | null> {
+  if (supportsWorker()) {
+    const theme = await extractViaWorker(image)
+    if (theme) return theme
+    // Worker 路径失败 / 超时 → 主线程兜底
+  }
+  return extractOnMainThread(image)
 }
 
 export function loadThemeColor(url: string): Promise<ThemeColor | null> {
@@ -231,8 +128,8 @@ export function loadThemeColor(url: string): Promise<ThemeColor | null> {
   return new Promise((resolve) => {
     const image = new Image()
     image.crossOrigin = 'anonymous'
-    image.onload = () => {
-      const theme = extractThemeColor(image)
+    image.onload = async () => {
+      const theme = await extractThemeColor(image)
       themeCache.set(url, theme)
       resolve(theme)
     }

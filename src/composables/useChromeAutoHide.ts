@@ -1,5 +1,4 @@
-import { ref } from 'vue'
-import type { Ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, type Ref } from 'vue'
 
 const CHROME_IDLE_DELAY = 30000
 
@@ -36,6 +35,33 @@ export function useChromeAutoHide(options: UseChromeAutoHideOptions) {
   function clearChromeTimer() {
     window.clearTimeout(chromeIdleTimer)
   }
+
+  function handleActivity() {
+    if (autoHideChrome() && !listOpen.value && !settingsOpen.value) {
+      revealChrome()
+    }
+  }
+
+  function handleVisibilityChange() {
+    if (!document.hidden) {
+      revealChrome()
+    }
+  }
+
+  onMounted(() => {
+    window.addEventListener('mousemove', handleActivity, { passive: true })
+    window.addEventListener('keydown', handleActivity, { passive: true })
+    window.addEventListener('touchstart', handleActivity, { passive: true })
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+  })
+
+  onBeforeUnmount(() => {
+    clearChromeTimer()
+    window.removeEventListener('mousemove', handleActivity)
+    window.removeEventListener('keydown', handleActivity)
+    window.removeEventListener('touchstart', handleActivity)
+    document.removeEventListener('visibilitychange', handleVisibilityChange)
+  })
 
   return {
     chromeHidden,

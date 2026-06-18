@@ -26,7 +26,15 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value))
 }
 
-export function useAudioPlayer() {
+export interface UseAudioPlayerOptions {
+  /**
+   * 可选：返回需要每帧同步 `--beat-level` CSS 变量的目标节点列表。
+   * 仅作为透传给 useBeatAnalyser 的 getBeatTargets。
+   */
+  getBeatTargets?: () => readonly (HTMLElement | null | undefined)[]
+}
+
+export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   const store = usePlayerStore()
   const { currentTrack, isPlaying, currentTime, duration, settings } = storeToRefs(store)
   const players = [createAudio('metadata'), createAudio('auto'), createAudio('auto')] as const
@@ -43,6 +51,7 @@ export function useAudioPlayer() {
     players,
     getActiveAudio: () => activeAudio,
     isPlaying,
+    getBeatTargets: options.getBeatTargets,
   })
 
   const {
@@ -52,6 +61,7 @@ export function useAudioPlayer() {
     predictNextTrack,
     clearPreloads,
     clearSlot,
+    clearPreloadMessage,
     findSlotByTrack,
     slotCanStart,
     loadSlot,
@@ -218,30 +228,18 @@ export function useAudioPlayer() {
   }
 
   function commitActiveAudio(track: Track, queue: Track[], gain = 1) {
+    clearPreloadMessage()
     volumeAnimation += 1
-    transitionInProgress = false
     automaticCrossfadeStarted = false
     setPlayerVolume(activeAudio, gain)
+    // 先更新 store，此时 transitionInProgress 仍为 true，防止 watch(currentTrack) 误触发重新加载
     store.selectTrack(track, queue)
+    // 状态提交完成后再解除切歌锁定，这样 watcher 在任何后续调用中都能看到新状态
+    transitionInProgress = false
     currentTime.value = activeAudio.currentTime
     duration.value = Number.isFinite(activeAudio.duration) ? activeAudio.duration : 0
-    syncMediaSession()
-  }
-
-  async function playActiveAudio(gain = 1) {
-    try {
-      setPlayerVolume(activeAudio, gain)
-      await activeAudio.play()
-      isPlaying.value = true
-      store.errorMessage = ''
-      void startBeatAnalysis()
-      scheduleAdjacentPreload()
-      return true
-    } catch (error) {
-      isPlaying.value = false
-      store.errorMessage = describePlaybackError(error, activeAudio)
-      return false
-    }
+    // syncMediaSession 推迟到 microtask 后执行，避免在切歌锁释放路径上做无关重活
+    queueMicrotask(syncMediaSession)
   }
 
   function replaceActiveWithSlot(slot: PreloadSlot, direction: PreloadDirection) {
@@ -273,7 +271,6 @@ export function useAudioPlayer() {
     const requestId = ++switchRequestId
     const wasPlaying = isPlaying.value
     const useCrossfade = settings.value.smoothTrackChange && wasPlaying && shouldPlay
-    const shouldSequentialFade = useCrossfade && !waitForReady
     const slot = findSlotByTrack(track) ?? preloadSlots[direction]
     if (waitForReady) {
       const ready =
@@ -302,68 +299,110 @@ export function useAudioPlayer() {
       void preloadLyrics(track.lyricsUrl)
     }
 
+    // ===== 极简同步阶段：只做 audio 引用切换 + reactivity =====
+    // 所有非必要工作（syncMediaSession / 旧 audio 收尾 / currentTime 重置 / scheduleAdjacentPreload）
+    // 全部推迟到 microtask 之后执行，最大化降低连点感知延迟。
     const oldGain = audioGain(activeAudio)
-    if (shouldSequentialFade) await fadePlayer(activeAudio, oldGain, 0, FADE_OUT_DURATION)
-    if (requestId !== switchRequestId) {
-      transitionInProgress = false
-      return false
+    const oldAudioRef = activeAudio
+    if (useCrossfade) {
+      void fadePlayer(oldAudioRef, oldGain, 0, FADE_OUT_DURATION)
     }
 
     const { oldAudio, newAudio } = replaceActiveWithSlot(slot, direction)
-    newAudio.currentTime = 0
+    // 仅在必要时重置 currentTime，避免对预加载 slot（已经是 0）做重复浏览器调用。
+    if (newAudio.currentTime > 0.01) newAudio.currentTime = 0
     setPlayerVolume(newAudio, useCrossfade ? 0 : 1)
-    // 切歌后上一次 seek 的 pending 时间不应被新歌沿用
     pendingSeekTime = null
 
-    try {
-      updateStore()
-      currentTime.value = 0
-      duration.value = Number.isFinite(activeAudio.duration) ? activeAudio.duration : 0
-      syncMediaSession()
-      if (shouldPlay) await newAudio.play()
-      if (useCrossfade && waitForReady) await crossfadePlayers(oldAudio, newAudio)
-      else if (useCrossfade) await fadePlayer(newAudio, 0, 1, FADE_IN_DURATION)
+    // 同步写入 reactivity：UI 立刻刷新到新歌（标题/封面/进度归零）。
+    updateStore()
+    currentTime.value = 0
+    duration.value = Number.isFinite(newAudio.duration) ? newAudio.duration : 0
+    isPlaying.value = shouldPlay
+    automaticCrossfadeStarted = false
+    transitionInProgress = false
+
+    if (!shouldPlay) {
+      // 暂停状态切歌：极简同步路径（不需要 play()）
       oldAudio.pause()
       oldAudio.currentTime = 0
       oldAudio.volume = 0
-      currentTime.value = activeAudio.currentTime
-      duration.value = Number.isFinite(activeAudio.duration) ? activeAudio.duration : 0
-      isPlaying.value = !activeAudio.paused
-      automaticCrossfadeStarted = false
-      syncMediaSession()
-      transitionInProgress = false
-      pendingSeekTime = null
-      scheduleAdjacentPreload()
+      // 后台刷新 mediaSession + 调度预加载，避免阻塞主流程
+      queueMicrotask(() => {
+        if (requestId !== switchRequestId) return
+        syncMediaSession()
+        scheduleAdjacentPreload()
+      })
       return true
-    } catch {
-      failedTrackIds.add(track.id)
-      preloadMessage.value = `已跳过暂时无法播放的歌曲，正在继续播放`
-      newAudio.pause()
-      activeAudio = oldAudio
-      const reverseSlot = preloadSlots[direction === 'next' ? 'previous' : 'next']
-      reverseSlot.audio = newAudio
-      reverseSlot.track = null
-      reverseSlot.ready = null
-      clearSlot(reverseSlot)
-      // 异常路径同样需要重置标志，否则后续任何切歌都会被 transitionInProgress 拒绝。
-      transitionInProgress = false
-      automaticCrossfadeStarted = false
-      pendingSeekTime = null
-      window.setTimeout(() => void next(false), 0)
-      return false
     }
+
+    // 异步启动新音频；不阻塞主流程。
+    // mediaSession + 预加载调度推到 microtask，与 play() 启动并行进行。
+    queueMicrotask(() => {
+      if (requestId !== switchRequestId) return
+      syncMediaSession()
+      scheduleAdjacentPreload()
+    })
+
+    newAudio
+      .play()
+      .then(() => {
+        // 启动期间用户又点了别的歌：本次播放作废，让新流程接管收尾
+        if (requestId !== switchRequestId) return
+        currentTime.value = newAudio.currentTime
+        duration.value = Number.isFinite(newAudio.duration) ? newAudio.duration : 0
+        isPlaying.value = !newAudio.paused
+        if (useCrossfade) {
+          const fadeInPromise =
+            waitForReady && oldAudio !== newAudio
+              ? crossfadePlayers(oldAudio, newAudio)
+              : fadePlayer(newAudio, 0, 1, FADE_IN_DURATION)
+          void fadeInPromise.finally(() => {
+            if (requestId !== switchRequestId) return
+            oldAudio.pause()
+            oldAudio.currentTime = 0
+            oldAudio.volume = 0
+          })
+        } else {
+          oldAudio.pause()
+          oldAudio.currentTime = 0
+          oldAudio.volume = 0
+        }
+      })
+      .catch(() => {
+        if (requestId !== switchRequestId) return
+        failedTrackIds.add(track.id)
+        preloadMessage.value = `已跳过暂时无法播放的歌曲，正在继续播放`
+        newAudio.pause()
+        activeAudio = oldAudio
+        const reverseSlot = preloadSlots[direction === 'next' ? 'previous' : 'next']
+        reverseSlot.audio = newAudio
+        reverseSlot.track = null
+        reverseSlot.ready = null
+        clearSlot(reverseSlot)
+        isPlaying.value = !oldAudio.paused
+        window.setTimeout(() => void next(false), 0)
+      })
+
+    return true
   }
 
   async function selectAndPlay(track: Track, queue: Track[]) {
+    // 先递增 requestId：即便过渡中被 early return，也让当前执行的请求知道自己已被取消。
+    const requestId = ++switchRequestId
     if (transitionInProgress) return
     transitionInProgress = true
-    ++switchRequestId
-    // 直接选中新曲目时，上一次 seek 的 pending 时间不应被新歌沿用。
     pendingSeekTime = null
     const wasPlaying = isPlaying.value
     const useSmoothSwitch = settings.value.smoothTrackChange && wasPlaying
-    if (useSmoothSwitch) await fadePlayer(activeAudio, audioGain(activeAudio), 0, FADE_OUT_DURATION)
-    else activeAudio.pause()
+    // 旧曲淡出改为非阻塞：触发 fade out 后立即继续切歌流程，
+    // 让用户连点下一首/上一首/列表切歌都能立刻生效。
+    if (useSmoothSwitch) {
+      const oldGain = audioGain(activeAudio)
+      void fadePlayer(activeAudio, oldGain, 0, FADE_OUT_DURATION)
+    } else {
+      activeAudio.pause()
+    }
     const slot = findSlotByTrack(track)
     if (slot && slotCanStart(slot, track)) {
       const oldAudio = activeAudio
@@ -385,13 +424,33 @@ export function useAudioPlayer() {
     }
     activeAudio.currentTime = 0
     setPlayerVolume(activeAudio, useSmoothSwitch ? 0 : 1)
+    // 提交状态并立即释放锁 —— commitActiveAudio 内部会设置 transitionInProgress = false。
+    // 这样 UI 立刻刷新，用户可以马上连点下一首/上一首/再选别的歌。
     commitActiveAudio(track, queue, useSmoothSwitch ? 0 : 1)
-    const played = await playActiveAudio(useSmoothSwitch ? 0 : 1)
-    if (played && useSmoothSwitch) await fadePlayer(activeAudio, 0, 1, FADE_IN_DURATION)
-    if (!played && settings.value.skipOnError && queue.length > 1) {
-      failedTrackIds.add(track.id)
-      window.setTimeout(() => void next(false), 80)
-    }
+    isPlaying.value = true
+
+    // 异步启动播放；不阻塞外层调用，连点时通过 requestId 自然作废。
+    const audioForPlay = activeAudio
+    audioForPlay
+      .play()
+      .then(() => {
+        if (requestId !== switchRequestId) return
+        store.errorMessage = ''
+        void startBeatAnalysis()
+        scheduleAdjacentPreload()
+        if (useSmoothSwitch) {
+          void fadePlayer(audioForPlay, 0, 1, FADE_IN_DURATION)
+        }
+      })
+      .catch((error) => {
+        if (requestId !== switchRequestId) return
+        isPlaying.value = false
+        store.errorMessage = describePlaybackError(error, audioForPlay)
+        if (settings.value.skipOnError && queue.length > 1) {
+          failedTrackIds.add(track.id)
+          window.setTimeout(() => void next(false), 80)
+        }
+      })
   }
 
   async function next(manual = true) {
@@ -488,9 +547,11 @@ export function useAudioPlayer() {
     currentTime.value = audio.currentTime
     if (Number.isFinite(audio.duration) && audio.duration > 0) {
       const remaining = audio.duration - audio.currentTime
+      const nextSlot = preloadSlots.next
       if (
         settings.value.smoothTrackChange &&
-        preloadSlots.next.track &&
+        nextSlot.track &&
+        nextSlot.ready &&
         !automaticCrossfadeStarted &&
         remaining <= CROSSFADE_DURATION / 1000
       ) {
@@ -559,23 +620,22 @@ export function useAudioPlayer() {
     const onError: EventListener = () => {
       if (audio !== activeAudio) return
       const failedTrack = currentTrack.value
-      // 即便正处于过渡阶段也要记录失败的 trackId，避免静默吞错导致后续无法定位问题。
-      if (transitionInProgress) {
-        if (failedTrack) {
-          failedTrackIds.add(failedTrack.id)
+      // 过渡期间失败也要正确释放锁，否则后续所有切歌操作都会被永久阻止。
+      const wasTransitioning = transitionInProgress
+      transitionInProgress = false
+      automaticCrossfadeStarted = false
+      if (failedTrack) {
+        failedTrackIds.add(failedTrack.id)
+        preloadMessage.value = `已跳过暂时无法播放的歌曲，正在继续播放`
+        if (wasTransitioning) {
           console.warn(
             '[useAudioPlayer] active audio error during transition',
             failedTrack.id,
             audio.error,
           )
-        } else {
-          console.warn('[useAudioPlayer] active audio error during transition', audio.error)
         }
-        return
-      }
-      if (failedTrack) {
-        failedTrackIds.add(failedTrack.id)
-        preloadMessage.value = `已跳过暂时无法播放的歌曲，正在继续播放`
+      } else if (wasTransitioning) {
+        console.warn('[useAudioPlayer] active audio error during transition', audio.error)
       }
       store.errorMessage = ''
       if (settings.value.skipOnError && store.queue.length > 1) {

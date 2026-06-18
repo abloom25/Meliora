@@ -51,17 +51,15 @@
   const store = usePlayerStore()
   const { currentTrack, currentTrackId, currentTime, duration, isPlaying, settings } =
     storeToRefs(store)
-  const {
-    beatLevel,
-    spectrumLevels,
-    preloadMessage,
-    toggle,
-    pause,
-    seek,
-    next,
-    previous,
-    selectAndPlay,
-  } = useAudioPlayer()
+  // --beat-level 高频写入的目标节点：通过 ref 收集真正消费该变量的容器，
+  // useBeatAnalyser 会在 RAF 中直接 setProperty 到这些节点，跳过根 :style 的样式重算。
+  const artworkBackgroundRef = ref<HTMLElement | null>(null)
+  const backgroundOverlayRef = ref<HTMLElement | null>(null)
+
+  const { spectrumLevels, preloadMessage, toggle, pause, seek, next, previous, selectAndPlay } =
+    useAudioPlayer({
+      getBeatTargets: () => [artworkBackgroundRef.value, backgroundOverlayRef.value],
+    })
   const {
     isOpen: lyricsWindowOpen,
     setSnapshot: setLyricsWindowSnapshot,
@@ -103,7 +101,15 @@
   })
 
   // Cover cache composable (singleton)
-  const { loadedCovers, failedCovers, markCoverLoaded, markCoverFailed } = useCoverCache()
+  const {
+    loadedCovers,
+    failedCovers,
+    mainCoverReadyTrackId,
+    markCoverLoaded,
+    markCoverFailed,
+    markMainCoverReady,
+    resetMainCover,
+  } = useCoverCache()
 
   // Keyboard shortcuts composable
   useKeyboardShortcuts({
@@ -234,7 +240,8 @@
   const playModeText = computed(() => PLAY_MODE_META[settings.value.playMode].text)
   const playModeIcon = computed(() => PLAY_MODE_META[settings.value.playMode].icon)
   const beatStyle = computed(() => ({
-    '--beat-level': beatLevel.value.toFixed(3),
+    // --beat-level 已移出本 computed：高频写入由 useBeatAnalyser 直接 setProperty 到目标节点，
+    // 避免根元素 :style 改变触发整棵子树（233 个节点）样式重算。
     '--accent': accent.value,
     '--accent-soft': accentSoft.value,
     '--accent-rgb': accentRgb.value,
@@ -498,15 +505,27 @@
   }
 
   async function handleMainCoverLoaded(trackId: string, event: Event) {
-    markCoverLoaded(trackId)
     const image = event.currentTarget as HTMLImageElement
-    const immediateTheme: ThemeColor | null = (() => {
-      try {
-        return extractThemeColor(image)
-      } catch {
-        return null
-      }
-    })()
+    // 等图片完整解码完成后再标记 loaded：
+    // 避免浏览器渲染半解码的图像（视觉上"从上往下"逐行加载的效果），
+    // 让 fade-in transition 真正发生在一张完整图像上。
+    try {
+      await image.decode?.()
+    } catch {
+      // 部分浏览器对跨域 / data URL 图片会拒绝 decode()，忽略并直接标记为已加载。
+    }
+    if (currentTrack.value?.id !== trackId) return
+    markCoverLoaded(trackId)
+    markMainCoverReady(trackId)
+    // extractThemeColor 现在是 async（Worker 化）；直接 await 即可。
+    // 如果 Worker 路径成功就返回新主题色；失败时内部已自动 fallback 到主线程 + null 兜底。
+    let immediateTheme: ThemeColor | null
+    try {
+      immediateTheme = await extractThemeColor(image)
+    } catch {
+      immediateTheme = null
+    }
+    if (currentTrack.value?.id !== trackId) return
     const theme = immediateTheme ?? (await loadThemeColor(image.currentSrc || image.src))
     if (!theme || currentTrack.value?.id !== trackId) return
     applyTheme(theme)
@@ -537,6 +556,9 @@
   })
 
   watch(currentTrackId, () => {
+    // 切歌时立即重置主封面"已就绪"状态，让新封面重新走 fade-in transition；
+    // 列表里的小封面缓存（loadedCovers）保留，避免抽屉滚动时小图重复闪现。
+    resetMainCover()
     lyricAvailability.value = 'unavailable'
     if (!currentTrack.value?.lyricsUrl) mobileView.value = 'cover'
     if (!currentTrack.value?.cover) {
@@ -575,6 +597,7 @@
       'background-disabled': !settings.dynamicBackground,
       'chrome-hidden': chromeHidden,
       'drawer-open': listOpen || settingsOpen,
+      'beat-active': isPlaying,
     }"
     :style="beatStyle"
     @mousemove="revealChrome"
@@ -583,11 +606,12 @@
       <div
         v-if="backgroundImage !== 'none'"
         :key="currentTrack?.id || 'empty-bg'"
+        ref="artworkBackgroundRef"
         class="artwork-background"
-        :style="{ '--cover-image': backgroundImage }"
+        :style="{ '--cover-image': backgroundImage, '--beat-level': '0' }"
       />
     </Transition>
-    <div class="background-overlay" />
+    <div ref="backgroundOverlayRef" class="background-overlay" :style="{ '--beat-level': '0' }" />
 
     <header class="topbar" @click="onTopbarClick">
       <div class="brand">
@@ -647,7 +671,7 @@
       >
         <div
           class="artwork-frame"
-          :class="{ loaded: currentTrack && loadedCovers.has(currentTrack.id) }"
+          :class="{ loaded: currentTrack && mainCoverReadyTrackId === currentTrack.id }"
         >
           <img
             v-if="currentTrack?.cover && !failedCovers.has(currentTrack.id)"
@@ -655,12 +679,16 @@
             :src="currentTrack.cover"
             alt=""
             aria-hidden="true"
+            decoding="async"
+            loading="eager"
           />
           <img
             v-if="currentTrack?.cover && !failedCovers.has(currentTrack.id)"
             :key="currentTrack.id"
             :src="currentTrack.cover"
             :alt="`${currentTrack.title} 封面`"
+            decoding="async"
+            loading="eager"
             @load="handleMainCoverLoaded(currentTrack.id, $event)"
             @error="markCoverFailed(currentTrack.id)"
           />
@@ -828,6 +856,8 @@
               v-if="currentTrack.cover && !failedCovers.has(currentTrack.id)"
               :src="currentTrack.cover"
               alt=""
+              loading="lazy"
+              decoding="async"
               @load="markCoverLoaded(currentTrack.id)"
               @error="markCoverFailed(currentTrack.id)"
             />
@@ -1108,6 +1138,8 @@
       opacity 0.12s linear,
       filter 0.12s linear,
       transform 0.18s ease;
+  }
+  .beat-active .artwork-background {
     will-change: opacity, filter, transform;
   }
   .artwork-bg-swap-enter-active,
@@ -2179,7 +2211,7 @@
       border-radius: 50%;
       opacity: 0.38;
       filter: blur(46px) saturate(145%) brightness(1.02);
-      transform: translate3d(-12%, -12%, 0) scale(1.12);
+      transform: scale(1.12);
       clip-path: ellipse(48% 48% at 50% 50%);
       mask-image: radial-gradient(
         ellipse at center,
@@ -2588,7 +2620,7 @@
       .artwork-frame .artwork-glow {
         opacity: 0.34;
         filter: blur(40px) saturate(140%) brightness(1.02);
-        transform: translate3d(-12%, -12%, 0) scale(1.08);
+        transform: scale(1.08);
         will-change: auto;
       }
     }

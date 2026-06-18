@@ -96,6 +96,7 @@
 - 语言:TypeScript 严格模式,**不允许** `any`,需要时用 `unknown` + 类型守卫。
 - 构建:Vite,`base: './'` 保持相对路径输出。
 - 包管理:**pnpm**(项目锁文件为 `pnpm-lock.yaml`)。
+- 运行环境:`engines.node >= 20`、`engines.pnpm >= 8`(`package.json` 已声明);`packageManager` 锁定为 `pnpm@11.5.3`,所有部署平台 / CI 同步使用 **Node 22 + pnpm 11**。
 - 样式:SCSS + 大量 CSS 变量;**禁止**引入 Tailwind、UnoCSS、CSS-in-JS。
 - 图标:统一使用 `@lucide/vue`,不混用其他图标库。
 - 依赖原则:**能用浏览器原生 API 就不引入依赖**;新增依赖必须先与用户确认。
@@ -115,20 +116,22 @@
 编排      src/App.vue         只装配,不写业务
 能力      src/composables/    业务 hook(命名 useXxx)
 服务      src/services/       远程/外部 IO 抽象
-工具      src/utils/          纯函数 + 数据结构
+工具      src/utils/          纯函数 + 数据结构(部分需保持 DOM-free 以便供 worker 共用,详见 §3.7)
 组件      src/components/     视图组件
+Worker    src/workers/        Web Worker 入口(`*.worker.ts`),仅依赖 `src/utils/` 中的纯模块
 配置/类型 src/config/, src/types/
 样式      src/styles/         全局样式
 PWA       public/sw.js, public/manifest.webmanifest
 脚本      scripts/            构建期 node 脚本
 ```
 
-依赖方向:`components / App.vue → composables → services / stores → utils / types`。
+依赖方向:`components / App.vue → composables → services / stores → utils / types`;Worker 入口仅允许 `import` `src/utils/` 中标记为 DOM-free 的纯模块。
 
 - `utils` **不得** import composables / services / stores / components。
 - `services` **不得** import composables / components。
 - `composables` 之间可互相组合,但避免循环依赖。
 - `stores` 只描述真状态,**不**承担业务流程编排。
+- `workers` 中的代码运行在 Worker 上下文,**不得** import 任何 DOM/BOM API、Vue 模块、composable、store、service;只能 import `src/utils/` 中的 DOM-free 纯模块。
 
 ---
 
@@ -136,7 +139,7 @@ PWA       public/sw.js, public/manifest.webmanifest
 
 ### 3.1 通用约定
 
-- 缩进 2 空格,使用单引号,**不写**分号(遵循现有源文件风格)。
+- 缩进 2 空格,使用单引号,**写**分号(prettier 默认行为,沿用现有源文件风格)。
 - 文件末尾保留一个空行。
 - 命名:
   - 文件:Vue 组件 `PascalCase.vue`,composable `useXxx.ts`,工具 `kebab-case.ts` 或 `camelCase.ts`(沿用既有命名)。
@@ -171,6 +174,7 @@ PWA       public/sw.js, public/manifest.webmanifest
 - 副作用必须在 `onBeforeUnmount` 中完整清理:事件监听集中放入 `listeners: Array<() => void>` 一次性 detach。
 - 所有 `setTimeout / setInterval / requestAnimationFrame` 必须保存句柄并在卸载时清理。
 - 涉及 DOM/BOM 的 API 访问前先做能力检测(`typeof window !== 'undefined'`、`'mediaSession' in navigator` 等)。
+- **高频 DOM 直写接口**:涉及每帧/亚秒级写入 DOM 属性或 CSS 变量的 composable,应通过 `getXxxTargets?: () => readonly (HTMLElement | null | undefined)[]` 形式接收宿主提供的目标节点,而不是自己持有 ref。这样能让宿主决定写入范围,避免污染根元素 `:style`(参考 `useBeatAnalyser` 的 `getBeatTargets`)。
 
 ### 3.5 Store(Pinia)
 
@@ -184,7 +188,7 @@ PWA       public/sw.js, public/manifest.webmanifest
 
 - 所有外部 IO **必须**:
   - 接受可选 `signal?: AbortSignal`;
-  - 自带超时(默认 8s),内部用 `AbortController` 实现,`finally` 清理 timer;
+  - 自带超时(**远程 IO 默认 8s**),内部用 `AbortController` 实现,`finally` 清理 timer;
   - 用 `try/catch` 包裹,失败时返回结构化结果或抛出可识别错误,**绝不**让未处理的 reject 冒泡。
 - 并行请求统一用 `Promise.allSettled`,单源失败不影响其他源。
 - 远程返回的数据先经过 `utils/` 中的 adapter(`mapXxx`)归一化,再进入 store。
@@ -194,6 +198,11 @@ PWA       public/sw.js, public/manifest.webmanifest
 
 - 必须是**纯函数**或纯数据结构,无副作用,无 IO,无 DOM 依赖(除非工具本身就是 DOM 工具,如 `utils/dom.ts`)。
 - 覆盖到的算法/解析逻辑需补 vitest 单测。
+- **DOM-free 共享纯模块**:任何会被 `src/workers/` 中 Worker 入口 import 的纯模块(例如 `utils/theme-core.ts`)**必须**保持完全 DOM-free——
+  - 不得使用 `document` / `window` / `Image` / `HTMLCanvasElement` / `OffscreenCanvas` 等 DOM/BOM API;
+  - 也不得 import `utils/dom.ts` 等含 DOM 引用的模块;
+  - 输入参数应使用平台中立的数据形态(`Uint8ClampedArray`、`Uint8Array`、纯对象等),由调用方在主线程或 Worker 中分别完成像素采样/解码后再传入。
+  - 形如"主线程版"包装文件(`utils/theme.ts`)负责接住 DOM 输入并选择 Worker 路径或主线程兜底,纯算法仅放在 `*-core.ts` 中。
 
 ---
 
@@ -201,7 +210,10 @@ PWA       public/sw.js, public/manifest.webmanifest
 
 ### 4.1 视听一体
 
-- UI 应跟随音乐"呼吸":通过 CSS 变量(`--beat-level`、`--accent`、`--accent-rgb`、`--accent-soft`、`--background-blur`、`--background-saturation`、`--beat-brightness`)在根容器统一注入,样式层通过变量消费,**避免**在 JS 中频繁直接操作 style 属性。
+- UI 应跟随音乐"呼吸":通过 CSS 变量(`--beat-level`、`--accent`、`--accent-rgb`、`--accent-soft`、`--background-blur`、`--background-saturation`、`--beat-brightness`)在根容器统一注入,样式层通过变量消费。
+- **CSS 变量写入路径分两类,严格区分**:
+  - **低频/语义类变量**(如 `--accent`、`--accent-soft`、`--background-blur`):在根容器以 `:style` 对象绑定 / `applyTheme()` 注入,允许走 Vue reactivity。
+  - **高频/动画类变量**(如 `--beat-level`,每帧 60Hz 写入):**必须**通过 `useBeatAnalyser` 的 `getBeatTargets` 接口在 RAF 中直接 `el.style.setProperty(...)` 到目标节点,**严禁**让其经过根 `:style` 或 computed,否则会触发整树 style recalc 风暴。变量去重(`lastValue` 比较)与 `isConnected` 守卫是必须的。
 - 主题色由封面图采样决定,过渡用 720ms cubic-out 在 RGB 三通道插值平滑切换,严禁硬切。
 - 节拍/能量类计算必须支持 `prefers-reduced-motion` 早退。
 
@@ -245,14 +257,18 @@ PWA       public/sw.js, public/manifest.webmanifest
 
 ## 5. 性能与工程兜底
 
-- **fetch**:统一带超时(8s 默认)、AbortController、try/catch;允许时走 `Promise.allSettled` 并行。
-- **缓存**:重复读取的远程资源使用 `utils/lru-cache.ts`(默认容量 64),命中标志需区分"in-flight Promise"与"已完成结果"。
+- **fetch**:统一带超时(**远程 IO 8s 默认**)、AbortController、try/catch;允许时走 `Promise.allSettled` 并行。
+- **预加载超时**:相邻曲目预加载等本地 / 媒体资源预热超时单独管理(当前 `usePreloadPool` 使用 `PRELOAD_READY_TIMEOUT = 9000`),与 §3.6 的远程 IO 超时区分;新增预加载场景须显式声明并 ≥6s 防止挂死。
+- **缓存**:重复读取的远程资源使用 `utils/lru-cache.ts`,各使用方按域独立持有 LRU 实例(当前主题色、歌词、标题各持有一份,容量按域自定,默认 64);命中标志需区分"in-flight Promise"与"已完成结果"。
 - **图片**:大图加载前优先 `Image.decode()`,失败再 fallback。
 - **长列表**:超过 ~80 条时使用虚拟列表(参考 `TrackList.vue`),`ITEM_HEIGHT` + `BUFFER_COUNT`。
 - **共享状态**:跨组件的轻量缓存优先用**模块级 `shallowRef`** 形成单例(参考 `useCoverCache`),避免每个组件重新订阅。
+  - **二态语义**:同一 composable 中需要"曲库级持久缓存"与"切歌即重置"两类状态时,**必须分别建模**——前者用模块级 `shallowRef<Set<string>>`(如 `loadedCovers`),后者用模块级 `ref<string | null>`(如 `mainCoverReadyTrackId`),并提供独立的 `markXxx` / `resetXxx` 方法,严禁混用同一变量。
 - **存储**:**禁止**直接调用 `localStorage`,必须经过 `utils/storage.ts` 的 `safeStorage`。
 - **音视频**:涉及 `<audio>`/`<video>` 时,优先复用元素而非销毁重建;若挂接 WebAudio,务必记录"`createMediaElementSource` 只能 attach 一次"的约束。
-- **预加载**:可预测的下一步资源应提前并行预热(音频 / 封面 / 文本),并设置 race timeout(≥6s)防止挂死。
+- **预加载**:可预测的下一步资源应提前并行预热(音频 / 封面 / 文本),并设置 race timeout(≥6s)防止挂死。预加载封面等占用图像内存的资源时,只对**主预测方向**(下一首)预热,不要对方向 / 反向同时预热。
+- **GPU 合成层**:`will-change` **不得**常驻挂在静态规则上,应通过条件 class(如 `.beat-active`)只在动画期间启用;暂停 / 空闲时让浏览器回收合成层。
+- **CPU 密集任务**:任何主线程单次执行 >4ms 的图像/像素/解码运算(主题色提取、画布采样等)**必须**走 Web Worker(`src/workers/*.worker.ts`)+ `OffscreenCanvas` + `transferable ImageBitmap`(零复制)的组合,主线程负责 DOM I/O,Worker 负责算力;失败 / 超时(默认 1.5s)必须有主线程同步兜底回退。
 - **防抖/节流**:UI 同步状态用 `requestAnimationFrame`;持久化与高频写入用 ≥150ms debounce。
 - **监听器**:集中存入数组并在卸载/切换时一次性 detach,**严禁**遗留事件监听导致泄漏。
 
@@ -337,6 +353,7 @@ PWA       public/sw.js, public/manifest.webmanifest
 pnpm install
 pnpm dev
 pnpm test
+pnpm test:watch
 pnpm type-check
 pnpm lint
 pnpm format

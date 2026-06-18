@@ -1,8 +1,9 @@
 import { onBeforeUnmount, ref, type Ref } from 'vue'
 
-// 模块级缓存：避免对同一 HTMLAudioElement 重复调用 createMediaElementSource
-// 浏览器对同一个 audio 节点只允许 attach 一次，重复 attach 会抛出 InvalidStateError
-const attachedAudios = new WeakSet<HTMLAudioElement>()
+// 模块级音频上下文与 source 缓存：
+// 浏览器对同一个 audio 节点只允许 createMediaElementSource 一次。
+// 因此保持一个共享 AudioContext，避免组件重建后把旧 source 连接到新/已关闭 context。
+let sharedAudioContext: AudioContext | null = null
 const mediaSourceMap = new WeakMap<HTMLAudioElement, MediaElementAudioSourceNode>()
 
 function clamp(value: number, min: number, max: number) {
@@ -13,29 +14,87 @@ export interface BeatAnalyserOptions {
   players: readonly HTMLAudioElement[]
   getActiveAudio: () => HTMLAudioElement
   isPlaying: Ref<boolean>
+  /**
+   * 可选：返回需要每帧同步 `--beat-level` CSS 变量的 DOM 节点列表。
+   * 直接 setProperty 到这些节点可以避免根元素 :style 触发整棵子树样式重算，
+   * 大幅降低 UpdateLayoutTree 频次。
+   */
+  getBeatTargets?: () => readonly (HTMLElement | null | undefined)[]
 }
 
 export function useBeatAnalyser(options: BeatAnalyserOptions) {
-  const { players, getActiveAudio } = options
+  const { players, getActiveAudio, isPlaying, getBeatTargets } = options
   const beatLevel = ref(0)
   const spectrumLevels = ref([0.1, 0.1, 0.1, 0.1])
+  // 记录最近一次写到 DOM 的字符串值，避免重复写入触发样式风暴。
+  let lastBeatLevelCssValue = ''
+
+  function writeBeatLevelToTargets(value: number) {
+    if (!getBeatTargets) return
+    const next = value.toFixed(3)
+    if (next === lastBeatLevelCssValue) return
+    lastBeatLevelCssValue = next
+    const targets = getBeatTargets()
+    for (const el of targets) {
+      // isConnected 守卫：组件卸载或 v-if 隐藏时跳过，避免脏写已脱离 DOM 的节点。
+      if (el && el.isConnected) el.style.setProperty('--beat-level', next)
+    }
+  }
+
   let audioContext: AudioContext | null = null
   let analyser: AnalyserNode | null = null
   let frequencyData: Uint8Array<ArrayBuffer> | null = null
   let previousFrequencyData: Float32Array | null = null
+  const connectedSources: Array<{
+    source: MediaElementAudioSourceNode
+    analyser: AnalyserNode
+  }> = []
   let beatFrame = 0
   let energyFloor = 0.08
   let fluxFloor = 0.02
   let beatPeak = 0.35
   let spectrumPeak = 0.28
   let spectrumTick = 0
+  let visibilityListenerRegistered = false
 
   function stopBeatAnalysis() {
     window.cancelAnimationFrame(beatFrame)
     beatFrame = 0
     beatLevel.value = 0
+    writeBeatLevelToTargets(0)
     if (previousFrequencyData) previousFrequencyData.fill(0)
     spectrumLevels.value = spectrumLevels.value.map(() => 0.08)
+    if (visibilityListenerRegistered) {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      visibilityListenerRegistered = false
+    }
+  }
+
+  function pauseBeatAnalysis() {
+    if (!beatFrame) return
+    window.cancelAnimationFrame(beatFrame)
+    beatFrame = 0
+    if (previousFrequencyData) previousFrequencyData.fill(0)
+    spectrumLevels.value = spectrumLevels.value.map((level) => Math.max(0.08, level * 0.82))
+    writeBeatLevelToTargets(0)
+  }
+
+  function handleVisibilityChange() {
+    if (document.hidden) {
+      pauseBeatAnalysis()
+    } else {
+      if (audioContext?.state === 'suspended') {
+        void audioContext.resume()
+      }
+      if (!beatFrame && isPlaying.value) beatFrame = window.requestAnimationFrame(updateBeatLevel)
+    }
+  }
+
+  function getAudioContext(): AudioContext {
+    if (!sharedAudioContext || sharedAudioContext.state === 'closed') {
+      sharedAudioContext = new AudioContext()
+    }
+    return sharedAudioContext
   }
 
   function bandEnergy(data: Uint8Array<ArrayBuffer>, from: number, to: number) {
@@ -67,6 +126,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     const activeAudio = getActiveAudio()
     if (!analyser || !frequencyData || activeAudio.paused) {
       beatLevel.value *= 0.88
+      writeBeatLevelToTargets(beatLevel.value)
       spectrumLevels.value = spectrumLevels.value.map((level) => Math.max(0.08, level * 0.82))
       if (beatLevel.value > 0.005) beatFrame = window.requestAnimationFrame(updateBeatLevel)
       else stopBeatAnalysis()
@@ -74,6 +134,10 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     }
     analyser.getByteFrequencyData(frequencyData)
     const data = frequencyData
+    // 确保 previousFrequencyData 长度与 data 一致（在任何读操作之前执行，防止旧数据残留导致频谱计算异常）
+    if (!previousFrequencyData || previousFrequencyData.length !== data.length) {
+      previousFrequencyData = new Float32Array(data.length)
+    }
     const bassEnd = Math.max(7, Math.floor(data.length * 0.1))
     const lowMidEnd = Math.max(bassEnd + 5, Math.floor(data.length * 0.24))
     const bassEnergy = bandEnergy(data, 1, bassEnd)
@@ -89,6 +153,8 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     const shapedPulse = pulse < 0.08 ? 0 : Math.pow(pulse, 1.28)
     beatLevel.value +=
       (shapedPulse - beatLevel.value) * (shapedPulse > beatLevel.value ? 0.52 : 0.12)
+    // 高频写入：直接 setProperty 到目标节点，跳过 Vue reactivity 与根 :style 路径
+    writeBeatLevelToTargets(beatLevel.value)
 
     spectrumTick += 1
     const sampleGroups = [
@@ -121,9 +187,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       return previous + (target - previous) * (target > previous ? 0.44 : 0.24)
     })
     spectrumLevels.value = nextSpectrum
-    if (!previousFrequencyData || previousFrequencyData.length !== data.length) {
-      previousFrequencyData = new Float32Array(data.length)
-    }
+    // 将当前帧数据保存为"上一帧"供下一帧频谱通量计算使用
     for (let index = 0; index < data.length; index += 1) {
       previousFrequencyData[index] = (data[index] ?? 0) / 255
     }
@@ -132,36 +196,27 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
 
   async function startBeatAnalysis() {
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    if (!visibilityListenerRegistered) {
+      document.addEventListener('visibilitychange', handleVisibilityChange)
+      visibilityListenerRegistered = true
+    }
     try {
       if (!audioContext) {
-        audioContext = new AudioContext()
+        audioContext = getAudioContext()
         analyser = audioContext.createAnalyser()
         analyser.fftSize = 256
         analyser.smoothingTimeConstant = 0.5
         players.forEach((audio) => {
-          // 通过 WeakSet 守卫确保每个 audio 只 attach 一次；
-          // 即使 hook 多次实例化或热更新触发，也不会再次抛出 InvalidStateError。
-          if (attachedAudios.has(audio)) {
-            const cached = mediaSourceMap.get(audio)
-            if (cached) {
-              cached.connect(analyser!)
-            }
-            return
-          }
+          let source = mediaSourceMap.get(audio)
           try {
-            const source = audioContext!.createMediaElementSource(audio)
-            attachedAudios.add(audio)
-            mediaSourceMap.set(audio, source)
-            source.connect(analyser!)
-          } catch (error) {
-            // 兜底：极端情况下浏览器仍可能抛 InvalidStateError，复用已缓存 source。
-            const cached = mediaSourceMap.get(audio)
-            if (cached) {
-              attachedAudios.add(audio)
-              cached.connect(analyser!)
-            } else {
-              console.warn('[useAudioPlayer] createMediaElementSource failed', error)
+            if (!source) {
+              source = audioContext!.createMediaElementSource(audio)
+              mediaSourceMap.set(audio, source)
             }
+            source.connect(analyser!)
+            connectedSources.push({ source, analyser: analyser! })
+          } catch (error) {
+            console.warn('[useAudioPlayer] createMediaElementSource failed', error)
           }
         })
         analyser.connect(audioContext.destination)
@@ -177,7 +232,21 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
 
   onBeforeUnmount(() => {
     stopBeatAnalysis()
-    void audioContext?.close()
+    for (const { source, analyser: targetAnalyser } of connectedSources) {
+      try {
+        source.disconnect(targetAnalyser)
+      } catch {
+        // The source may already have been disconnected by browser cleanup.
+      }
+    }
+    connectedSources.length = 0
+    try {
+      analyser?.disconnect()
+    } catch {
+      // Ignore disconnect errors during teardown.
+    }
+    analyser = null
+    audioContext = null
   })
 
   return { beatLevel, spectrumLevels, startBeatAnalysis, stopBeatAnalysis }

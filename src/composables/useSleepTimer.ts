@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 
 export interface UseSleepTimerOptions {
   onPause: () => void
@@ -83,6 +83,8 @@ export function useSleepTimer(options: UseSleepTimerOptions) {
   function handleSleepTimerChange(event: Event) {
     setSleepTimer(snapSleepTimerMinutes(Number((event.target as HTMLInputElement).value)))
   }
+
+  onBeforeUnmount(clearSleepTimer)
 
   return {
     sleepTimerMinutes,

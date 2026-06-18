@@ -27,13 +27,16 @@
   const isScrolling = ref(false)
   const ITEM_HEIGHT = 66
   const BUFFER_COUNT = 5
+  const SEARCH_DEBOUNCE_MS = 180
 
   const scrollTop = ref(0)
   const containerRef = ref<HTMLElement | null>(null)
   const activeTrackElement = ref<HTMLElement | null>(null)
   const focusPulseTrackId = ref<string | null>(null)
+  const debouncedQuery = ref(props.query)
   let scrollTimer = 0
   let focusTimer = 0
+  let searchTimer = 0
 
   const displayList = computed(() =>
     props.tracks.map((track, index) => ({ track, display: splitDisplayTitle(track.title), index })),
@@ -66,6 +69,20 @@
     scrollTimer = window.setTimeout(() => {
       isScrolling.value = false
     }, 850)
+  }
+
+  function handleSearchInput(value: string) {
+    debouncedQuery.value = value
+    window.clearTimeout(searchTimer)
+    searchTimer = window.setTimeout(() => {
+      emit('update:query', value)
+    }, SEARCH_DEBOUNCE_MS)
+  }
+
+  function clearSearch() {
+    window.clearTimeout(searchTimer)
+    debouncedQuery.value = ''
+    emit('update:query', '')
   }
 
   function bindActiveTrackElement(
@@ -106,12 +123,20 @@
     () => void scrollActiveTrackIntoView(),
   )
   watch(
-    () => props.tracks.map((track) => track.id).join('|'),
+    () => props.query,
+    (value) => {
+      debouncedQuery.value = value
+    },
+  )
+  // 用 tracks.length + 首个 track.id 替代全量 concat.join，避免 O(n) 字符串拼接
+  watch(
+    () => [props.tracks.length, props.tracks[0]?.id],
     () => void scrollActiveTrackIntoView(false),
   )
   onBeforeUnmount(() => {
     window.clearTimeout(scrollTimer)
     window.clearTimeout(focusTimer)
+    window.clearTimeout(searchTimer)
   })
 </script>
 
@@ -129,12 +154,12 @@
         <label class="search-box">
           <Search :size="16" />
           <input
-            :value="query"
+            :value="debouncedQuery"
             type="search"
             placeholder="搜索"
-            @input="emit('update:query', ($event.target as HTMLInputElement).value)"
+            @input="handleSearchInput(($event.target as HTMLInputElement).value)"
           />
-          <button v-if="query" aria-label="清空搜索" @click="emit('update:query', '')">
+          <button v-if="query" aria-label="清空搜索" @click="clearSearch">
             <X :size="14" />
           </button>
         </label>

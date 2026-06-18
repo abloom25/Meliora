@@ -19,7 +19,13 @@ export function loadLyricsText(url: string, signal?: AbortSignal): Promise<strin
   const timer = setTimeout(() => controller.abort(), LYRICS_FETCH_TIMEOUT_MS)
 
   // 链接外部 signal：外部 abort → 本地 abort
+  // 将 forwardAbort 存入 entry 以便 cleanup 时精准移除，防止误删其他请求的监听器
+  const entry: LyricsCacheEntry & { forwardAbort?: () => void } = {
+    ready: false,
+    promise: Promise.resolve(''),
+  }
   const forwardAbort = () => controller.abort(signal?.reason)
+  entry.forwardAbort = forwardAbort
   if (signal) {
     if (signal.aborted) {
       controller.abort(signal.reason)
@@ -31,13 +37,9 @@ export function loadLyricsText(url: string, signal?: AbortSignal): Promise<strin
   // 清理本次请求占用的资源（定时器与外部 signal 监听器）
   const cleanup = () => {
     clearTimeout(timer)
-    if (signal) signal.removeEventListener('abort', forwardAbort)
+    if (signal) signal.removeEventListener('abort', entry.forwardAbort!)
   }
 
-  const entry: LyricsCacheEntry = {
-    ready: false,
-    promise: Promise.resolve(''),
-  }
   entry.promise = fetch(url, { cache: 'force-cache', signal: controller.signal })
     .then((response) => {
       if (!response.ok) throw new Error('Lyrics request failed')

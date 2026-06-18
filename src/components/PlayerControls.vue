@@ -25,9 +25,14 @@
 
   function formatTime(value: number) {
     if (!Number.isFinite(value)) return '0:00'
-    return `${Math.floor(value / 60)}:${Math.floor(value % 60)
-      .toString()
-      .padStart(2, '0')}`
+    const totalSeconds = Math.floor(value)
+    const hours = Math.floor(totalSeconds / 3600)
+    const minutes = Math.floor((totalSeconds % 3600) / 60)
+    const seconds = totalSeconds % 60
+    if (hours > 0) {
+      return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+    }
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`
   }
 
   function formatRemaining() {

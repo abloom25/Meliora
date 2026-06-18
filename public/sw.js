@@ -25,7 +25,9 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   // 对带 Range 头的请求（通常用于音视频分段加载）直接放行，避免 SW 缓存层破坏 206 响应
-  if (event.request.headers.has('range')) return
+  // 使用 lowercase 遍历避免 HTTP header 名大小写不敏感问题（RFC 9110）
+  const rangeHeader = event.request.headers.get('range')
+  if (rangeHeader && rangeHeader.trim().length > 0) return
   // 对音频与视频资源直接放行，交由浏览器默认处理，确保流式与 seek 行为正常
   if (event.request.destination === 'audio' || event.request.destination === 'video') return
 
