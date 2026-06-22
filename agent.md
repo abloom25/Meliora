@@ -139,7 +139,7 @@ PWA       public/sw.js, public/manifest.webmanifest
 
 ### 3.1 通用约定
 
-- 缩进 2 空格,使用单引号,**写**分号(prettier 默认行为,沿用现有源文件风格)。
+- 缩进 2 空格,使用单引号,**不写**分号(prettier 配置 `semi: false`,沿用现有源文件风格)。
 - 文件末尾保留一个空行。
 - 命名:
   - 文件:Vue 组件 `PascalCase.vue`,composable `useXxx.ts`,工具 `kebab-case.ts` 或 `camelCase.ts`(沿用既有命名)。
@@ -377,7 +377,7 @@ pnpm preview
 >
 > Agent 提议但**未获用户确认**的规范不得写入此处。
 
-> 当前为空。所有新增规范必须经过 §0.2 流程后由用户**明确**指示写入。
+> 所有新增规范必须经过 §0.2 流程后由用户**明确**指示写入。
 
 ### 2026-06-17 · 推送与发版的强制确认机制
 

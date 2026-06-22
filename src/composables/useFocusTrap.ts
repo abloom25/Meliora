@@ -1,4 +1,4 @@
-import { ref, watch, onMounted, onBeforeUnmount, type Ref } from 'vue'
+import { ref, watch, onMounted, onBeforeUnmount, nextTick, type Ref } from 'vue'
 import { getFocusableEdges } from '../utils/dom'
 
 export function useFocusTrap(
@@ -7,6 +7,7 @@ export function useFocusTrap(
   onClose?: () => void,
 ) {
   const triggerRef = ref<HTMLElement | null>(null)
+  let pendingActivation = false
 
   function handleTab(e: KeyboardEvent) {
     if (!containerRef.value || !active.value) return
@@ -41,23 +42,41 @@ export function useFocusTrap(
     }
   }
 
-  function activateTrap() {
-    triggerRef.value = document.activeElement as HTMLElement
+  function focusFirstFocusable() {
+    if (!containerRef.value) return false
+    const { first } = getFocusableEdges(containerRef.value)
+    if (first) {
+      first.focus()
+      return document.activeElement === first
+    }
+    return false
+  }
 
-    if (containerRef.value) {
-      const { first } = getFocusableEdges(containerRef.value)
-      if (first) {
-        setTimeout(() => {
-          first.focus()
-        }, 0)
-      }
+  async function activateTrap() {
+    triggerRef.value = document.activeElement as HTMLElement
+    pendingActivation = true
+
+    await nextTick()
+
+    if (!pendingActivation) return
+
+    if (focusFirstFocusable()) {
+      pendingActivation = false
+      return
+    }
+
+    await nextTick()
+    if (pendingActivation && focusFirstFocusable()) {
+      pendingActivation = false
     }
   }
 
   function deactivateTrap() {
+    pendingActivation = false
     if (triggerRef.value && typeof triggerRef.value.focus === 'function') {
+      const trigger = triggerRef.value
       setTimeout(() => {
-        triggerRef.value?.focus()
+        trigger.focus()
       }, 0)
     }
     triggerRef.value = null
@@ -67,19 +86,38 @@ export function useFocusTrap(
     active,
     (isActive) => {
       if (isActive) {
-        activateTrap()
+        void activateTrap()
       } else {
         deactivateTrap()
       }
     },
-    { immediate: true },
+    { immediate: true, flush: 'post' },
   )
+
+  watch(containerRef, (container) => {
+    if (!pendingActivation || !active.value) return
+    if (container) {
+      void nextTick().then(() => {
+        if (pendingActivation && focusFirstFocusable()) {
+          pendingActivation = false
+        }
+      })
+    }
+  })
 
   onMounted(() => {
     document.addEventListener('keydown', handleKeydown)
+    if (active.value && pendingActivation) {
+      void nextTick().then(() => {
+        if (pendingActivation && focusFirstFocusable()) {
+          pendingActivation = false
+        }
+      })
+    }
   })
 
   onBeforeUnmount(() => {
+    pendingActivation = false
     document.removeEventListener('keydown', handleKeydown)
   })
 }

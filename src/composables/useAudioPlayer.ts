@@ -3,6 +3,7 @@ import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
 import type { Track } from '../types/music'
 import { useBeatAnalyser } from './useBeatAnalyser'
+import { useEqualizer } from './useEqualizer'
 import {
   usePreloadPool,
   preloadCover,
@@ -47,11 +48,13 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   // 等到 durationchange / loadedmetadata 后再真正写入 audio.currentTime。
   let pendingSeekTime: number | null = null
 
+  const { bindFilters: bindEqFilters } = useEqualizer({ settings })
   const { beatLevel, spectrumLevels, startBeatAnalysis, stopBeatAnalysis } = useBeatAnalyser({
     players,
     getActiveAudio: () => activeAudio,
     isPlaying,
     getBeatTargets: options.getBeatTargets,
+    onEqFiltersReady: bindEqFilters,
   })
 
   const {

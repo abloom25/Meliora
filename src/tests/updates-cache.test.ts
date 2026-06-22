@@ -35,6 +35,26 @@ function readCache(): {
   return JSON.parse(raw)
 }
 
+function createHangingFetch() {
+  return vi.fn((_url: string, init?: RequestInit) => {
+    return new Promise((_resolve, reject) => {
+      const signal = init?.signal
+      if (!signal) return
+      if (signal.aborted) {
+        reject(new DOMException('The operation was aborted', 'AbortError'))
+        return
+      }
+      signal.addEventListener(
+        'abort',
+        () => {
+          reject(new DOMException('The operation was aborted', 'AbortError'))
+        },
+        { once: true },
+      )
+    })
+  })
+}
+
 describe('checkForUpdate TTL cache', () => {
   beforeEach(() => {
     vi.useFakeTimers()
@@ -160,14 +180,34 @@ describe('checkForUpdate TTL cache', () => {
     expect(result?.latestVersion).toBe('v0.1.1-rc.2')
   })
 
-  it('does not write cache when request is aborted', async () => {
+  it('does not write cache when the caller aborts the request', async () => {
+    const controller = new AbortController()
     const abortErr = new DOMException('Aborted', 'AbortError')
     const fetchMock = vi.fn().mockRejectedValueOnce(abortErr)
     vi.stubGlobal('fetch', fetchMock)
 
-    await expect(checkForUpdate()).rejects.toBe(abortErr)
+    controller.abort()
+    await expect(checkForUpdate(controller.signal)).rejects.toBe(abortErr)
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(localStorage.getItem(UPDATE_CACHE_KEY)).toBeNull()
+  })
+
+  it('settles and does not poison the cache when fetch never resolves within the timeout', async () => {
+    const fetchMock = createHangingFetch()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const promise = checkForUpdate()
+    await vi.advanceTimersByTimeAsync(8000)
+    await vi.advanceTimersByTimeAsync(8000)
+
+    const result = await promise
+
+    expect(result).toBeNull()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(localStorage.getItem(UPDATE_CACHE_KEY)).not.toBeNull()
+
+    const cached = readCache()
+    expect(cached?.latest).toBeNull()
   })
 })

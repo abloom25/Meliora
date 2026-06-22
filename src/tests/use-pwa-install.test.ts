@@ -7,6 +7,11 @@ interface DisplayModeChange {
   matches: boolean
 }
 
+interface BeforeInstallPromptEventStub extends Event {
+  prompt: () => Promise<void>
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>
+}
+
 function createMatchMediaStub(initialMatches: boolean) {
   let matches = initialMatches
   const listeners = new Set<(event: DisplayModeChange) => void>()
@@ -34,10 +39,25 @@ function createMatchMediaStub(initialMatches: boolean) {
   }
 }
 
+function createBeforeInstallPromptStub(
+  outcome: 'accepted' | 'dismissed',
+): BeforeInstallPromptEventStub {
+  const event = new Event('beforeinstallprompt')
+  Object.defineProperty(event, 'prompt', {
+    value: () => Promise.resolve(),
+    configurable: true,
+  })
+  Object.defineProperty(event, 'userChoice', {
+    value: Promise.resolve({ outcome, platform: 'web' }),
+    configurable: true,
+  })
+  return event as BeforeInstallPromptEventStub
+}
+
 const TestComponent = defineComponent({
   setup() {
-    const { isInstalled } = usePwaInstall()
-    return { isInstalled }
+    const { canInstall, isInstalled, install } = usePwaInstall()
+    return { canInstall, isInstalled, install }
   },
   render() {
     return h('div')
@@ -81,5 +101,70 @@ describe('usePwaInstall', () => {
     stub.emit(false)
     await wrapper.vm.$nextTick()
     expect(wrapper.vm.isInstalled).toBe(false)
+  })
+
+  it('clears the install prompt after the user accepts it', async () => {
+    vi.spyOn(window, 'matchMedia').mockReturnValue(
+      createMatchMediaStub(false) as unknown as MediaQueryList,
+    )
+
+    const wrapper = mount(TestComponent)
+    expect(wrapper.vm.canInstall).toBe(false)
+
+    const accepted = createBeforeInstallPromptStub('accepted')
+    window.dispatchEvent(accepted)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.vm.canInstall).toBe(true)
+
+    const result = await wrapper.vm.install()
+    expect(result).toBe(true)
+    expect(wrapper.vm.canInstall).toBe(false)
+
+    await expect(wrapper.vm.install()).resolves.toBe(false)
+  })
+
+  it('clears the install prompt after the user dismisses it', async () => {
+    vi.spyOn(window, 'matchMedia').mockReturnValue(
+      createMatchMediaStub(false) as unknown as MediaQueryList,
+    )
+
+    const wrapper = mount(TestComponent)
+    expect(wrapper.vm.canInstall).toBe(false)
+
+    const dismissed = createBeforeInstallPromptStub('dismissed')
+    window.dispatchEvent(dismissed)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.vm.canInstall).toBe(true)
+
+    const result = await wrapper.vm.install()
+    expect(result).toBe(false)
+    expect(wrapper.vm.canInstall).toBe(false)
+
+    await expect(wrapper.vm.install()).resolves.toBe(false)
+  })
+
+  it('re-enables install after a fresh beforeinstallprompt event following dismissal', async () => {
+    vi.spyOn(window, 'matchMedia').mockReturnValue(
+      createMatchMediaStub(false) as unknown as MediaQueryList,
+    )
+
+    const wrapper = mount(TestComponent)
+
+    const dismissed = createBeforeInstallPromptStub('dismissed')
+    window.dispatchEvent(dismissed)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.vm.canInstall).toBe(true)
+
+    await wrapper.vm.install()
+    expect(wrapper.vm.canInstall).toBe(false)
+
+    const accepted = createBeforeInstallPromptStub('accepted')
+    window.dispatchEvent(accepted as unknown as Event)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.vm.canInstall).toBe(true)
+
+    const result = await wrapper.vm.install()
+    expect(result).toBe(true)
+    expect(wrapper.vm.canInstall).toBe(false)
   })
 })

@@ -2,6 +2,7 @@ import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import type { PlayMode, PlayerSettings, Track } from '../types/music'
 import { safeStorage } from '../utils/storage'
+import { createDefaultEqualizer, sanitizeEqualizer } from '../utils/equalizer'
 
 const SETTINGS_KEY = 'meliora:settings'
 const LAST_TRACK_KEY = 'meliora:last-track'
@@ -21,11 +22,13 @@ const defaultSettings: PlayerSettings = {
   lyricAnimation: true,
   skipOnError: true,
   autoHideChrome: true,
+  equalizer: createDefaultEqualizer(),
   settingsVersion: CURRENT_SETTINGS_VERSION,
 }
 
 export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings {
   const result: PlayerSettings = { ...defaultSettings, ...saved }
+  result.equalizer = sanitizeEqualizer(saved?.equalizer)
   result.settingsVersion = CURRENT_SETTINGS_VERSION
   return result
 }

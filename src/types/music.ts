@@ -1,6 +1,7 @@
 export type MusicServer = 'netease' | 'tencent'
 export type PlayMode = 'sequence' | 'loop' | 'single' | 'shuffle'
 export type LyricAvailability = 'available' | 'unavailable'
+export type EqPresetId = 'flat' | 'pop' | 'rock' | 'jazz' | 'vocal' | 'bass-boost' | 'custom'
 
 export interface MetingPlaylistConfig {
   server: MusicServer
@@ -56,6 +57,12 @@ export interface LyricsSnapshot {
   status: 'idle' | 'ready' | 'empty' | 'error'
 }
 
+export interface EqualizerSettings {
+  enabled: boolean
+  preset: EqPresetId
+  bands: number[]
+}
+
 export interface PlayerSettings {
   volume: number
   playMode: PlayMode
@@ -69,5 +76,6 @@ export interface PlayerSettings {
   lyricAnimation: boolean
   skipOnError: boolean
   autoHideChrome: boolean
+  equalizer: EqualizerSettings
   settingsVersion: number
 }

@@ -22,6 +22,13 @@
   import { filterTracks } from './utils/tracks'
   import { splitDisplayTitle } from './utils/title'
   import { extractThemeColor, loadThemeColor, type ThemeColor } from './utils/theme'
+  import {
+    EQ_BAND_LABELS,
+    EQ_PRESET_LIST,
+    EQ_PRESETS,
+    clampGain,
+    detectPreset,
+  } from './utils/equalizer'
   import { useAudioPlayer } from './composables/useAudioPlayer'
   import { useLyricsWindow } from './composables/useLyricsWindow'
   import { usePwaInstall } from './composables/usePwaInstall'
@@ -37,7 +44,7 @@
   import LyricsPanel from './components/LyricsPanel.vue'
   import PlayerControls from './components/PlayerControls.vue'
   import TrackList from './components/TrackList.vue'
-  import type { LyricAvailability, LyricsSnapshot, Track } from './types/music'
+  import type { EqPresetId, LyricAvailability, LyricsSnapshot, Track } from './types/music'
 
   type HapticStyle = 'selection' | 'light' | 'medium' | 'rigid' | 'success'
 
@@ -447,6 +454,23 @@
   function cyclePlayModeWithHaptic() {
     triggerHaptic('rigid')
     store.cyclePlayMode()
+  }
+
+  function applyEqPreset(preset: EqPresetId) {
+    triggerHaptic('selection')
+    if (preset === 'custom') {
+      settings.value.equalizer.preset = 'custom'
+      return
+    }
+    settings.value.equalizer.preset = preset
+    settings.value.equalizer.bands = [...EQ_PRESETS[preset].bands]
+  }
+
+  function updateEqBand(index: number, value: number) {
+    const bands = [...settings.value.equalizer.bands]
+    bands[index] = clampGain(value)
+    settings.value.equalizer.bands = bands
+    settings.value.equalizer.preset = detectPreset(bands)
   }
 
   function toggleLyrics() {
@@ -914,7 +938,7 @@
             <h3 class="settings-section-title">播放</h3>
             <div class="setting-group">
               <label
-                ><span><SlidersHorizontal :size="17" />音量</span
+                ><span><SlidersHorizontal :size="17" /><strong>音量</strong></span
                 ><strong>{{ Math.round(settings.volume * 100) }}%</strong></label
               >
               <input
@@ -948,7 +972,7 @@
             </label>
             <div class="setting-group sleep-setting">
               <label>
-                <span>定时关闭</span>
+                <span><strong>定时关闭</strong></span>
                 <strong>{{
                   sleepTimerMinutes ? formatSleepTimerRemaining(sleepTimerRemaining) : '关闭'
                 }}</strong>
@@ -987,6 +1011,55 @@
             </label>
           </div>
           <div class="settings-section">
+            <h3 class="settings-section-title">音效</h3>
+            <label class="setting-row toggle-row">
+              <span><strong>均衡器</strong><small>调整各频段增益</small></span>
+              <input v-model="settings.equalizer.enabled" type="checkbox" /><i />
+            </label>
+            <div class="setting-group eq-preset-group">
+              <label
+                ><span><strong>预设</strong></span></label
+              >
+              <div class="eq-preset-list">
+                <button
+                  v-for="preset in EQ_PRESET_LIST"
+                  :key="preset.id"
+                  class="eq-preset-button"
+                  :class="{
+                    active: settings.equalizer.preset === preset.id,
+                    'is-custom': preset.id === 'custom',
+                  }"
+                  :disabled="!settings.equalizer.enabled"
+                  @click="applyEqPreset(preset.id)"
+                >
+                  {{ preset.name }}
+                </button>
+              </div>
+            </div>
+            <div class="setting-group eq-bands">
+              <label v-for="(label, index) in EQ_BAND_LABELS" :key="label" class="eq-band-row">
+                <span class="eq-band-label">{{ label }}</span>
+                <input
+                  class="setting-range eq-band-range"
+                  type="range"
+                  min="-12"
+                  max="12"
+                  step="1"
+                  :value="settings.equalizer.bands[index]"
+                  :disabled="!settings.equalizer.enabled"
+                  :style="{
+                    '--setting-progress': `${((settings.equalizer.bands[index] + 12) / 24) * 100}%`,
+                  }"
+                  @input="updateEqBand(index, Number(($event.target as HTMLInputElement).value))"
+                />
+                <strong class="eq-band-value">
+                  {{ settings.equalizer.bands[index] > 0 ? '+' : ''
+                  }}{{ settings.equalizer.bands[index] }}dB
+                </strong>
+              </label>
+            </div>
+          </div>
+          <div class="settings-section">
             <h3 class="settings-section-title">显示</h3>
             <label class="setting-row toggle-row">
               <span
@@ -1008,7 +1081,8 @@
             </label>
             <div class="setting-group">
               <label
-                ><span>歌词字号</span><strong>{{ settings.lyricFontSize }}px</strong></label
+                ><span><strong>歌词字号</strong></span
+                ><strong>{{ settings.lyricFontSize }}px</strong></label
               >
               <input
                 v-model.number="settings.lyricFontSize"
@@ -1060,7 +1134,8 @@
             </label>
             <div class="setting-group">
               <label
-                ><span>背景模糊</span><strong>{{ settings.backgroundBlur }}px</strong></label
+                ><span><strong>背景模糊</strong></span
+                ><strong>{{ settings.backgroundBlur }}px</strong></label
               >
               <input
                 v-model.number="settings.backgroundBlur"
@@ -1074,7 +1149,7 @@
             </div>
             <div class="setting-group">
               <label
-                ><span>背景饱和度</span
+                ><span><strong>背景饱和度</strong></span
                 ><strong>{{ Math.round(settings.backgroundSaturation * 100) }}%</strong></label
               >
               <input
@@ -1091,7 +1166,7 @@
             </div>
             <div class="setting-group">
               <label
-                ><span>节奏亮度</span
+                ><span><strong>节奏亮度</strong></span
                 ><strong>{{ Math.round(settings.beatBrightness * 100) }}%</strong></label
               >
               <input
@@ -2039,6 +2114,94 @@
   .sleep-ticks span.active {
     color: rgba(255, 255, 255, 0.9);
   }
+  .eq-preset-group {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .eq-preset-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .eq-preset-button {
+    padding: 7px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    corner-shape: squircle;
+    background: rgba(255, 255, 255, 0.06);
+    color: rgba(255, 255, 255, 0.74);
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 560;
+    cursor: pointer;
+    transition:
+      color 0.18s ease,
+      background 0.18s ease,
+      border-color 0.18s ease,
+      opacity 0.18s ease;
+  }
+  .eq-preset-button:hover:not(:disabled) {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.1);
+  }
+  .eq-preset-button.active {
+    color: rgba(255, 255, 255, 0.96);
+    background: rgba(var(--accent-rgb), 0.16);
+    border-color: rgba(var(--accent-rgb), 0.32);
+  }
+  .eq-preset-button:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .eq-preset-button.active:disabled {
+    color: rgba(255, 255, 255, 0.74);
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.14);
+  }
+  .eq-preset-button.is-custom {
+    font-style: italic;
+  }
+  .eq-bands {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    margin-top: 12px;
+  }
+  .eq-band-row {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 5px 0;
+    border-top: 0;
+  }
+  .eq-band-label {
+    flex: 0 0 auto;
+    width: 52px;
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: 560;
+    font-variant-numeric: tabular-nums;
+  }
+  .eq-band-range {
+    flex: 1 1 auto;
+    margin-top: 0;
+  }
+  .eq-band-range:disabled {
+    opacity: 0.4;
+  }
+  .eq-band-value {
+    flex: 0 0 auto;
+    width: 52px;
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: 560;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
   .setting-value {
     color: rgba(255, 255, 255, 0.7);
     font-size: 0.68rem;
@@ -2203,29 +2366,6 @@
       width: var(--mobile-content-width);
       flex: 0 0 auto;
       box-shadow: none;
-    }
-    .artwork-frame .artwork-glow {
-      inset: -16%;
-      width: 132%;
-      height: 132%;
-      border-radius: 50%;
-      opacity: 0.38;
-      filter: blur(46px) saturate(145%) brightness(1.02);
-      transform: scale(1.12);
-      clip-path: ellipse(48% 48% at 50% 50%);
-      mask-image: radial-gradient(
-        ellipse at center,
-        rgba(0, 0, 0, 0.82) 0 34%,
-        rgba(0, 0, 0, 0.38) 56%,
-        transparent 78%
-      );
-      -webkit-mask-image: radial-gradient(
-        ellipse at center,
-        rgba(0, 0, 0, 0.82) 0 34%,
-        rgba(0, 0, 0, 0.38) 56%,
-        transparent 78%
-      );
-      backface-visibility: hidden;
     }
     .primary-meta {
       width: var(--mobile-content-width);
@@ -2616,12 +2756,6 @@
         transform: scale(1.18) translateZ(0);
         will-change: auto;
         backface-visibility: hidden;
-      }
-      .artwork-frame .artwork-glow {
-        opacity: 0.34;
-        filter: blur(40px) saturate(140%) brightness(1.02);
-        transform: scale(1.08);
-        will-change: auto;
       }
     }
   }

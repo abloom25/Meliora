@@ -38,13 +38,17 @@ export function usePwaInstall() {
 
   async function install() {
     if (!deferredPrompt) return false
-    await deferredPrompt.prompt()
-    const choice = await deferredPrompt.userChoice
-    if (choice.outcome === 'accepted') {
+    const prompt = deferredPrompt
+    try {
+      await prompt.prompt()
+      const choice = await prompt.userChoice
+      return choice.outcome === 'accepted'
+    } catch {
+      return false
+    } finally {
       deferredPrompt = null
       canInstall.value = false
     }
-    return choice.outcome === 'accepted'
   }
 
   onMounted(() => {

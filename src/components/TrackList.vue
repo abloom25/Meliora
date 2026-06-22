@@ -543,7 +543,7 @@
   .spectrum-meter {
     display: flex;
     height: 13px;
-    align-items: flex-end;
+    align-items: center;
     justify-content: center;
     gap: 2.5px;
 
@@ -552,7 +552,7 @@
       height: var(--spectrum-level);
       min-height: 3px;
       max-height: 13px;
-      border-radius: 2px;
+      border-radius: 999px;
       background: currentColor;
       opacity: 0.92;
       transition: height 80ms linear;

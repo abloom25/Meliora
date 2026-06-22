@@ -36,6 +36,7 @@ interface ParsedVersion {
 const REPOSITORY = 'abloom25/Meliora'
 const UPDATE_CACHE_KEY = 'meliora:update-cache'
 const UPDATE_CACHE_TTL_MS = 6 * 60 * 60 * 1000
+const GITHUB_FETCH_TIMEOUT_MS = 8000
 
 function normalizeVersion(version: string) {
   return version
@@ -104,10 +105,28 @@ function isNewerVersion(latestVersion: string, currentVersion: string) {
   return compareVersions(latestVersion, currentVersion) > 0
 }
 
-function isAbortError(err: unknown): boolean {
-  if (err instanceof DOMException) return err.name === 'AbortError'
-  if (err instanceof Error) return err.name === 'AbortError'
-  return false
+function composeTimeoutSignal(signal: AbortSignal | undefined): {
+  signal: AbortSignal
+  cleanup: () => void
+} {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), GITHUB_FETCH_TIMEOUT_MS)
+
+  const forwardAbort = () => controller.abort(signal?.reason)
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort(signal.reason)
+    } else {
+      signal.addEventListener('abort', forwardAbort, { once: true })
+    }
+  }
+
+  const cleanup = () => {
+    clearTimeout(timer)
+    if (signal) signal.removeEventListener('abort', forwardAbort)
+  }
+
+  return { signal: controller.signal, cleanup }
 }
 
 function readUpdateCache(): UpdateCacheEntry | null {
@@ -125,33 +144,43 @@ function writeUpdateCache(latest: CachedLatest | null): void {
 }
 
 async function fetchLatestRelease(signal?: AbortSignal): Promise<UpdateInfo | null> {
-  const response = await fetch(`https://api.github.com/repos/${REPOSITORY}/releases/latest`, {
-    headers: { Accept: 'application/vnd.github+json' },
-    signal,
-  })
-  if (!response.ok) return null
-  const release = (await response.json()) as GitHubRelease
-  if (!release.tag_name) return null
-  return {
-    currentVersion: APP_VERSION,
-    latestVersion: release.tag_name,
-    url: release.html_url || `https://github.com/${REPOSITORY}/releases/tag/${release.tag_name}`,
+  const { signal: composedSignal, cleanup } = composeTimeoutSignal(signal)
+  try {
+    const response = await fetch(`https://api.github.com/repos/${REPOSITORY}/releases/latest`, {
+      headers: { Accept: 'application/vnd.github+json' },
+      signal: composedSignal,
+    })
+    if (!response.ok) return null
+    const release = (await response.json()) as GitHubRelease
+    if (!release.tag_name) return null
+    return {
+      currentVersion: APP_VERSION,
+      latestVersion: release.tag_name,
+      url: release.html_url || `https://github.com/${REPOSITORY}/releases/tag/${release.tag_name}`,
+    }
+  } finally {
+    cleanup()
   }
 }
 
 async function fetchLatestTag(signal?: AbortSignal): Promise<UpdateInfo | null> {
-  const response = await fetch(`https://api.github.com/repos/${REPOSITORY}/tags?per_page=1`, {
-    headers: { Accept: 'application/vnd.github+json' },
-    signal,
-  })
-  if (!response.ok) return null
-  const tags = (await response.json()) as GitHubTag[]
-  const tag = tags[0]?.name
-  if (!tag) return null
-  return {
-    currentVersion: APP_VERSION,
-    latestVersion: tag,
-    url: `https://github.com/${REPOSITORY}/releases/tag/${tag}`,
+  const { signal: composedSignal, cleanup } = composeTimeoutSignal(signal)
+  try {
+    const response = await fetch(`https://api.github.com/repos/${REPOSITORY}/tags?per_page=1`, {
+      headers: { Accept: 'application/vnd.github+json' },
+      signal: composedSignal,
+    })
+    if (!response.ok) return null
+    const tags = (await response.json()) as GitHubTag[]
+    const tag = tags[0]?.name
+    if (!tag) return null
+    return {
+      currentVersion: APP_VERSION,
+      latestVersion: tag,
+      url: `https://github.com/${REPOSITORY}/releases/tag/${tag}`,
+    }
+  } finally {
+    cleanup()
   }
 }
 
@@ -179,15 +208,15 @@ export async function checkForUpdate(
   try {
     latest =
       (await fetchLatestRelease(signal).catch((err: unknown) => {
-        if (isAbortError(err)) throw err
+        if (signal?.aborted) throw err
         return null
       })) ??
       (await fetchLatestTag(signal).catch((err: unknown) => {
-        if (isAbortError(err)) throw err
+        if (signal?.aborted) throw err
         return null
       }))
   } catch (err) {
-    if (isAbortError(err)) throw err
+    if (signal?.aborted) throw err
     writeUpdateCache(null)
     return null
   }

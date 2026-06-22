@@ -1,4 +1,5 @@
 import { onBeforeUnmount, ref, type Ref } from 'vue'
+import { EQ_BAND_FREQUENCIES, bandFilterType } from '../utils/equalizer'
 
 // 模块级音频上下文与 source 缓存：
 // 浏览器对同一个 audio 节点只允许 createMediaElementSource 一次。
@@ -20,6 +21,11 @@ export interface BeatAnalyserOptions {
    * 大幅降低 UpdateLayoutTree 频次。
    */
   getBeatTargets?: () => readonly (HTMLElement | null | undefined)[]
+  /**
+   * 可选：当 EQ filter chain 首次创建完毕时回调，把 BiquadFilterNode 数组
+   * 交给 useEqualizer 绑定，由其负责按 settings 更新各频段增益。
+   */
+  onEqFiltersReady?: (filters: BiquadFilterNode[]) => void
 }
 
 export function useBeatAnalyser(options: BeatAnalyserOptions) {
@@ -47,13 +53,13 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   let previousFrequencyData: Float32Array | null = null
   const connectedSources: Array<{
     source: MediaElementAudioSourceNode
-    analyser: AnalyserNode
+    target: AudioNode
   }> = []
+  let eqFilters: BiquadFilterNode[] = []
   let beatFrame = 0
   let energyFloor = 0.08
   let fluxFloor = 0.02
   let beatPeak = 0.35
-  let spectrumPeak = 0.28
   let spectrumTick = 0
   let visibilityListenerRegistered = false
 
@@ -157,34 +163,45 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     writeBeatLevelToTargets(beatLevel.value)
 
     spectrumTick += 1
-    const sampleGroups = [
-      [4, 17, 58],
-      [9, 34, 82],
-      [3, 26, 49],
-      [13, 43, 69],
+    const bandSamplers = [
+      { start: 2, step: 7, count: 16, weightDecay: 0.92 },
+      { start: 5, step: 11, count: 12, weightDecay: 0.96 },
+      { start: 3, step: 13, count: 10, weightDecay: 1.02 },
+      { start: 8, step: 17, count: 8, weightDecay: 1.06 },
     ]
-    const performanceShape = [
-      0.86 + Math.sin(spectrumTick * 0.13) * 0.16,
-      1.08 + Math.sin(spectrumTick * 0.17 + 1.7) * 0.18,
-      0.94 + Math.sin(spectrumTick * 0.11 + 3.1) * 0.17,
-      1.02 + Math.sin(spectrumTick * 0.19 + 4.4) * 0.2,
+    const bandBoost = [1.6, 1.4, 1.8, 2.6]
+    const riseSpeeds = [0.42, 0.6, 0.32, 0.78]
+    const fallSpeeds = [0.08, 0.22, 0.14, 0.34]
+    const bandIdleAmp = [0.16, 0.22, 0.14, 0.2]
+    const bandIdleBase = [0.18, 0.28, 0.22, 0.16]
+    const idleWave = [
+      Math.sin(spectrumTick * 0.071) * 0.55 + Math.sin(spectrumTick * 0.029 + 1.3) * 0.45,
+      Math.sin(spectrumTick * 0.113 + 1.7) * 0.5 + Math.sin(spectrumTick * 0.041 + 3.2) * 0.5,
+      Math.sin(spectrumTick * 0.157 + 0.5) * 0.6 + Math.sin(spectrumTick * 0.023 + 5.1) * 0.4,
+      Math.sin(spectrumTick * 0.197 + 4.4) * 0.45 + Math.sin(spectrumTick * 0.053 + 2.7) * 0.55,
     ]
-    const contrastShape = [0.92, 1.08, 0.84, 1.16]
+    const pulseWeights = [0.28, 0.12, 0.04, 0.18]
     const nextSpectrum = spectrumLevels.value.map((previous, band) => {
-      const samples = sampleGroups[band] ?? sampleGroups[0]
-      const weightedEnergy = samples.reduce((total, rawIndex, sampleIndex) => {
-        const index = Math.min(data.length - 1, rawIndex)
-        const value = data[index] ?? 0
-        return total + value * value * (1 - sampleIndex * 0.08)
-      }, 0)
-      const normalized = Math.sqrt(weightedEnergy / samples.length) / 255
-      spectrumPeak = Math.max(normalized, spectrumPeak * 0.992)
-      const relative = normalized / Math.max(0.18, spectrumPeak)
-      const contrasted = Math.pow(relative, 1.55) * (contrastShape[band] ?? 1)
-      const lively = contrasted * (performanceShape[band] ?? 1)
-      const pulseLift = beatLevel.value * (band % 2 === 0 ? 0.08 : 0.18)
-      const target = Math.max(0.09, Math.min(0.88, lively * 0.66 + normalized * 0.14 + pulseLift))
-      return previous + (target - previous) * (target > previous ? 0.44 : 0.24)
+      const sampler = bandSamplers[band] ?? bandSamplers[0]
+      let energy = 0
+      let weightSum = 0
+      let weight = 1
+      for (let i = 0; i < sampler.count; i += 1) {
+        const index = sampler.start + i * sampler.step
+        if (index >= data.length) break
+        const value = (data[index] ?? 0) / 255
+        energy += value * value * weight
+        weightSum += weight
+        weight *= sampler.weightDecay
+      }
+      const rms = Math.sqrt(energy / Math.max(0.0001, weightSum))
+      const audioActive = Math.min(1, rms * (bandBoost[band] ?? 1))
+      const idleHeight = (bandIdleBase[band] ?? 0.2) + (bandIdleAmp[band] ?? 0.18) * idleWave[band]
+      const pulseLift = beatLevel.value * (pulseWeights[band] ?? 0.1)
+      const target = Math.max(0.08, Math.min(0.92, Math.max(idleHeight, audioActive) + pulseLift))
+      const rising = target > previous
+      const speed = rising ? (riseSpeeds[band] ?? 0.5) : (fallSpeeds[band] ?? 0.2)
+      return previous + (target - previous) * speed
     })
     spectrumLevels.value = nextSpectrum
     // 将当前帧数据保存为"上一帧"供下一帧频谱通量计算使用
@@ -206,6 +223,23 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
         analyser = audioContext.createAnalyser()
         analyser.fftSize = 256
         analyser.smoothingTimeConstant = 0.5
+        // 构建 EQ filter chain：5 个 BiquadFilterNode 串联，
+        // 插入在 MediaElementSource 与 Analyser 之间。
+        // createMediaElementSource 每个元素只能 attach 一次，
+        // 因此 EQ 必须在 graph 首次构建时一并接入，后续无法重连。
+        eqFilters = EQ_BAND_FREQUENCIES.map((frequency, index) => {
+          const filter = audioContext!.createBiquadFilter()
+          filter.type = bandFilterType(index)
+          filter.frequency.value = frequency
+          filter.Q.value = 1
+          filter.gain.value = 0
+          return filter
+        })
+        for (let index = 0; index < eqFilters.length - 1; index += 1) {
+          eqFilters[index].connect(eqFilters[index + 1])
+        }
+        const eqInput = eqFilters[0]
+        const eqOutput = eqFilters[eqFilters.length - 1]
         players.forEach((audio) => {
           let source = mediaSourceMap.get(audio)
           try {
@@ -213,15 +247,17 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
               source = audioContext!.createMediaElementSource(audio)
               mediaSourceMap.set(audio, source)
             }
-            source.connect(analyser!)
-            connectedSources.push({ source, analyser: analyser! })
+            source.connect(eqInput)
+            connectedSources.push({ source, target: eqInput })
           } catch (error) {
             console.warn('[useAudioPlayer] createMediaElementSource failed', error)
           }
         })
+        eqOutput.connect(analyser)
         analyser.connect(audioContext.destination)
         frequencyData = new Uint8Array(analyser.frequencyBinCount)
         previousFrequencyData = new Float32Array(analyser.frequencyBinCount)
+        options.onEqFiltersReady?.(eqFilters)
       }
       if (audioContext.state === 'suspended') await audioContext.resume()
       if (!beatFrame) beatFrame = window.requestAnimationFrame(updateBeatLevel)
@@ -232,14 +268,22 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
 
   onBeforeUnmount(() => {
     stopBeatAnalysis()
-    for (const { source, analyser: targetAnalyser } of connectedSources) {
+    for (const { source, target } of connectedSources) {
       try {
-        source.disconnect(targetAnalyser)
+        source.disconnect(target)
       } catch {
         // The source may already have been disconnected by browser cleanup.
       }
     }
     connectedSources.length = 0
+    for (const filter of eqFilters) {
+      try {
+        filter.disconnect()
+      } catch {
+        // Ignore disconnect errors during teardown.
+      }
+    }
+    eqFilters = []
     try {
       analyser?.disconnect()
     } catch {

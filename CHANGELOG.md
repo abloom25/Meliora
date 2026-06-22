@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-22
+
+### Added
+
+- 五频段均衡器(Equalizer):新增 `src/utils/equalizer.ts`(DOM-free 纯模块)+ `src/composables/useEqualizer.ts`,采用 Web Audio `BiquadFilterNode` 串联(`lowshelf` → `peaking×3` → `highshelf`),覆盖 60Hz / 250Hz / 1kHz / 4kHz / 12kHz 五个常用频段,增益范围 ±12 dB
+- 6 个内置预设(平坦 / 流行 / 摇滚 / 爵士 / 人声 / 低音增强)+ 1 个"自定义"动态状态指示器:用户拖动任意频段滑块后,预设状态自动切换为"自定义"(`detectPreset` 兜底),也可以直接点击"自定义"按钮显式停留在自定义模式
+- EQ 状态完整接入 `PlayerSettings` 持久化与 `migrateSettings` 嵌套合并;`sanitizeEqualizer` 对历史数据做容错(无字段时回落默认值、非法预设回落 `flat`、频段值钳制到 ±12dB)
+- 设置抽屉新增"音效"section:开关 + 6 预设按钮(末尾"自定义"状态斜体区分)+ 5 频段滑块,均衡器关闭时所有按钮统一灰色(包括激活的预设),开启时 active 预设带 accent 高亮
+- 频谱可视化重新设计:四柱采用**互质步长 + 不同起点**的交叉跳跃采样(`step` ∈ {7, 11, 13, 17}),每柱在频域上做伪随机扫描,任意两柱重叠 bin 极少;配合 `weightDecay` 频段偏好系数(柱 1 偏低频 0.92,柱 4 偏高频 1.06)与每柱独立的不对称时间常数(`riseSpeeds` / `fallSpeeds`),四柱在时间维度上完全脱钩,任何瞬间高度组合明显不同
+- `equalizer.test.ts` 新增 26 个纯函数测试,覆盖预设 / 增益钳制 / 数据消毒 / 兜底逻辑
+
+### Changed
+
+- `TrackList` 播放中频谱柱从"底基线对齐"(`align-items: flex-end`)改为"中线对称扩展"(`align-items: center`),柱子上下端均圆角(`border-radius: 999px`),视觉风格对齐 Apple Music
+- `useBeatAnalyser` 的 EQ filter chain 在 graph 首次构建时插入到 `MediaElementSource` 与 `Analyser` 之间,通过 `onEqFiltersReady` 回调暴露给 `useEqualizer`(`createMediaElementSource` 一次性约束下的唯一可行布线方式)
+- 设置抽屉中"音量""定时关闭""歌词字号""背景模糊""背景饱和度""节奏亮度"等 label 文字补回 `<strong>` 包裹,与"平滑切歌""动态封面背景"等 toggle 项字号 / 字重 / 颜色完全统一(共用 `.setting-group strong` 的 `0.8rem / 560 / #fff`)
+- `useFocusTrap` 改造为 `nextTick` 异步流程并加入 `pendingActivation` 守卫:容器节点 / 可聚焦元素首次渲染晚于激活时,会在 `nextTick` / `watch(containerRef)` / `onMounted` 三个时机重试,杜绝"抽屉打开但焦点没进入"的边界场景
+- `usePwaInstall` 的 `install()` 改为 `try / finally` 结构,保证 `prompt()` 或 `userChoice` 抛错时也能清空 `deferredPrompt` 引用,避免 stale 状态阻塞下一次弹窗
+- `services/updates.ts` 引入 `composeTimeoutSignal` 组合器:GitHub Releases / Tags API 请求统一加 8 秒超时,与用户提供的 `AbortSignal` 双向联动(用户取消立即透传,超时只 abort 内部 controller),失败后写空缓存,杜绝"API 永远不返回"导致更新检查 hang 死的情况
+- `pnpm-workspace.yaml` 新增 `overrides` 锁定传递依赖 `ini >=1.3.6` / `undici >=7.28.0`,堵住 pnpm 锁文件中的若干已知安全告警
+- `agent.md §3.1` 修正:格式约定从"**写**分号"改为"**不写**分号"(与项目 prettier 实际配置 `semi: false` 一致)
+
+### Fixed
+
+- 修复 `services/updates.ts` 的 abort 判定逻辑:`isAbortError` 在 `signal` 已 abort 时仍会被 catch 误吞,现改为直接判定 `signal?.aborted`,杜绝外部取消信号被静默丢弃
+- 修复 `usePwaInstall` 接受 / 拒绝两种 `userChoice.outcome` 路径下 `deferredPrompt` 引用残留导致的"二次安装"失效问题
+- 修复 `useFocusTrap.deactivateTrap` 中对 `triggerRef.value?.focus()` 的延迟读取:`setTimeout` 触发时 `triggerRef.value` 可能已经被新一轮 activate 覆盖,改为闭包捕获 `trigger` 局部变量
+
+### Performance
+
+- 频谱采样从"连续频段区间累加 + 单一峰值归一化"重构为"交叉跳跃采样 + 每柱独立 sigmoid 响应曲线 + 不对称时间常数",消除"四柱齐刷刷顶满或归零"现象,在不同曲风(电子 / 流行 / 摇滚 / 钢琴)下视觉差异始终保持
+
 ## [0.1.1-rc.3] - 2026-06-18
 
 ### Added
