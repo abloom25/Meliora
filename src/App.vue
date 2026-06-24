@@ -4,6 +4,7 @@
   import {
     ArrowRight,
     Download,
+    GitFork,
     ListMusic,
     MessageSquareText,
     Music,
@@ -16,11 +17,12 @@
     SlidersHorizontal,
   } from '@lucide/vue'
   import { musicConfig } from './config/music'
-  import { loadConfiguredTracks } from './services/music'
-  import { checkForUpdate } from './services/updates'
+  import { APP_VERSION } from './generated/app-version'
+  import { loadConfiguredTracks, loadRuntimeConfig } from './services/music'
   import { usePlayerStore } from './stores/player'
   import { filterTracks } from './utils/tracks'
   import { splitDisplayTitle } from './utils/title'
+  import { applySiteIntegrations } from './utils/site-integrations'
   import { extractThemeColor, loadThemeColor, type ThemeColor } from './utils/theme'
   import {
     EQ_BAND_LABELS,
@@ -44,7 +46,16 @@
   import LyricsPanel from './components/LyricsPanel.vue'
   import PlayerControls from './components/PlayerControls.vue'
   import TrackList from './components/TrackList.vue'
-  import type { EqPresetId, LyricAvailability, LyricsSnapshot, Track } from './types/music'
+  import ToggleSwitch from './components/ToggleSwitch.vue'
+  import SettingRange from './components/SettingRange.vue'
+  import Toast from './components/Toast.vue'
+  import type {
+    EqPresetId,
+    LyricAvailability,
+    LyricsSnapshot,
+    MusicConfig,
+    Track,
+  } from './types/music'
 
   type HapticStyle = 'selection' | 'light' | 'medium' | 'rigid' | 'success'
 
@@ -54,6 +65,10 @@
     single: { text: '单曲循环', icon: Repeat1 },
     shuffle: { text: '随机播放', icon: Shuffle },
   } as const
+
+  const REPO_URL = 'https://github.com/abloom25/Meliora'
+
+  const runtimeConfig = ref<MusicConfig>(musicConfig)
 
   const store = usePlayerStore()
   const { currentTrack, currentTrackId, currentTime, duration, isPlaying, settings } =
@@ -75,7 +90,7 @@
     currentTrack,
     isPlaying,
   })
-  const { canInstall, isInstalled, install } = usePwaInstall()
+  const { canInstall, isInstalled, install, iosInstallAvailable } = usePwaInstall()
 
   // Sleep Timer composable
   const {
@@ -93,7 +108,8 @@
   })
 
   // Theme accent composable
-  const { accent, accentSoft, accentRgb, applyTheme, resetTheme } = useThemeAccent()
+  const { accent, accentSoft, accentRgb, applyTheme, resetTheme, cssTransitionSupported } =
+    useThemeAccent()
 
   // Fullscreen composable
   const { fullscreenActive, toggleFullscreenMode } = useFullscreen({
@@ -259,7 +275,6 @@
   let compactViewportQuery: MediaQueryList | undefined
   let noticeTimer = 0
   let panelsSoftenedTimer = 0
-  let updateAbortController: AbortController | null = null
 
   function supportsDesktopLyricsWindow() {
     const userAgent = navigator.userAgent.toLowerCase()
@@ -291,13 +306,36 @@
     showNotice('网络已恢复')
   }
 
+  function resolveSiteIcon(icon: string | undefined): string {
+    if (!icon) return `${import.meta.env.BASE_URL}favicon.svg`
+    if (/^(https?:|data:|blob:)/i.test(icon)) return icon
+    const base = new URL(import.meta.env.BASE_URL, window.location.origin)
+    return new URL(icon, base).href
+  }
+
+  function applySiteBrand(config: MusicConfig) {
+    document.title = `${config.siteName} · Music Player`
+    const iconHref = resolveSiteIcon(config.siteIcon)
+    let link = document.querySelector<HTMLLinkElement>("link[rel='icon']")
+    if (!link) {
+      link = document.createElement('link')
+      link.rel = 'icon'
+      document.head.appendChild(link)
+    }
+    link.href = iconHref
+  }
+
   async function loadTracks() {
     loading.value = true
     sourceWarning.value = ''
     loadFailed.value = false
     clearNotice()
     try {
-      const result = await loadConfiguredTracks()
+      const config = await loadRuntimeConfig()
+      runtimeConfig.value = config
+      applySiteBrand(config)
+      applySiteIntegrations(config)
+      const result = await loadConfiguredTracks(config)
       store.setTracks(result.tracks)
       const sharedTrackId = new URL(window.location.href).searchParams.get('track')
       const sharedTrack = result.tracks.find((track) => track.id === sharedTrackId)
@@ -516,12 +554,9 @@
     showNotice(installed ? 'Meliora 已安装' : '已取消安装')
   }
 
-  async function checkReleaseUpdateOnce() {
-    updateAbortController?.abort()
-    updateAbortController = new AbortController()
-    const update = await checkForUpdate(updateAbortController.signal).catch(() => null)
-    if (!update) return
-    showNotice(`Meliora ${update.latestVersion} 已发布，刷新页面可更新`)
+  function showIosInstallGuide() {
+    triggerHaptic('selection')
+    showNotice('请点击 Safari 分享按钮,选择「添加到主屏幕」')
   }
 
   function handleLyricsSnapshot(snapshot: LyricsSnapshot) {
@@ -567,10 +602,8 @@
     void loadTracks().finally(() => {
       if (!navigator.onLine) showOfflineNotice()
     })
-    window.setTimeout(() => void checkReleaseUpdateOnce(), 1400)
   })
   onBeforeUnmount(() => {
-    updateAbortController?.abort()
     window.clearTimeout(noticeTimer)
     window.clearTimeout(panelsSoftenedTimer)
     compactViewportQuery?.removeEventListener('change', updateCompactViewport)
@@ -622,6 +655,7 @@
       'chrome-hidden': chromeHidden,
       'drawer-open': listOpen || settingsOpen,
       'beat-active': isPlaying,
+      'css-theme-transition': cssTransitionSupported,
     }"
     :style="beatStyle"
     @mousemove="revealChrome"
@@ -639,7 +673,7 @@
 
     <header class="topbar" @click="onTopbarClick">
       <div class="brand">
-        <span>{{ musicConfig.siteName }}</span>
+        <span>{{ runtimeConfig.siteName }}</span>
       </div>
       <div class="top-actions">
         <span v-if="sourceWarning" class="source-warning">{{ sourceWarning }}</span>
@@ -665,9 +699,7 @@
       </div>
     </header>
 
-    <Transition name="notice-toast">
-      <div v-if="notice" class="notice">{{ notice }}</div>
-    </Transition>
+    <Toast :message="notice" @dismiss="clearNotice" />
 
     <section
       class="now-playing-layout"
@@ -941,15 +973,7 @@
                 ><span><SlidersHorizontal :size="17" /><strong>音量</strong></span
                 ><strong>{{ Math.round(settings.volume * 100) }}%</strong></label
               >
-              <input
-                v-model.number="settings.volume"
-                class="setting-range"
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                :style="{ '--setting-progress': `${settings.volume * 100}%` }"
-              />
+              <SettingRange v-model="settings.volume" :min="0" :max="1" :step="0.01" />
             </div>
             <div class="setting-row">
               <span
@@ -959,17 +983,17 @@
                 {{ playModeText }}
               </button>
             </div>
-            <label class="setting-row toggle-row">
+            <div class="setting-row toggle-row">
               <span><strong>平滑切歌</strong><small>切歌前淡出，载入后淡入</small></span>
-              <input v-model="settings.smoothTrackChange" type="checkbox" /><i />
-            </label>
-            <label class="setting-row toggle-row">
+              <ToggleSwitch v-model="settings.smoothTrackChange" />
+            </div>
+            <div class="setting-row toggle-row">
               <span
                 ><strong>预加载前后歌曲</strong
                 ><small>当前歌曲载入后准备上一首和下一首</small></span
               >
-              <input v-model="settings.preloadNextTrack" type="checkbox" /><i />
-            </label>
+              <ToggleSwitch v-model="settings.preloadNextTrack" />
+            </div>
             <div class="setting-group sleep-setting">
               <label>
                 <span><strong>定时关闭</strong></span>
@@ -989,7 +1013,6 @@
                 aria-label="定时关闭"
                 @input="handleSleepTimerInput"
                 @change="handleSleepTimerChange"
-                @pointerup="handleSleepTimerChange"
               />
               <datalist id="sleep-timer-marks">
                 <option v-for="minutes in sleepTimerOptions" :key="minutes" :value="minutes" />
@@ -1005,17 +1028,17 @@
                 </span>
               </div>
             </div>
-            <label class="setting-row toggle-row">
+            <div class="setting-row toggle-row">
               <span><strong>失败后自动跳过</strong><small>继续尝试下一首歌曲</small></span>
-              <input v-model="settings.skipOnError" type="checkbox" /><i />
-            </label>
+              <ToggleSwitch v-model="settings.skipOnError" />
+            </div>
           </div>
           <div class="settings-section">
             <h3 class="settings-section-title">音效</h3>
-            <label class="setting-row toggle-row">
+            <div class="setting-row toggle-row">
               <span><strong>均衡器</strong><small>调整各频段增益</small></span>
-              <input v-model="settings.equalizer.enabled" type="checkbox" /><i />
-            </label>
+              <ToggleSwitch v-model="settings.equalizer.enabled" />
+            </div>
             <div class="setting-group eq-preset-group">
               <label
                 ><span><strong>预设</strong></span></label
@@ -1061,43 +1084,34 @@
           </div>
           <div class="settings-section">
             <h3 class="settings-section-title">显示</h3>
-            <label class="setting-row toggle-row">
+            <div class="setting-row toggle-row">
               <span
                 ><strong>自动隐藏上下控件</strong
                 ><small>鼠标闲置 30 秒后只保留歌曲内容</small></span
               >
-              <input v-model="settings.autoHideChrome" type="checkbox" /><i />
-            </label>
-            <label v-if="!portableDevice" class="setting-row toggle-row">
+              <ToggleSwitch v-model="settings.autoHideChrome" />
+            </div>
+            <div v-if="!portableDevice" class="setting-row toggle-row">
               <span
                 ><strong>全屏模式</strong
                 ><small>{{ fullscreenActive ? '已进入全屏' : '让播放器占满整个屏幕' }}</small></span
               >
-              <input
-                type="checkbox"
-                :checked="fullscreenActive"
-                @change="toggleFullscreenMode"
-              /><i />
-            </label>
+              <ToggleSwitch
+                :model-value="fullscreenActive"
+                @update:model-value="toggleFullscreenMode"
+              />
+            </div>
             <div class="setting-group">
               <label
                 ><span><strong>歌词字号</strong></span
                 ><strong>{{ settings.lyricFontSize }}px</strong></label
               >
-              <input
-                v-model.number="settings.lyricFontSize"
-                class="setting-range"
-                type="range"
-                min="15"
-                max="30"
-                step="1"
-                :style="{ '--setting-progress': `${((settings.lyricFontSize - 15) / 15) * 100}%` }"
-              />
+              <SettingRange v-model="settings.lyricFontSize" :min="15" :max="30" :step="1" />
             </div>
-            <label class="setting-row toggle-row">
+            <div class="setting-row toggle-row">
               <span><strong>歌词动画</strong><small>开启牵拉、淡入淡出与状态切换动画</small></span>
-              <input v-model="settings.lyricAnimation" type="checkbox" /><i />
-            </label>
+              <ToggleSwitch v-model="settings.lyricAnimation" />
+            </div>
             <button
               v-if="lyricsWindowSupported"
               class="setting-row window-setting-row"
@@ -1125,43 +1139,40 @@
               <span><strong>安装 Meliora</strong><small>添加到桌面并支持离线启动</small></span>
               <Download :size="19" />
             </button>
+            <button
+              v-if="iosInstallAvailable && !canInstall"
+              class="setting-row install-row"
+              @click="showIosInstallGuide"
+            >
+              <span
+                ><strong>安装 Meliora</strong><small>通过 Safari 分享菜单添加到主屏幕</small></span
+              >
+              <Download :size="19" />
+            </button>
           </div>
           <div class="settings-section">
             <h3 class="settings-section-title">背景</h3>
-            <label class="setting-row toggle-row">
+            <div class="setting-row toggle-row">
               <span><strong>动态封面背景</strong><small>使用当前封面渲染背景</small></span>
-              <input v-model="settings.dynamicBackground" type="checkbox" /><i />
-            </label>
+              <ToggleSwitch v-model="settings.dynamicBackground" />
+            </div>
             <div class="setting-group">
               <label
                 ><span><strong>背景模糊</strong></span
                 ><strong>{{ settings.backgroundBlur }}px</strong></label
               >
-              <input
-                v-model.number="settings.backgroundBlur"
-                class="setting-range"
-                type="range"
-                min="45"
-                max="130"
-                step="1"
-                :style="{ '--setting-progress': `${((settings.backgroundBlur - 45) / 85) * 100}%` }"
-              />
+              <SettingRange v-model="settings.backgroundBlur" :min="45" :max="130" :step="1" />
             </div>
             <div class="setting-group">
               <label
                 ><span><strong>背景饱和度</strong></span
                 ><strong>{{ Math.round(settings.backgroundSaturation * 100) }}%</strong></label
               >
-              <input
-                v-model.number="settings.backgroundSaturation"
-                class="setting-range"
-                type="range"
-                min="0.7"
-                max="1.8"
-                step="0.05"
-                :style="{
-                  '--setting-progress': `${((settings.backgroundSaturation - 0.7) / 1.1) * 100}%`,
-                }"
+              <SettingRange
+                v-model="settings.backgroundSaturation"
+                :min="0.7"
+                :max="1.8"
+                :step="0.05"
               />
             </div>
             <div class="setting-group">
@@ -1169,15 +1180,20 @@
                 ><span><strong>节奏亮度</strong></span
                 ><strong>{{ Math.round(settings.beatBrightness * 100) }}%</strong></label
               >
-              <input
-                v-model.number="settings.beatBrightness"
-                class="setting-range"
-                type="range"
-                min="0"
-                max="0.65"
-                step="0.05"
-                :style="{ '--setting-progress': `${(settings.beatBrightness / 0.65) * 100}%` }"
-              />
+              <SettingRange v-model="settings.beatBrightness" :min="0" :max="0.65" :step="0.05" />
+            </div>
+          </div>
+          <div class="settings-section about-section">
+            <h3 class="settings-section-title">关于</h3>
+            <div class="about-block">
+              <div class="about-headline">
+                <span class="about-name">{{ runtimeConfig.siteName }}</span>
+                <span class="about-version">v{{ APP_VERSION }}</span>
+              </div>
+              <a class="about-repo" :href="REPO_URL" target="_blank" rel="noopener noreferrer">
+                <GitFork :size="16" />
+                <span>GitHub 仓库</span>
+              </a>
             </div>
           </div>
         </div>
@@ -1192,6 +1208,14 @@
     min-height: 100svh;
     overflow: hidden;
     isolation: isolate;
+  }
+  // 支持 @property 时,:root 的 transition 会被 .app-shell 的 inline style(--accent)覆盖失效。
+  // 在 .app-shell 自身声明同名 transition,让 inline style 的 --accent/--accent-soft 变化也走 CSS 原生过渡。
+  // 仅在支持 @property 时挂载该 class;不支持时 useThemeAccent 走 JS 逐帧动画,加 transition 会拖尾。
+  .app-shell.css-theme-transition {
+    transition:
+      --accent 0.72s cubic-bezier(0.16, 1, 0.3, 1),
+      --accent-soft 0.72s cubic-bezier(0.16, 1, 0.3, 1);
   }
   .artwork-background,
   .background-overlay {
@@ -1342,47 +1366,6 @@
     margin-right: 8px;
     color: rgba(255, 255, 255, 0.58);
     font-size: 0.68rem;
-  }
-  .notice {
-    position: fixed;
-    top: 68px;
-    left: 50%;
-    z-index: 30;
-    max-width: min(520px, calc(100vw - 44px));
-    padding: 10px 15px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 15px;
-    corner-shape: squircle;
-    background: rgba(42, 42, 46, 0.46);
-    box-shadow:
-      0 14px 44px rgba(0, 0, 0, 0.22),
-      inset 0 1px rgba(255, 255, 255, 0.08);
-    color: rgba(255, 255, 255, 0.86);
-    font-size: 0.76rem;
-    font-weight: 520;
-    line-height: 1.35;
-    text-align: center;
-    transform: translateX(-50%);
-    backdrop-filter: blur(34px) saturate(150%);
-  }
-  .notice-toast-enter-active,
-  .notice-toast-leave-active {
-    transition:
-      opacity 0.32s cubic-bezier(0.22, 1, 0.36, 1),
-      filter 0.32s ease,
-      transform 0.38s cubic-bezier(0.16, 1, 0.3, 1);
-  }
-  .notice-toast-enter-from,
-  .notice-toast-leave-to {
-    opacity: 0;
-    filter: blur(10px);
-    transform: translate(-50%, -10px) scale(0.98);
-  }
-  .notice-toast-enter-to,
-  .notice-toast-leave-from {
-    opacity: 1;
-    filter: blur(0);
-    transform: translate(-50%, 0) scale(1);
   }
   .now-playing-layout {
     --layout-gap: clamp(48px, 7vw, 120px);
@@ -1958,6 +1941,58 @@
   .settings-section > :first-child {
     border-top: 0;
   }
+  .about-section {
+    margin-top: 14px;
+  }
+  .about-block {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 15px 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.075);
+  }
+  .about-headline {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .about-name {
+    color: #fff;
+    font-size: 0.92rem;
+    font-weight: 680;
+    letter-spacing: -0.02em;
+  }
+  .about-version {
+    color: var(--text-subtle);
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .about-repo {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 10px 14px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 14px;
+    corner-shape: squircle;
+    background: rgba(var(--accent-rgb), 0.16);
+    color: var(--accent);
+    font-size: 0.78rem;
+    font-weight: 560;
+    text-decoration: none;
+    transition:
+      background 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+      border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .about-repo:hover {
+    background: rgba(var(--accent-rgb), 0.28);
+    border-color: rgba(var(--accent-rgb), 0.5);
+  }
+  .about-repo:active {
+    transform: scale(0.98);
+  }
   .setting-group label,
   .setting-row {
     display: flex;
@@ -2206,40 +2241,6 @@
     color: rgba(255, 255, 255, 0.7);
     font-size: 0.68rem;
     font-weight: 560;
-  }
-  .toggle-row {
-    position: relative;
-    cursor: pointer;
-  }
-  .toggle-row input {
-    position: absolute;
-    opacity: 0;
-  }
-  .toggle-row i {
-    position: relative;
-    width: 42px;
-    height: 24px;
-    flex: 0 0 auto;
-    border-radius: 20px;
-    background: rgba(255, 255, 255, 0.16);
-    transition: background 0.18s ease;
-  }
-  .toggle-row i::after {
-    position: absolute;
-    top: 3px;
-    left: 3px;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: #fff;
-    content: '';
-    transition: transform 0.18s ease;
-  }
-  .toggle-row input:checked + i {
-    background: color-mix(in srgb, var(--accent) 64%, rgba(255, 255, 255, 0.18));
-  }
-  .toggle-row input:checked + i::after {
-    transform: translateX(18px);
   }
   .drawer-enter-active,
   .drawer-leave-active {

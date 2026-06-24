@@ -31,22 +31,26 @@
 
   const scrollTop = ref(0)
   const containerRef = ref<HTMLElement | null>(null)
+  // 容器高度通过 ResizeObserver 维护为响应式 ref,
+  // 这样窗口/抽屉尺寸变化时 virtualItems 会重新计算可见区域,而不必等待下一次滚动。
+  const containerHeight = ref(600)
   const activeTrackElement = ref<HTMLElement | null>(null)
   const focusPulseTrackId = ref<string | null>(null)
   const debouncedQuery = ref(props.query)
   let scrollTimer = 0
   let focusTimer = 0
   let searchTimer = 0
+  let resizeObserver: ResizeObserver | null = null
 
   const displayList = computed(() =>
     props.tracks.map((track, index) => ({ track, display: splitDisplayTitle(track.title), index })),
   )
 
   const virtualItems = computed(() => {
-    const containerHeight = containerRef.value?.clientHeight ?? 600
+    const height = containerHeight.value
     const total = displayList.value.length
     const start = Math.max(0, Math.floor(scrollTop.value / ITEM_HEIGHT) - BUFFER_COUNT)
-    const visibleCount = Math.ceil(containerHeight / ITEM_HEIGHT) + BUFFER_COUNT * 2
+    const visibleCount = Math.ceil(height / ITEM_HEIGHT) + BUFFER_COUNT * 2
     const end = Math.min(total, start + visibleCount)
     const topOffset = start * ITEM_HEIGHT
     const bottomOffset = Math.max(0, (total - end) * ITEM_HEIGHT)
@@ -118,6 +122,25 @@
   }
 
   onMounted(() => void scrollActiveTrackIntoView(false))
+  // 监听容器节点:挂载时测量初始高度并接入 ResizeObserver,卸载/重建时断开旧 observer。
+  // immediate 在 setup 阶段 containerRef.value 为 null,首次触发走 else 分支无副作用,
+  // 节点真正绑定后再次触发完成接入。
+  watch(
+    () => containerRef.value,
+    (el) => {
+      resizeObserver?.disconnect()
+      resizeObserver = null
+      if (!el) return
+      containerHeight.value = el.clientHeight
+      if (typeof ResizeObserver === 'undefined') return
+      resizeObserver = new ResizeObserver((entries) => {
+        const entry = entries[0]
+        if (entry) containerHeight.value = entry.contentRect.height
+      })
+      resizeObserver.observe(el)
+    },
+    { immediate: true },
+  )
   watch(
     () => props.currentTrackId,
     () => void scrollActiveTrackIntoView(),
@@ -137,6 +160,8 @@
     window.clearTimeout(scrollTimer)
     window.clearTimeout(focusTimer)
     window.clearTimeout(searchTimer)
+    resizeObserver?.disconnect()
+    resizeObserver = null
   })
 </script>
 

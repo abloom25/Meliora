@@ -1,7 +1,7 @@
 {
   "name": "meliora",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0-rc1",
   "description": "沉浸式 · 视听一体的网页音乐播放器,基于 Vue 3 + TypeScript + Pinia + SCSS。",
   "license": "AGPL-3.0-or-later",
   "author": "abloom25",
@@ -33,6 +33,8 @@
   "scripts": {
     "predev": "pnpm generate",
     "dev": "vite",
+    "dev:admin": "pnpm exec wrangler pages dev dist --port 8788",
+    "dev:full": "run-p dev dev:admin",
     "generate": "node scripts/generate-app-version.mjs",
     "prebuild": "pnpm generate",
     "build": "vue-tsc -b && vite build",
@@ -51,7 +53,8 @@
   "dependencies": {
     "@lucide/vue": "^1.18.0",
     "pinia": "^3.0.4",
-    "vue": "^3.5.34"
+    "vue": "^3.5.34",
+    "vue-router": "^5.1.0"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.0.2",
@@ -61,6 +64,7 @@
     "@vitejs/plugin-vue": "^6.0.6",
     "@vue/test-utils": "^2.4.11",
     "@vue/tsconfig": "^0.9.1",
+    "concurrently": "^10.0.3",
     "eslint": "^10.5.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.6",
@@ -69,12 +73,14 @@
     "husky": "^9.1.7",
     "jsdom": "^29.1.1",
     "lint-staged": "^17.0.7",
+    "npm-run-all2": "^9.0.2",
     "prettier": "^3.8.4",
     "sass": "^1.101.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.61.0",
     "vite": "^8.0.12",
     "vitest": "^4.1.8",
-    "vue-tsc": "^3.2.8"
+    "vue-tsc": "^3.2.8",
+    "wrangler": "^4.103.0"
   }
 }

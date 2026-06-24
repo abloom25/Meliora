@@ -1,9 +1,18 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import App from './App.vue'
+import AppShell from './AppShell.vue'
+import router from './router'
 import './styles/global.scss'
 
-createApp(App).use(createPinia()).mount('#app')
+const app = createApp(AppShell)
+
+app.config.errorHandler = (error, _instance, info) => {
+  console.error('[全局错误]', info, error)
+}
+
+app.use(createPinia())
+app.use(router)
+app.mount('#app')
 
 if ('serviceWorker' in navigator && import.meta.env.PROD) {
   window.addEventListener('load', () => {

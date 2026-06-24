@@ -147,8 +147,9 @@ PWA       public/sw.js, public/manifest.webmanifest
   - 类型/接口:`PascalCase`,接口不加 `I` 前缀。
   - 函数:动词开头(`load`、`apply`、`schedule`、`predict`...)。
 - **禁止** `console.log` 进入主干代码;调试用 `console.warn`/`console.error` 且必须有意义。
-- **禁止**在源码里写注释,除非用户明确要求,或代码确实存在反直觉的浏览器限制需要警示(如 WebAudio attach once)。
+- 在源码里写注释,特别是确实存在反直觉的浏览器限制需要警示(如 WebAudio attach once)。
 - ESLint 报警必须修复,不允许 `// eslint-disable-next-line` 滥用。
+- **模板内联事件禁止多语句**:`@click="a(); b()"` 会被 Prettier 拆成多行并移除分号,导致 Vue 模板编译器报 `Unexpected token, expected ","`。必须改用方法引用(`@click="handler"`)或包装函数(`@click="wrapper(arg)"`,wrapper 内部依次调用 a、b)。slot prop 回调同理(如 Dropdown 的 `close` 需与业务逻辑组合时,写成 `@click="selectServerAndClose(opt.value, close)"`)。
 
 ### 3.2 TypeScript
 
@@ -165,6 +166,28 @@ PWA       public/sw.js, public/manifest.webmanifest
 - 复杂组件可通过 `variant` prop 复用同一组件渲染多形态(参考 `PlayerControls.vue` 的 `bar | page | progress | mini`)。
 - 事件回调优先用 prop 注入函数(`onToggle`、`onSeek`),保持解耦;只有真正需要冒泡的事件才用 `emit`。
 - `<style>` 默认 `scoped`;全局样式集中在 `src/styles/global.scss`。
+
+### 3.3.1 共享组件库(`src/components/`)
+
+管理后台与播放器共用的基础 UI 组件统一放在 `src/components/`,各业务组件**必须**复用,**禁止**在业务文件中重复实现以下能力的结构与样式:
+
+| 组件           | 用途     | 关键约束                                                                                                                                                                                                                    |
+| -------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ConfirmModal` | 确认弹窗 | 内部 `<Teleport to="body">` + `<Transition>`;props: `visible`/`title`/`cancelText`/`confirmText`/`danger`/`loading`/`width`;slots: `default`(正文)/`header`                                                                 |
+| `ToggleSwitch` | 开关     | `v-model`;内部渲染自身 `<label>`,调用方外层**必须**用 `<div>` 而非 `<label>`(HTML 不允许 label 嵌套)                                                                                                                        |
+| `SettingRange` | 设置滑块 | `v-model`(number);内部自动计算 `--setting-progress`,调用方**无需**传 `:style` 进度变量                                                                                                                                      |
+| `Toast`        | 通知     | `<Teleport to="body">`;props: `message`/`type`/`position`;emit: `dismiss`                                                                                                                                                   |
+| `Dropdown`     | 下拉菜单 | 封装 outside-click + open/close;scoped slots: `#trigger({ toggle })` / `default({ close })`                                                                                                                                 |
+| `Collapse`     | 折叠展开 | `v-model:expanded`;`grid-template-rows: 0fr→1fr` 动画内聚;`#trigger({ toggle })` + 默认 slot;箭头统一用单 `ChevronDown` + `:class="{ collapsed }"` + `rotate(-90deg)`,**禁止**用 `ChevronUp`/`ChevronDown` 动态切换         |
+| `BaseInput`    | 输入框   | `inheritAttrs: false` + `v-bind="$attrs"` 透传 `type`/`placeholder`/`class`/`@blur`/`@keydown` 等;自带 `max-width: 320px`;`:value`+`@input` 模式须改为 `:model-value`+`@update:model-value`(handler 直接收 string,非 Event) |
+| `BaseTextarea` | 文本域   | 同 `BaseInput` 模式;自带 monospace + `min-height: 180px`                                                                                                                                                                    |
+
+规范:
+
+- 新增基础 UI 能力时,优先扩展共享组件,而非在业务文件中复制粘贴结构与样式。
+- 接入共享组件后,**必须**同步删除业务文件中废弃的 scoped 样式块(如 `.modal-backdrop`、`.toggle-row input + i`、`.row-input`、`.analytics-collapse` 等),避免留下死样式。
+- 共享组件根元素样式用 `scoped`;当调用方需要穿透到组件内部元素(如 `BaseInput` 的 `.invalid` 状态)时,用 `:deep(.base-input.invalid)` 规则。
+- `max-width` 例外:组合容器(如带按钮的输入组 `.token-field`、`.icon-input-group`)需要输入框填满剩余空间时,用 `:deep(.base-input) { max-width: none }` 覆盖。
 
 ### 3.4 Composable
 
@@ -223,6 +246,9 @@ PWA       public/sw.js, public/manifest.webmanifest
 - 命名过渡(`<Transition name="xxx">`)集中放在组件局部样式或 `global.scss`,命名采用 `domain-action` 形式(`artwork-bg-swap`、`lyrics-panel-swap`、`settings-drop`)。
 - 列表/抽屉/弹层进出场必须有动画,且持续时间在 180~420ms 之间;超过 600ms 仅用于"沉浸式"场景(如歌词牵引、主题色过渡)。
 - 长列表滚动到目标行优先采用 **FLIP** 技巧(参考 `LyricsPanel.scrollToIndex`)。
+- **路由级切换**必须用 `<router-view v-slot="{ Component }">` + `<Transition mode="out-in">`(参考 `AppShell.vue`),确保路由切换有淡入淡出。
+- **同容器多视图互斥切换**(如 `AdminApp.vue` 的 Setup/Login/Dashboard)必须用 `<Transition mode="out-in">` 包裹,`mode="out-in"` 确保旧组件先淡出再淡入新组件,避免布局跳动。
+- **浮层(弹窗/通知)**必须先 `<Teleport to="body">` 再 `<Transition>`。**禁止**将 `position: fixed` 的浮层直接放在带 `backdrop-filter` 或 `transform` 的父容器内——这些属性会建立包含块,导致 `fixed` 被困在父容器内变成"全屏"bug。所有 `ConfirmModal`/`Toast` 已内置 Teleport,业务方无需额外处理。
 
 ### 4.3 响应式三态
 
@@ -252,6 +278,10 @@ PWA       public/sw.js, public/manifest.webmanifest
 - 优先磨砂玻璃(`backdrop-filter`)+ mask-image 渐隐 + 大圆角。
 - 颜色不写死十六进制,统一通过 `--accent` 等 CSS 变量推导。
 - 暗色为默认基调(沿用 `#151318` 系列底色),浅色场景需独立适配方案再讨论。
+- **accent 半透明色派生**:
+  - 管理后台(`src/admin/`)下**禁止**使用 `rgba(var(--accent-rgb, fallback), α)`——`--accent-rgb` 仅在播放器主界面由 `useThemeAccent` 通过 JS 运行时设置,admin 页面未定义该变量会永远卡在 fallback 值,导致用户自定义 `--accent` 时选中态/徽章等不跟随变化。
+  - admin 下统一用 `color-mix(in srgb, var(--accent), transparent X%)` 从 `--accent` 派生半透明色(`--accent` 已用 `@property` 注册为 `<color>`,`color-mix` 可正确解析)。α→X% 换算:`X% = round((1-α) × 100)`。
+  - 播放器主界面(`src/App.vue`)可继续使用 `rgba(var(--accent-rgb), α)`,因为 JS 会设置该变量;但涉及 `calc()` 动态计算 alpha 的场景(如节拍亮度)仍须用 `--accent-rgb`(`color-mix` 不支持动态 alpha 计算)。
 
 ---
 
@@ -339,6 +369,9 @@ PWA       public/sw.js, public/manifest.webmanifest
 - **部署平台规范**:
   - 支持 4 个部署平台:Vercel(`vercel.json`)、Cloudflare Pages(`wrangler.toml`)、Netlify(`netlify.toml`)、GitHub Pages(`.github/workflows/deploy-pages.yml`)。
   - 所有平台配置必须统一:构建命令 `pnpm build`、输出目录 `dist`、Node 22、pnpm 11。
+  - **环境变量(3 必填)**:`GH_TOKEN`(GitHub PAT,Contents Read and write)、`GH_REPO`(`owner/repo` 格式)、`CONFIG_ENCRYPTION_KEY`(配置加密与 Cookie 签名的主密钥,至少 32 位,生产模式校验强度——拒绝全相同字符 / 纯顺序字符等弱模式)。`GH_BRANCH` 可选(默认 `main`),`GITHUB_PROXY` 可选,`ADMIN_DISABLED` 可选(设为 `true`/`1`/`yes`/`on`,大小写不敏感;禁用管理后台时除 `GET /api/runtime-config` 与状态探针(`GET /api/setup-status`、`GET /api/status-page`,返回 HTML 状态页)外,所有 `/api/*` 返回 403,`/admin` 显示"已禁用")。
+    - **不再使用** `ADMIN_PASSWORD` 和 `ADMIN_SECRET`——密码通过 `/setup` 页面首次设置(PBKDF2-SHA256 100k 迭代哈希存入 `public/admin.json`);Cookie 签名密钥与配置加密密钥**均从 `CONFIG_ENCRYPTION_KEY` 派生**(`HMAC-SHA256` / `PBKDF2`),与 `GH_TOKEN` 完全解耦,`GH_TOKEN` 可独立轮换而不影响已加密配置与已签发 Cookie。
+    - 本地开发:`GH_TOKEN` 为空或 `placeholder` / `ghp_xxx` 开头时进入内存模式(配置 / 密码不持久化,加密与签名走明文降级)。
   - **安全头一致性**:所有平台的 headers 配置必须保持一致(CSP、X-Content-Type-Options、X-Frame-Options、Referrer-Policy、Permissions-Policy)。
   - **SPA Fallback**:所有平台必须配置 `/* -> /index.html` 的 200 重写,确保路由刷新有效。
   - **Service Worker 缓存控制**:`/sw.js` 必须配置 `Cache-Control: public, max-age=0, must-revalidate` + `Service-Worker-Allowed: /`,禁止浏览器长期缓存 SW。

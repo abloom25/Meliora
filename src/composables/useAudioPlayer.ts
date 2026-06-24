@@ -147,13 +147,24 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   function syncMediaSession() {
     if (!('mediaSession' in navigator) || !currentTrack.value) return
     const track = currentTrack.value
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: track.title,
-      artist: track.artist,
-      album: track.album || 'Meliora',
-      artwork: track.cover ? [{ src: track.cover }] : [],
-    })
-    navigator.mediaSession.playbackState = isPlaying.value ? 'playing' : 'paused'
+    // Safari 15-16 有 mediaSession 对象但无 MediaMetadata 构造函数,需先检测
+    if (typeof MediaMetadata !== 'undefined') {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: track.title,
+          artist: track.artist,
+          album: track.album || 'Meliora',
+          artwork: track.cover ? [{ src: track.cover }] : [],
+        })
+      } catch {
+        // 部分浏览器对 artwork 格式有要求,失败时忽略
+      }
+    }
+    try {
+      navigator.mediaSession.playbackState = isPlaying.value ? 'playing' : 'paused'
+    } catch {
+      // Safari 旧版本对 playbackState 赋值可能抛错
+    }
   }
 
   function describePlaybackError(error: unknown, audio: HTMLAudioElement) {
@@ -666,18 +677,31 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     'seekforward',
   ]
 
+  // Safari 15-16 对部分 MediaSessionAction 不支持,setActionHandler 会抛 TypeError,
+  // 用统一包装函数兜底,避免初始化阶段整体失败。
+  function safeSetActionHandler(
+    action: MediaSessionAction,
+    handler: MediaSessionActionHandler | null,
+  ) {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler)
+    } catch {
+      // 忽略不支持的动作
+    }
+  }
+
   if ('mediaSession' in navigator) {
-    navigator.mediaSession.setActionHandler('play', () => void play())
-    navigator.mediaSession.setActionHandler('pause', pause)
-    navigator.mediaSession.setActionHandler('previoustrack', () => void previous())
-    navigator.mediaSession.setActionHandler('nexttrack', () => void next())
-    navigator.mediaSession.setActionHandler('seekto', (details) => {
+    safeSetActionHandler('play', () => void play())
+    safeSetActionHandler('pause', pause)
+    safeSetActionHandler('previoustrack', () => void previous())
+    safeSetActionHandler('nexttrack', () => void next())
+    safeSetActionHandler('seekto', (details) => {
       if (details.seekTime !== undefined) seek(details.seekTime)
     })
-    navigator.mediaSession.setActionHandler('seekbackward', (details) =>
+    safeSetActionHandler('seekbackward', (details) =>
       seek(activeAudio.currentTime - (details.seekOffset || 10)),
     )
-    navigator.mediaSession.setActionHandler('seekforward', (details) =>
+    safeSetActionHandler('seekforward', (details) =>
       seek(activeAudio.currentTime + (details.seekOffset || 10)),
     )
   }

@@ -1,4 +1,5 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { getFullscreenAPI, isFullscreenUnsupportedByPlatform } from '../utils/browser'
 
 export interface UseFullscreenOptions {
   onShowNotice: (msg: string) => void
@@ -16,13 +17,27 @@ export function useFullscreen(options: UseFullscreenOptions) {
   }
 
   function syncFullscreenState() {
-    fullscreenActive.value = Boolean(document.fullscreenElement) || isBrowserFullscreen()
+    const api = getFullscreenAPI()
+    fullscreenActive.value = api.isFullscreen() || isBrowserFullscreen()
   }
 
   async function toggleFullscreenMode() {
+    const api = getFullscreenAPI()
+
+    // iOS Safari 完全不支持 Fullscreen API,需要引导用户使用浏览器自带全屏
+    if (!api.supported || isFullscreenUnsupportedByPlatform()) {
+      if (isBrowserFullscreen()) {
+        onShowNotice('请按 F11 或浏览器菜单退出全屏')
+      } else {
+        onShowNotice('当前设备暂不支持网页全屏,请使用浏览器菜单进入全屏')
+      }
+      syncFullscreenState()
+      return
+    }
+
     try {
-      if (document.fullscreenElement) {
-        await document.exitFullscreen()
+      if (api.isFullscreen()) {
+        await api.exitFullscreen()
         return
       }
       if (isBrowserFullscreen()) {
@@ -30,7 +45,7 @@ export function useFullscreen(options: UseFullscreenOptions) {
         syncFullscreenState()
         return
       }
-      await document.documentElement.requestFullscreen()
+      await api.requestFullscreen(document.documentElement)
     } catch {
       onShowNotice('浏览器暂时无法进入全屏')
     } finally {
@@ -38,15 +53,28 @@ export function useFullscreen(options: UseFullscreenOptions) {
     }
   }
 
+  function handleFullscreenChange() {
+    syncFullscreenState()
+  }
+
   onMounted(() => {
-    document.addEventListener('fullscreenchange', syncFullscreenState)
+    const api = getFullscreenAPI()
+    document.addEventListener(api.eventName, handleFullscreenChange)
+    // 标准事件也监听一遍,兼容部分浏览器同时支持两套事件的情况
+    if (api.eventName !== 'fullscreenchange') {
+      document.addEventListener('fullscreenchange', handleFullscreenChange)
+    }
     window.addEventListener('resize', syncFullscreenState)
     window.visualViewport?.addEventListener('resize', syncFullscreenState)
     syncFullscreenState()
   })
 
   onBeforeUnmount(() => {
-    document.removeEventListener('fullscreenchange', syncFullscreenState)
+    const api = getFullscreenAPI()
+    document.removeEventListener(api.eventName, handleFullscreenChange)
+    if (api.eventName !== 'fullscreenchange') {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange)
+    }
     window.removeEventListener('resize', syncFullscreenState)
     window.visualViewport?.removeEventListener('resize', syncFullscreenState)
   })

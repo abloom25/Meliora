@@ -8,6 +8,7 @@ export function useFocusTrap(
 ) {
   const triggerRef = ref<HTMLElement | null>(null)
   let pendingActivation = false
+  let focusTimer = 0
 
   function handleTab(e: KeyboardEvent) {
     if (!containerRef.value || !active.value) return
@@ -75,8 +76,9 @@ export function useFocusTrap(
     pendingActivation = false
     if (triggerRef.value && typeof triggerRef.value.focus === 'function') {
       const trigger = triggerRef.value
-      setTimeout(() => {
+      focusTimer = window.setTimeout(() => {
         trigger.focus()
+        focusTimer = 0
       }, 0)
     }
     triggerRef.value = null
@@ -119,5 +121,9 @@ export function useFocusTrap(
   onBeforeUnmount(() => {
     pendingActivation = false
     document.removeEventListener('keydown', handleKeydown)
+    if (focusTimer) {
+      window.clearTimeout(focusTimer)
+      focusTimer = 0
+    }
   })
 }

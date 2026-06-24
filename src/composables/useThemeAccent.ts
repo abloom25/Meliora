@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { onBeforeUnmount, ref } from 'vue'
 import type { ThemeColor } from '../utils/theme'
 import { isReducedMotion } from '../utils/motion'
 
@@ -120,11 +120,19 @@ export function useThemeAccent() {
     })
   }
 
+  onBeforeUnmount(() => {
+    window.cancelAnimationFrame(themeFrame)
+  })
+
   return {
     accent,
     accentSoft,
     accentRgb,
     applyTheme,
     resetTheme,
+    // 暴露能力检测:支持 @property 时由 CSS 原生过渡 --accent/--accent-soft,
+    // 调用方需在消费这两个变量的根容器上声明同名 transition 才会生效(inline style 会覆盖 :root 继承)。
+    // 不支持时走 JS 逐帧动画,调用方不得添加 CSS transition,否则会与每帧中间值冲突产生拖尾。
+    cssTransitionSupported: supportsCssProperty,
   }
 }

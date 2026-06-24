@@ -1,0 +1,26 @@
+# 强制全仓库使用 LF 行尾,与 .editorconfig / .prettierrc 保持一致。
+# 跨平台协作时避免 Windows 的 CRLF 污染,杜绝 prettier 的 "Delete `␍`" 报错。
+
+# 源码、配置、文档统一 LF
+* text=auto eol=lf
+
+# 二进制文件不做行尾转换
+*.png text=false
+*.jpg text=false
+*.jpeg text=false
+*.gif text=false
+*.ico text=false
+*.svg text=false
+*.webp text=false
+*.flac text=false
+*.mp3 text=false
+*.mp4 text=false
+*.webm text=false
+*.woff text=false
+*.woff2 text=false
+*.ttf text=false
+*.otf text=false
+*.eot text=false
+*.pdf text=false
+*.zip text=false
+*.gz text=false

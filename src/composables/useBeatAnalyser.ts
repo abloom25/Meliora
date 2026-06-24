@@ -1,5 +1,6 @@
 import { onBeforeUnmount, ref, type Ref } from 'vue'
 import { EQ_BAND_FREQUENCIES, bandFilterType } from '../utils/equalizer'
+import { createAudioContextCompatible } from '../utils/browser'
 
 // 模块级音频上下文与 source 缓存：
 // 浏览器对同一个 audio 节点只允许 createMediaElementSource 一次。
@@ -62,6 +63,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   let beatPeak = 0.35
   let spectrumTick = 0
   let visibilityListenerRegistered = false
+  let isUnmounted = false
 
   function stopBeatAnalysis() {
     window.cancelAnimationFrame(beatFrame)
@@ -98,7 +100,10 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
 
   function getAudioContext(): AudioContext {
     if (!sharedAudioContext || sharedAudioContext.state === 'closed') {
-      sharedAudioContext = new AudioContext()
+      // Safari 14.1 之前需要 webkitAudioContext,由工具统一兼容
+      const ctx = createAudioContextCompatible()
+      if (!ctx) throw new Error('AudioContext unavailable')
+      sharedAudioContext = ctx
     }
     return sharedAudioContext
   }
@@ -260,6 +265,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
         options.onEqFiltersReady?.(eqFilters)
       }
       if (audioContext.state === 'suspended') await audioContext.resume()
+      if (isUnmounted) return
       if (!beatFrame) beatFrame = window.requestAnimationFrame(updateBeatLevel)
     } catch {
       stopBeatAnalysis()
@@ -267,6 +273,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   }
 
   onBeforeUnmount(() => {
+    isUnmounted = true
     stopBeatAnalysis()
     for (const { source, target } of connectedSources) {
       try {

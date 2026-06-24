@@ -19,9 +19,28 @@ export interface LocalTrackConfig {
   lyrics?: string
 }
 
+export interface UmamiConfig {
+  enabled?: boolean
+  scriptUrl?: string
+  websiteId?: string
+}
+
+export interface GoogleAnalyticsConfig {
+  enabled?: boolean
+  measurementId?: string
+}
+
 export interface MusicConfig {
   siteName: string
+  siteIcon?: string
   apiEndpoint: string
+  apiToken?: string
+  githubProxy?: string
+  umami?: UmamiConfig
+  googleAnalytics?: GoogleAnalyticsConfig
+  googleSiteVerification?: string
+  customCss?: string
+  customJs?: string
   playlists: MetingPlaylistConfig[]
   localTracks: LocalTrackConfig[]
 }

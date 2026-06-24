@@ -1,0 +1,136 @@
+name: Update from upstream
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_repo:
+        description: Upstream repository to sync from
+        required: false
+        default: abloom25/Meliora
+      github_proxy:
+        description: Optional GitHub URL proxy prefix or template, for example https://proxy.example.com/ or https://proxy.example.com?url={url}
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-from-upstream
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve latest upstream release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo || 'abloom25/Meliora' }}
+          GITHUB_PROXY: ${{ inputs.github_proxy }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          github_url() {
+            local target="$1"
+            local proxy="${GITHUB_PROXY:-}"
+            if [ -z "$proxy" ]; then
+              printf '%s\n' "$target"
+            elif [[ "$proxy" == *"{url}"* ]]; then
+              python -c 'import sys; from urllib.parse import quote; print(sys.argv[1].replace("{url}", quote(sys.argv[2], safe="")))' "$proxy" "$target"
+            else
+              printf '%s/%s\n' "${proxy%/}" "$target"
+            fi
+          }
+
+          api_get() {
+            local path="$1"
+            curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "User-Agent: Meliora-Updater" \
+              "$(github_url "https://api.github.com/${path}")"
+          }
+
+          TAG="$(api_get "repos/${UPSTREAM_REPO}/releases/latest" 2>/dev/null | python -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))' || true)"
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            TAG="$(api_get "repos/${UPSTREAM_REPO}/tags" | python -c 'import json,re,sys; tags=json.load(sys.stdin); stable=[tag["name"] for tag in tags if re.match(r"^v?\\d+\\.\\d+\\.\\d+$", tag.get("name",""))]; print((stable or [tag.get("name","") for tag in tags if tag.get("name")])[0] if tags else "")')"
+          fi
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "No latest release tag found for ${UPSTREAM_REPO}" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream release: ${TAG}"
+
+      - name: Fetch upstream release
+        env:
+          UPSTREAM_REPO: ${{ inputs.upstream_repo || 'abloom25/Meliora' }}
+          TARGET_TAG: ${{ steps.release.outputs.tag }}
+          GITHUB_PROXY: ${{ inputs.github_proxy }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          github_url() {
+            local target="$1"
+            local proxy="${GITHUB_PROXY:-}"
+            if [ -z "$proxy" ]; then
+              printf '%s\n' "$target"
+            elif [[ "$proxy" == *"{url}"* ]]; then
+              python -c 'import sys; from urllib.parse import quote; print(sys.argv[1].replace("{url}", quote(sys.argv[2], safe="")))' "$proxy" "$target"
+            else
+              printf '%s/%s\n' "${proxy%/}" "$target"
+            fi
+          }
+
+          git remote add upstream "$(github_url "https://github.com/${UPSTREAM_REPO}.git")"
+          git fetch upstream "refs/tags/${TARGET_TAG}:refs/tags/upstream-${TARGET_TAG}" --force
+          mkdir -p /tmp/meliora-upstream
+          git archive "refs/tags/upstream-${TARGET_TAG}" | tar -x -C /tmp/meliora-upstream
+
+      - name: Sync code while preserving user data
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsync -a --delete \
+            --exclude='.git/' \
+            --exclude='.dev.vars' \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='.wrangler/' \
+            --exclude='.vercel/' \
+            --exclude='dist/' \
+            --exclude='node_modules/' \
+            --exclude='dev-server.err.log' \
+            --exclude='dev-server.out.log' \
+            --exclude='public/admin.json' \
+            --exclude='public/config.json' \
+            --exclude='public/icon.*' \
+            --exclude='public/icons.svg' \
+            --exclude='public/assets/' \
+            --exclude='public/music/' \
+            /tmp/meliora-upstream/ ./
+
+      - name: Commit update
+        env:
+          TARGET_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "Already up to date with ${TARGET_TAG}."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore(update): sync upstream ${TARGET_TAG}"
+          git push

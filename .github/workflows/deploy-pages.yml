@@ -34,6 +34,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
       - name: Run tests
         run: pnpm test
 
@@ -46,8 +49,9 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+      - name: Generate SPA 404 fallback
+        shell: bash
+        run: cp dist/index.html dist/404.html
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
@@ -81,8 +85,14 @@ jobs:
         shell: bash
         run: |
           VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$VERSION" =~ -(alpha|beta|rc|pre|preview)(\.|-|$) ]]; then
+            STABLE=false
+          else
+            STABLE=true
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "stable=$STABLE" >> "$GITHUB_OUTPUT"
 
       - name: Check existing tag
         id: tag_exists
@@ -106,3 +116,33 @@ jobs:
       - name: Skip existing tag
         if: steps.tag_exists.outputs.exists == 'true'
         run: echo "Tag ${{ steps.version.outputs.tag }} already exists; skipping."
+
+      - name: Check existing release
+        id: release_exists
+        if: steps.version.outputs.stable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release
+        if: steps.version.outputs.stable == 'true' && steps.release_exists.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          gh release create "$TAG" \
+            --title "Release $TAG" \
+            --generate-notes \
+            --latest
+
+      - name: Skip prerelease version
+        if: steps.version.outputs.stable != 'true'
+        run: echo "Version ${{ steps.version.outputs.version }} is a prerelease; skipping GitHub Release."

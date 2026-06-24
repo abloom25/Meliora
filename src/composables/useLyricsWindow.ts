@@ -1,5 +1,6 @@
 import { onBeforeUnmount, ref, watch, type Ref } from 'vue'
 import type { LyricsSnapshot, Track } from '../types/music'
+import { supportsDocumentPictureInPicture } from '../utils/browser'
 
 interface DocumentPictureInPictureApi {
   requestWindow(options?: { width?: number; height?: number }): Promise<Window>
@@ -40,6 +41,19 @@ const popupStyles = `
   .state { margin: auto 0; color: rgba(255,255,255,.5); font-size: 18px; font-weight: 620; }
 `
 
+const POPUP_HTML = `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Meliora 歌词</title><style>${popupStyles}</style></head><body><div class="background"></div><div class="shade"></div><main><header><img class="cover" alt=""><div class="copy"><h1></h1><p></p></div></header><section class="lyrics"></section></main></body></html>`
+
+const CLOSED_POLL_INTERVAL = 800
+
+// Safari 在窗口销毁后访问 closed 属性可能抛错,统一用 try/catch 兜底
+function isWindowClosed(target: Window): boolean {
+  try {
+    return target.closed
+  } catch {
+    return true
+  }
+}
+
 export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions) {
   const snapshot = ref<LyricsSnapshot>({
     lines: [],
@@ -52,6 +66,11 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
   let lastRenderedTrackId: string | null = null
   let lastRenderedIsPlaying: boolean | null = null
   let lastRenderedNoTrack = false
+  let closedPollTimer = 0
+  let readyCheckTimer = 0
+  let resolveReadyCheck: (() => void) | null = null
+  let isToggling = false
+  let windowCloseListeners: Array<() => void> = []
 
   function setSnapshot(value: LyricsSnapshot) {
     snapshot.value = value
@@ -65,14 +84,105 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     lastRenderedNoTrack = false
   }
 
-  function createDocument(target: Window) {
-    const parser = new DOMParser()
-    const doc = parser.parseFromString(
-      `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Meliora 歌词</title><style>${popupStyles}</style></head><body><div class="background"></div><div class="shade"></div><main><header><img class="cover" alt=""><div class="copy"><h1></h1><p></p></div></header><section class="lyrics"></section></main></body></html>`,
-      'text/html',
-    )
-    target.document.replaceChildren(doc.documentElement)
+  function teardownWindow(target: Window) {
+    for (const cleanup of windowCloseListeners) {
+      try {
+        cleanup()
+      } catch {
+        // 监听器可能已随窗口销毁,忽略
+      }
+    }
+    windowCloseListeners = []
+    if (closedPollTimer) {
+      window.clearInterval(closedPollTimer)
+      closedPollTimer = 0
+    }
+    if (readyCheckTimer) {
+      window.clearInterval(readyCheckTimer)
+      readyCheckTimer = 0
+      const resolve = resolveReadyCheck
+      resolveReadyCheck = null
+      resolve?.()
+    }
+    if (lyricsWindow === target) {
+      lyricsWindow = null
+      isOpen.value = false
+      clearCache()
+    }
+  }
 
+  function registerCloseDetection(target: Window) {
+    const handleClosed = () => {
+      if (lyricsWindow === target) teardownWindow(target)
+    }
+    // Safari 对弹窗的 pagehide/beforeunload/unload 触发时机不一致,
+    // 三个事件都监听以覆盖不同 Safari 版本与关闭路径。
+    const events = ['pagehide', 'beforeunload', 'unload']
+    for (const event of events) {
+      try {
+        target.addEventListener(event, handleClosed)
+        windowCloseListeners.push(() => {
+          try {
+            target.removeEventListener(event, handleClosed)
+          } catch {
+            // 窗口可能已销毁
+          }
+        })
+      } catch {
+        // 某些环境下 addEventListener 可能抛错,忽略
+      }
+    }
+    // Safari 在某些关闭路径(如点击标题栏关闭按钮)下可能完全不触发上述事件,
+    // 需要轮询 closed 属性作为兜底。
+    closedPollTimer = window.setInterval(() => {
+      if (lyricsWindow !== target) {
+        window.clearInterval(closedPollTimer)
+        closedPollTimer = 0
+        return
+      }
+      if (isWindowClosed(target)) {
+        window.clearInterval(closedPollTimer)
+        closedPollTimer = 0
+        handleClosed()
+      }
+    }, CLOSED_POLL_INTERVAL)
+  }
+
+  function writeDocument(target: Window) {
+    // Safari 对 DOMParser 生成的独立 Document 通过 replaceChildren 跨窗口移植节点支持不可靠
+    // (样式上下文丢失、节点归属权异常)。改用 document.write 写入完整 HTML,
+    // 这是所有浏览器(含旧 Safari)最兼容的同源弹窗内容注入方式。
+    try {
+      target.document.open()
+      target.document.write(POPUP_HTML)
+      target.document.close()
+    } catch {
+      // 极少数情况下 document.write 会抛错(如窗口已被回收),交给上层处理
+      throw new Error('Failed to write lyrics window document')
+    }
+  }
+
+  function waitForDocumentReady(target: Window): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (target.document.readyState === 'complete') {
+        resolve()
+        return
+      }
+      resolveReadyCheck = resolve
+      let attempts = 0
+      readyCheckTimer = window.setInterval(() => {
+        attempts += 1
+        if (target.document.readyState === 'complete' || attempts > 20) {
+          window.clearInterval(readyCheckTimer)
+          readyCheckTimer = 0
+          resolveReadyCheck = null
+          resolve()
+        }
+      }, 50)
+    })
+  }
+
+  function cacheNodes(target: Window) {
     const cover = target.document.querySelector<HTMLImageElement>('.cover')
     const title = target.document.querySelector<HTMLElement>('h1')
     const artist = target.document.querySelector<HTMLElement>('header p')
@@ -95,14 +205,13 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     lastRenderedTrackId = null
     lastRenderedIsPlaying = null
     lastRenderedNoTrack = false
+  }
 
-    target.addEventListener('pagehide', () => {
-      if (lyricsWindow === target) {
-        lyricsWindow = null
-        isOpen.value = false
-        clearCache()
-      }
-    })
+  async function createDocument(target: Window) {
+    writeDocument(target)
+    await waitForDocumentReady(target)
+    cacheNodes(target)
+    registerCloseDetection(target)
   }
 
   function ensureLineNode(index: number, doc: Document): HTMLDivElement {
@@ -118,12 +227,10 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
 
   function render() {
     const target = lyricsWindow
-    if (!target || target.closed) {
-      if (lyricsWindow) {
-        isOpen.value = false
-        lyricsWindow = null
-        clearCache()
-      }
+    if (!target) return
+
+    if (isWindowClosed(target)) {
+      teardownWindow(target)
       return
     }
 
@@ -228,33 +335,66 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     }
   }
 
-  async function toggleLyricsWindow() {
-    if (lyricsWindow && !lyricsWindow.closed) {
-      lyricsWindow.close()
-      lyricsWindow = null
-      isOpen.value = false
-      clearCache()
-      return
-    }
+  async function openViaWindowOpen(): Promise<Window> {
+    // Safari 不支持 noopener 之外的某些特性字符串,popup 确保是新窗口
+    const win = window.open('', 'meliora-lyrics', 'popup,width=430,height=600,resizable=yes')
+    if (!win) throw new Error('Lyrics window was blocked')
+    await createDocument(win)
+    return win
+  }
 
+  async function openViaDocumentPiP(): Promise<Window> {
     const pictureInPicture = (
       window as typeof window & { documentPictureInPicture?: DocumentPictureInPictureApi }
-    ).documentPictureInPicture
+    ).documentPictureInPicture!
+    const win = await pictureInPicture.requestWindow({ width: 430, height: 600 })
+    // Document PiP 窗口的 document 是空白的,需要写入内容
+    await createDocument(win)
+    return win
+  }
 
-    lyricsWindow = pictureInPicture
-      ? await pictureInPicture.requestWindow({ width: 430, height: 600 })
-      : window.open('', 'meliora-lyrics', 'popup,width=430,height=600,resizable=yes')
+  async function toggleLyricsWindow() {
+    if (isToggling) return
+    isToggling = true
+    try {
+      if (lyricsWindow) {
+        if (!isWindowClosed(lyricsWindow)) {
+          try {
+            lyricsWindow.close()
+          } catch {
+            // 窗口可能已销毁
+          }
+          teardownWindow(lyricsWindow)
+          return
+        }
+        teardownWindow(lyricsWindow)
+      }
 
-    if (!lyricsWindow) throw new Error('Lyrics window was blocked')
-    createDocument(lyricsWindow)
-    isOpen.value = true
-    render()
+      let win: Window
+      if (supportsDocumentPictureInPicture()) {
+        win = await openViaDocumentPiP()
+      } else {
+        win = await openViaWindowOpen()
+      }
+
+      lyricsWindow = win
+      isOpen.value = true
+      render()
+    } finally {
+      isToggling = false
+    }
   }
 
   watch([currentTrack, isPlaying], render)
   onBeforeUnmount(() => {
-    lyricsWindow?.close()
-    clearCache()
+    if (lyricsWindow) {
+      try {
+        lyricsWindow.close()
+      } catch {
+        // 窗口可能已销毁
+      }
+      teardownWindow(lyricsWindow)
+    }
   })
 
   return { isOpen, setSnapshot, toggleLyricsWindow }

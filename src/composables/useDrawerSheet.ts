@@ -52,6 +52,9 @@ export function useDrawerSheet({
   const dragging = ref(false)
 
   let state: DragState | null = null
+  let dismissTimer = 0
+  let openRaf1 = 0
+  let openRaf2 = 0
 
   function detentOffset(d: DrawerDetent) {
     if (d === 'full') return 0
@@ -223,8 +226,9 @@ export function useDrawerSheet({
     detent.value = 'closed'
     dragOffset.value = 0
     const wait = previous === 'full' ? 360 : 280
-    window.setTimeout(() => {
+    dismissTimer = window.setTimeout(() => {
       onDismiss()
+      dismissTimer = 0
     }, wait)
   }
 
@@ -325,8 +329,10 @@ export function useDrawerSheet({
         detent.value = 'closed'
         dragOffset.value = 0
         // Then snap to full on the next frame
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
+        openRaf1 = requestAnimationFrame(() => {
+          openRaf1 = 0
+          openRaf2 = requestAnimationFrame(() => {
+            openRaf2 = 0
             if (active.value) {
               detent.value = 'full'
             }
@@ -346,6 +352,18 @@ export function useDrawerSheet({
     detachContainer()
     detachHandle()
     state = null
+    if (dismissTimer) {
+      window.clearTimeout(dismissTimer)
+      dismissTimer = 0
+    }
+    if (openRaf1) {
+      window.cancelAnimationFrame(openRaf1)
+      openRaf1 = 0
+    }
+    if (openRaf2) {
+      window.cancelAnimationFrame(openRaf2)
+      openRaf2 = 0
+    }
   })
 
   /** Total Y translation (px) from the fully-open position. */

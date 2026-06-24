@@ -4,6 +4,7 @@
   import { usePlayerStore } from '../stores/player'
   import { hasCachedLyrics, loadLyricsText } from '../services/lyrics'
   import { findActiveLyricIndex, hasMeaningfulLyrics, parseLyrics } from '../utils/lyrics'
+  import { supportsWebAnimations } from '../utils/browser'
   import type { LyricAvailability, LyricLine, LyricsSnapshot } from '../types/music'
 
   const emit = defineEmits<{
@@ -130,7 +131,7 @@
       ),
     )
 
-    if (!settings.value.lyricAnimation || prefersReducedMotion) {
+    if (!settings.value.lyricAnimation || prefersReducedMotion || !supportsWebAnimations()) {
       container.scrollTop = target
       onComplete?.()
       return

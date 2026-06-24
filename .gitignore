@@ -10,13 +10,26 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
-.vercel
 src/generated/
 *.local
+
+# 敏感配置文件(含密钥,严禁提交)
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# 部署平台本地缓存与临时文件
+.vercel
+.wrangler
+.netlify
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
+!.vscode/settings.json
 .idea
 .trae/*
 .DS_Store
@@ -25,8 +38,6 @@ src/generated/
 *.njsproj
 *.sln
 *.sw?
-
-.vercel
 
 # Prettier
 .prettiercache

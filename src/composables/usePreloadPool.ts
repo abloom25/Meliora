@@ -11,6 +11,7 @@ export interface PreloadSlot {
   direction: PreloadDirection
   ready: Promise<boolean> | null
   track: Track | null
+  cleanup: (() => void) | null
 }
 
 export function preloadCover(url?: string) {
@@ -45,12 +46,14 @@ export function usePreloadPool(options: PreloadPoolOptions) {
       direction: 'previous',
       ready: null,
       track: null,
+      cleanup: null,
     },
     next: {
       audio: players[2],
       direction: 'next',
       ready: null,
       track: null,
+      cleanup: null,
     },
   }
   const preloadMessage = ref('')
@@ -99,6 +102,10 @@ export function usePreloadPool(options: PreloadPoolOptions) {
   }
 
   function clearSlot(slot: PreloadSlot) {
+    if (slot.cleanup) {
+      slot.cleanup()
+      slot.cleanup = null
+    }
     slot.track = null
     slot.ready = null
     slot.audio.pause()
@@ -142,8 +149,8 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     slot.ready = new Promise<boolean>((resolve) => {
       const timeout = window.setTimeout(() => {
         pendingPreloadTimeouts.delete(timeout)
-        // 卸载后不再修改 slot 状态（slot 对象可能已被释放）。
         if (isPoolUnmounted.value) {
+          cleanup()
           resolve(false)
           return
         }
@@ -151,16 +158,10 @@ export function usePreloadPool(options: PreloadPoolOptions) {
           slot.track = null
           slot.ready = null
         }
+        cleanup()
         resolve(false)
       }, PRELOAD_READY_TIMEOUT)
       pendingPreloadTimeouts.add(timeout)
-      const cleanup = () => {
-        pendingPreloadTimeouts.delete(timeout)
-        window.clearTimeout(timeout)
-        slot.audio.removeEventListener('canplay', handleReady)
-        slot.audio.removeEventListener('loadeddata', handleReady)
-        slot.audio.removeEventListener('error', handleError)
-      }
       const handleReady = () => {
         if (isPoolUnmounted.value || slot.track?.id !== track.id) return
         cleanup()
@@ -176,6 +177,15 @@ export function usePreloadPool(options: PreloadPoolOptions) {
         resolve(false)
         scheduleAdjacentPreload()
       }
+      const cleanup = () => {
+        pendingPreloadTimeouts.delete(timeout)
+        window.clearTimeout(timeout)
+        slot.audio.removeEventListener('canplay', handleReady)
+        slot.audio.removeEventListener('loadeddata', handleReady)
+        slot.audio.removeEventListener('error', handleError)
+        slot.cleanup = null
+      }
+      slot.cleanup = cleanup
       slot.audio.addEventListener('canplay', handleReady, { once: true })
       slot.audio.addEventListener('loadeddata', handleReady, { once: true })
       slot.audio.addEventListener('error', handleError, { once: true })

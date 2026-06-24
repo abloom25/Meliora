@@ -1,4 +1,5 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { canShowIosInstallGuide } from '../utils/browser'
 
 interface BeforeInstallPromptEvent extends Event {
   prompt(): Promise<void>
@@ -17,6 +18,8 @@ function detectInstalled(): boolean {
 export function usePwaInstall() {
   const canInstall = ref(false)
   const isInstalled = ref(detectInstalled())
+  // iOS Safari 不支持 beforeinstallprompt,需要引导用户通过分享菜单"添加到主屏幕"
+  const iosInstallAvailable = ref(canShowIosInstallGuide())
   let deferredPrompt: BeforeInstallPromptEvent | null = null
   let mql: MediaQueryList | null = null
 
@@ -30,10 +33,14 @@ export function usePwaInstall() {
     deferredPrompt = null
     canInstall.value = false
     isInstalled.value = true
+    iosInstallAvailable.value = false
   }
 
   function handleDisplayModeChange() {
     isInstalled.value = detectInstalled()
+    if (isInstalled.value) {
+      iosInstallAvailable.value = false
+    }
   }
 
   async function install() {
@@ -63,5 +70,5 @@ export function usePwaInstall() {
     window.removeEventListener('appinstalled', handleInstalled)
   })
 
-  return { canInstall, isInstalled, install }
+  return { canInstall, isInstalled, install, iosInstallAvailable }
 }

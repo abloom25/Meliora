@@ -13,7 +13,7 @@
     <!-- GitHub Pages 无响应头能力，以 meta 形式提供 CSP 降级（与 vercel.json 一致） -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://api.music.abloom.site https://api.github.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+      content="default-src 'self'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https:; connect-src 'self' https:; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -23,8 +23,6 @@
     <meta name="color-scheme" content="dark" />
     <!-- 同源完整 Referer，跨源仅发送来源（保护隐私同时兼容 CDN/分析） -->
     <meta name="referrer" content="strict-origin-when-cross-origin" />
-    <!-- 提前与音乐 API 域建立连接，降低首次请求延迟 -->
-    <link rel="preconnect" href="https://api.music.abloom.site" crossorigin />
     <title>Meliora · Music Player</title>
   </head>
   <body>
