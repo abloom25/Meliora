@@ -28,9 +28,21 @@ export class GitHubReadError extends Error {
   }
 }
 
+// 对 GitHub Contents API 路径做分段编码:按 / 拆分后对每段 encodeURIComponent,
+// 既编码段内的 ?/#/&/空格 等特殊字符(避免扭曲 URL 或注入查询参数),
+// 又保留 / 作为路径分隔符。GH_REPO(owner/repo)同样按 owner 与 repo 两段编码,
+// 防止仓库标识中的特殊字符破坏 URL。
+function encodePath(path: string): string {
+  return path
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/')
+}
+
 function apiUrl(path: string, env: Env): string {
-  const branch = env.GH_BRANCH || 'main'
-  return `${GITHUB_API}/repos/${env.GH_REPO}/contents/${path}?ref=${branch}`
+  const branch = encodeURIComponent(env.GH_BRANCH || 'main')
+  const repo = encodePath(env.GH_REPO)
+  return `${GITHUB_API}/repos/${repo}/contents/${encodePath(path)}?ref=${branch}`
 }
 
 function headers(env: Env): Record<string, string> {

@@ -4,9 +4,15 @@
 # 首次本地运行时,/setup 页面会设置管理员密码(内存模式,重启后重置)
 # 无需在此预设密码和签名密钥
 
-# GitHub Personal Access Token(需要 repo 权限)
-# 留空或保持 ghp_xxx 开头 → 本地内存模式(配置/密码不持久化,仅用于测试)
+# 开发模式(可选):设为 true/1/yes/on(大小写、首尾空格不敏感)时进入开发模式,
+# 配置与密码不持久化(仅存内存,重启即重置),加密与签名走明文降级。
+DEVELOPMENT=true
+
+# GitHub Personal Access Token
+# 开发模式下 GH_TOKEN 不会用于读写仓库;关闭 DEVELOPMENT 后,
 # 填入真实 token → 连接 GitHub 仓库读写配置(与生产行为一致)
+# Fine-grained token 需要 Contents Read and write + Actions Write; classic token 可使用 repo 权限
+# 关闭 DEVELOPMENT 后还会用于触发更新 workflow 和查询 Actions 状态
 GH_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 # 仓库标识(owner/repo 格式)
@@ -15,12 +21,15 @@ GH_REPO=abloom25/Meliora
 # 目标分支(默认 main)
 GH_BRANCH=main
 
-# 配置加密密钥(必填):用于配置加密与 Cookie 签名派生,与 GH_TOKEN 解耦。
+# 配置加密密钥(生产必填):用于配置加密与 Cookie 签名派生,与 GH_TOKEN 解耦。
 # 必须为 32 位以上随机字符串,GH_TOKEN 可独立轮换而不影响已加密的配置。
 # 生成示例:node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+# 注意:开发模式(DEVELOPMENT=true)下会跳过此项校验并使用明文内存配置,留空即可。
 CONFIG_ENCRYPTION_KEY=
 
-# 可选: GitHub 代理,用于检查更新和同步上游代码
+# 可选: GitHub 代理,用于检查更新和 workflow 内同步上游代码
+# 触发 workflow dispatch 和查询 Actions 状态仍要求部署环境可访问 api.github.com
+# 必须是公网 http(s) URL,不能指向 localhost、内网或云元数据地址
 GITHUB_PROXY=
 
 # 可选: 禁用管理后台(设为 true/1/yes/on,大小写不敏感)

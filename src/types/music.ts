@@ -30,12 +30,10 @@ export interface GoogleAnalyticsConfig {
   measurementId?: string
 }
 
-export interface MusicConfig {
+export interface PublicMusicConfig {
   siteName: string
   siteIcon?: string
   apiEndpoint: string
-  apiToken?: string
-  githubProxy?: string
   umami?: UmamiConfig
   googleAnalytics?: GoogleAnalyticsConfig
   googleSiteVerification?: string
@@ -43,6 +41,12 @@ export interface MusicConfig {
   customJs?: string
   playlists: MetingPlaylistConfig[]
   localTracks: LocalTrackConfig[]
+}
+
+export interface MusicConfig extends PublicMusicConfig {
+  apiToken?: string
+  githubProxy?: string
+  receivePrereleaseUpdates?: boolean
 }
 
 export interface Track {

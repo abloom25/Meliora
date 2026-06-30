@@ -7,19 +7,183 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-rc2] - 2026-06-30
+
+### Added
+
+- **播放器均衡器组件**:新增 `EqualizerPanel`,承载均衡器开关、预设选择、自定义频段增益调节,预设切换时触发触感反馈
+- **定时关闭组件**:新增 `SleepTimerControl`,将定时关闭滑块、刻度、剩余时间展示从主 `App.vue` 中拆出
+- **触感反馈 composable**:新增 `useHaptic`,统一封装 `light`、`medium`、`heavy`、`selection`、`success`、`warning`、`error` 等振动模式,并在非手机设备或 `prefers-reduced-motion` 下自动禁用
+- **播放队列预测 API**:播放器 store 新增 `peekNext()` / `peekPrevious()`,可在不改变当前曲目、进度和队列版本的情况下预测上一首/下一首
+- **跨域音频降级播放**:`useAudioPlayer` 新增 Web Audio CORS 失败降级路径,分析链路无法接入时会重建无 `crossOrigin` 的 audio 元素,保留播放能力并降级节拍分析
+- **主封面 CORS 回退**:主封面以 `crossorigin="anonymous"` 首次加载失败时会移除 `crossorigin` 重建图片,优先保证封面显示,取色失败则回退默认主题
+- **共享配置 schema**:新增 `shared/config-schema.ts`,服务端保存配置和构建期公开配置生成共用同一套字段清洗与校验;覆盖 `receivePrereleaseUpdates`、`githubProxy`、统计、站点验证、自定义 CSS/JS 等字段
+- **共享环境 schema**:新增 `shared/env-schema.ts`,统一 `DEVELOPMENT` 真值解析、`GH_REPO` 格式校验与 `CONFIG_ENCRYPTION_KEY` 强度校验
+- **共享版本工具**:新增 `shared/version.ts`,支持严格 SemVer 解析、比较、预发布判断、`v` 前缀 / `refs/tags/` 规范化和最新版本选择
+- **构建期公开配置生成**:新增 `scripts/generate-public-config.mjs` 与 `scripts/generate-public-config.d.mts`,从缺失、明文或加密的 `public/config.json` 生成 `src/generated/public-config.ts` 与 `src/generated/admin-env.ts`
+- **管理后台构建状态**:公开配置生成时同步输出 `idle`、`disabled`、`env-not-ready` 状态,前端可展示管理后台禁用或环境变量未就绪原因
+- **Pages 本地开发准备脚本**:新增 `scripts/prepare-pages-dev.mjs`,为 Wrangler Pages Functions 本地开发创建 `.wrangler/pages-dev-static`,让 Vite 提供页面、Wrangler 只模拟 `/api/*`
+- **Cloudflare Pages 静态规则**:新增 `public/_headers` 与 `public/_redirects`,统一安全响应头、Service Worker 缓存、manifest 类型、静态资源 immutable 缓存与 SPA fallback
+- **一键更新状态跟踪**:后台触发更新后返回 `triggeredAt` 与 `triggerId`,关于页持续轮询 GitHub Actions 状态并展示日志链接、失败详情和成功提交链接
+- **更新状态接口**:新增 `GET /api/update/status?since=...&triggerId=...`,归一化返回 `locating`、`queued`、`running`、`success`、`failed`、`cancelled`、`timed_out`,并带 `retryAfterSeconds`、Actions URL、commit URL 与失败消息
+- **预发布版本开关**:高级设置新增“接收预发布版本”,稳定版默认只接收稳定更新;开启后可接收 rc / beta / alpha,当前版本本身为 prerelease 时继续自动接收 prerelease
+- **主分支验证 workflow**:新增 `.github/workflows/main-validation.yml`,在 `main` push 与手动触发时执行安装、测试、类型检查、Lint、格式检查、构建、自动 tag;稳定版自动创建 GitHub Release,预发布版仅打 tag
+- **管理后台上传常量**:管理 API 新增 `MAX_UPLOAD_BYTES`、`MAX_UPLOAD_BASE64_LENGTH`、`MAX_UPLOAD_SIZE_LABEL`,统一前端上传限制
+- **本地曲目编辑提示**:本地曲目编辑器新增未补全提示,缺少 ID、标题、艺术家或音频时提示保存会被拦截
+- **本地曲目删除失败展示**:删除确认框新增逐项失败展示,便于看到具体失败文件
+
+### Changed
+
+- **版本升级**:`package.json` 版本从 `0.2.0-rc1` 升级到 `0.2.0-rc2`
+- **运行环境收紧**:`package.json` engines 从 Node `>=20` / pnpm `>=8` 调整为 Node `>=22` / pnpm `>=11.5.3`,并固定 `packageManager` 为 `pnpm@11.5.3`
+- **生成流程拆分**:`generate` 拆为 `generate:app-version` 与 `generate:public-config`;`predev` 使用开发变量生成公开配置,`prebuild`、`pretest`、`pretype-check`、`prelint` 统一先生成构建产物
+- **前端配置加载改为构建期公开配置**:播放器从异步 `/api/runtime-config` 改为同步读取 `loadMusicConfig()`,并按公开 `apiEndpoint` 注入 `preconnect`
+- **类型拆分公开配置和完整配置**:新增 `PublicMusicConfig`,前端公开配置不再包含 `apiToken`、`githubProxy`、`receivePrereleaseUpdates` 等管理员/服务端字段
+- **Meting 请求去 token 化**:前端歌单请求不再向 Meting API URL 拼接 `token`,只发送 `server`、`type`、`id`
+- **播放器主文件瘦身**:`App.vue` 移除内联均衡器、定时关闭、触感反馈逻辑,改为组合 `EqualizerPanel`、`SleepTimerControl`、`useHaptic`
+- **空曲库体验调整**:无曲目时提示改为“暂无可播放歌曲,请在管理后台添加音乐”,且不再把空曲库视为加载失败
+- **切歌状态机重构**:`useAudioPlayer` 改为明确的 `idle/switching` 状态机,使用 `AbortController` 取消过期切歌请求
+- **音量淡入淡出重构**:fade 动画从全局计数改为按 audio 元素独立管理,避免新旧音频淡入淡出互相取消
+- **预加载目标预测统一**:预加载池复用 store 的 `peekNext()` / `peekPrevious()`,保证顺序、循环、单曲、随机模式下预加载目标与实际切歌一致
+- **预加载失败文案调整**:后台预加载失败提示改为“预加载歌曲暂时无法播放,当前播放不受影响”,避免误报“已跳过”
+- **虚拟曲库列表布局调整**:`TrackList` 使用完整高度 spacer 包裹绝对定位条目,空列表时不渲染大高度 spacer
+- **封面缓存上限**:`useCoverCache` 对 loaded / failed 封面缓存增加 512 条上限,按最近使用淘汰旧 trackId
+- **Reduced motion 行为调整**:`useBeatAnalyser` 在 reduced motion 下仍构建 Web Audio / EQ 图,但跳过视觉 RAF 循环和可见性监听
+- **Media Session 清理**:无当前曲目时清空 metadata 并设置 playbackState 为 `none`
+- **开发模式显式化**:服务端从“根据 `GH_TOKEN` 是否为空/占位符推断本地模式”改为显式 `DEVELOPMENT=true/1/yes/on`;Vercel、Cloudflare Pages、Netlify API 入口均透传 `DEVELOPMENT`
+- **环境就绪校验调整**:生产环境重点校验 `GH_REPO` 格式与 `CONFIG_ENCRYPTION_KEY` 强度;`GH_TOKEN` 不再作为公开状态页硬性校验项,需要写 GitHub 的接口仍会单独检查 token
+- **配置读取 fail-closed**:`getConfig` 在 GitHub 读取失败时返回 `502`;生产明文配置返回 `409`;解密失败返回 `409` 并提示检查 `CONFIG_ENCRYPTION_KEY`;保存时写入 shared schema 清洗后的配置
+- **状态页改为 JSON 状态**:`renderEnvNotReadyPage` 与 `renderDisabledPage` 不再返回完整 HTML,状态探针返回 `{ status, detail }`,由前端渲染管理后台禁用/环境未就绪状态
+- **更新检查改为 POST JSON**:`/api/check-update` 从 GET query 改为带认证、同源校验、JSON Content-Type 的 POST body,携带 `current`、`githubProxy`、`receivePrereleaseUpdates`
+- **更新检查逻辑增强**:同时读取 latest release 和 tags;release 不可用时 fallback 到 tag;Tags fallback 使用 `per_page=100`;版本选择改用严格 SemVer 排序
+- **预发布策略明确**:稳定版默认忽略 prerelease;当前版本为 prerelease 或显式开启“接收预发布版本”时才接收 prerelease
+- **GitHub 请求错误映射**:更新检查统一 8 秒超时,并将 401/403/429/5xx/超时映射为可操作错误
+- **GitHub 代理语义收敛**:检查更新可走代理且不附带 `GH_TOKEN`;workflow dispatch 与 Actions 状态查询始终直连 GitHub API,代理仅作为 workflow input 传给上游拉取步骤
+- **更新目标精确锁定**:检查更新返回 `targetTag`,触发 workflow 时传入 `target_tag`、`allow_prerelease`、`trigger_id`,workflow 优先同步后台选定 tag
+- **更新轮询限流调整**:`/api/update/status` 调整为 240 次 / 15 分钟,覆盖最长 10 分钟 running 轮询窗口
+- **上传路径白名单收紧**:`/api/upload` 从允许整个 `public/` 改为只允许 `public/music/` 下白名单媒体/歌词/图片扩展名,以及 `public/icon.png|jpg|jpeg|webp|ico`
+- **上传大小统一**:本地曲目和站点图标上传限制统一为 25MiB,base64 长度限制精确匹配 25MiB 文件边界
+- **删除文件返回结构化**:删除 API 从简单布尔返回改为 `DeleteFilesResult`,前端校验返回数量并展示逐项失败;远端文件不存在时视为已删除成功
+- **GitHub Contents API 编码增强**:仓库、分支和文件路径按段编码,避免 `?/#/&/空格` 等字符扭曲 URL 或注入查询参数
+- **认证与密码安全增强**:管理员密码 PBKDF2 迭代次数从 100k 提升到 600k;`tokenVersion` 缓存 TTL 从 30 秒缩短到 5 秒;开发模式 Cookie 签名密钥包含 `GH_REPO`;限流键移除可伪造的 User-Agent
+- **API 写请求同源校验**:所有 `/api/` 下 POST/PUT/DELETE 检查 `Origin` 或 `Referer`;跨站返回 `403`;开发模式允许 localhost Vite/Wrangler 代理写请求
+- **本地后端开发命令调整**:`dev:admin` 先执行 `prepare-pages-dev.mjs`,再运行 `.wrangler/pages-dev-static`,不再依赖旧 `dist`
+- **格式化命令兼容性**:`format` 与 `format:check` 增加 `--ignore-unknown`
+- **Vite base 固定**:`vite.config.ts` 的 `base` 从 `process.env.BASE_PATH || '/'` 改为固定 `/`
+- **部署平台收敛**:移除 GitHub Pages 部署假设,平台口径收敛为 Vercel、Netlify、Cloudflare Pages
+- **Cloudflare Pages 配置瘦身**:`wrangler.toml` 只保留核心 Pages 配置,headers/redirects 迁移到 `public/_headers` / `public/_redirects`
+- **Netlify 构建环境固定**:`PNPM_VERSION` 从 `11` 固定为 `11.5.3`,并移除重复 inline build environment
+- **TypeScript 覆盖范围扩展**:`tsconfig.app.json` 与 `tsconfig.server.json` 纳入 `shared/**/*.ts`;服务端 tsconfig 增加 Node types
+- **版本脚本 fail-fast**:`generate-app-version.mjs` 与 `inject-sw-cache-name.mjs` 校验 `package.json` version 必须是合法 SemVer,不再静默回退 `0.0.0`,并用 `JSON.stringify` 输出版本字符串
+- **Service Worker cache 注入 fail-fast**:`inject-sw-cache-name.mjs` 在 `dist/sw.js` 缺少 `__SW_CACHE_NAME__` 占位符时直接失败
+- **用户数据保留规则调整**:上游同步继续保留 `.dev.vars`、`.env`、`.env.local`、`.env.production`、`public/admin.json`、`public/config.json`、`public/music/`、构建产物和本地目录;模板文件可随上游更新
+- **站点图标上传流程调整**:上传成功等待 FileReader 和网络请求均完成后再提示,默认使用 `png` 后缀,上传类型移除 SVG
+- **管理员密码前端限制增强**:修改密码最小长度从 6 位提升到 8 位
+
+### Fixed
+
+- **快速切歌竞态**:修复旧切歌请求继续提交状态、旧音频叠放播放、切歌异常后长期卡在过渡状态的问题
+- **旧音频静音失败**:修复手动切歌时旧音频淡出被新音频淡入取消,导致旧音频未及时静音的问题
+- **曲库刷新同步**:修复当前曲目从刷新结果中被删除后仍保留旧曲目、进度、时长或播放状态的问题;队列现在会同步删除不存在歌曲并追加新增歌曲
+- **pending seek 回弹**:修复无 metadata 时 seek 导致进度条回弹的问题,现在先记录 pending seek 并更新 UI,待 duration 可用后再写入 audio
+- **播放失败反馈**:修复 `skipOnError` 关闭或队列只有一首时错误消息被清空的问题
+- **卸载后自动跳过**:修复自动跳过计时器在组件卸载后仍可能触发的问题
+- **跨域音频播放**:修复跨域音频无法接入 Web Audio API 时播放被节拍分析拖垮的问题,现在降级分析但继续播放
+- **跨域封面显示**:修复跨域封面缺少 CORS 响应头时直接失败、不显示封面的问题
+- **歌词缓存 abort**:修复歌词缓存命中时调用方 abort signal 无法独立生效、已 abort signal 没有立即 reject 的问题
+- **持久化设置清洗**:修复 `NaN`、`Infinity`、越界数值、非法播放模式、非法均衡器预设等脏数据泄漏到运行时的问题
+- **虚拟列表高度**:修复曲库虚拟列表滚动高度不完整、空状态前出现异常大 spacer 的问题
+- **Media Session 兼容**:修复 Safari/旧浏览器 Media Session 赋值或 handler 注册失败时可能影响播放流程的问题
+- **管理后台状态识别**:修复管理后台禁用或环境未就绪时可能被误判为“后端不可用”的问题
+- **状态页 HTML 写入**:修复 `/api/setup-status` 返回 HTML 时前端直接 `document.write()` 替换页面的问题,改为标记 API 不可用
+- **登录过期处理**:修复配置加载、保存、上传、删除、改密、音乐 API 测试、更新检查/触发/状态查询遇到 401/403 后本地仍保持已登录状态的问题
+- **配置提交前校验**:修复无效本地曲目配置可能被提交到后端的问题
+- **本地文件部分删除**:修复本地曲目文件部分删除失败时仍从配置中移除曲目的问题
+- **删除结果校验**:修复删除文件接口未校验后端返回结果数量或逐项失败状态的问题
+- **站点图标上传竞态**:修复文件读取/上传尚未完成时就进入成功状态的问题
+- **更新检查回写竞态**:修复重复检查和组件卸载后异步状态回写的风险
+- **更新触发反馈**:修复触发更新后只能显示短暂提示、无法跟踪 GitHub Actions 执行结果的问题
+- **后端错误 detail 展示**:修复更新检查或触发失败时未优先展示后端 `detail` 的问题
+- **超大上传拦截**:修复超大 base64 上传内容仍可能被发送到后端的问题
+- **密钥耦合**:修复 `GH_TOKEN` 轮换会影响配置解密/签名的问题,配置加密和 Cookie 签名均改用 `CONFIG_ENCRYPTION_KEY` 派生
+- **配置读取静默回落**:修复生产配置读取失败、明文配置或解密失败时静默回落默认配置的问题,避免隐藏密钥错误或配置损坏
+- **初始化重开风险**:修复 `admin.json` 明文或解密失败可能被误判为未初始化并重新开放 setup 的风险
+- **代理 SSRF**:修复 `githubProxy` 可指向内网/本地地址的风险,同时避免通过代理检查更新时泄露 `GH_TOKEN`
+- **跨站写请求**:修复旧版 CORS/OPTIONS 行为与 Cookie 凭据组合可能形成跨站管理 API 风险的问题
+- **更新接口非 JSON 触发**:修复 `/api/update`、`/api/check-update` 可接受非 JSON 请求并触发外部调用的问题
+- **上传覆盖敏感文件**:修复上传接口可覆盖 `public/sw.js`、manifest、robots、`public/config.json`、`public/admin.json` 或上传可执行前端资源的风险
+- **上传路径绕过**:修复路径穿越、URL-like path、编码穿越、畸形 percent encoding 等路径校验绕过
+- **GitHub 路径编码**:修复 GitHub 文件路径未编码导致特殊字符影响 Contents API URL 的问题
+- **更新版本比较**:修复预发布、tag fallback、非法 tag、字符串排序导致的更新误判
+- **删除远端 404**:修复删除远端已不存在的允许路径时被标记为删除失败的问题
+- **PWA API 缓存**:修复 Service Worker 缓存优先策略可能让 `/api/auth` 返回旧登录状态的问题,现在 `/api/*` 直接放行网络
+- **PWA 缓存清理范围**:修复 activate 阶段清理过宽的问题,现在只清理 `meliora-shell-` 前缀且非当前版本的缓存
+- **更新 workflow 直写目标分支**:修复上游同步后直接 push 目标分支的风险,现在先推临时分支、完成验证、合并目标分支最新状态并再次验证后才写回
+- **Cloudflare Pages 规则兼容**:修复 headers/redirects 放在 `wrangler.toml` 的兼容性问题,迁移到 `_headers` / `_redirects`
+
+### Removed
+
+- **移除前台更新检查服务**:删除未接线的 `src/services/updates.ts` 与 `src/tests/updates-cache.test.ts`,更新入口统一收敛到后台关于页
+- **移除 `/api/runtime-config`**:公开运行配置改由构建期 public config 提供;就绪、禁用、环境未就绪状态下均返回 404
+- **移除服务端内置 HTML 状态页模板**:状态页接口只返回 JSON 状态
+- **移除旧配置校验导出**:删除 `server/core/config-handler.ts` 内部 `validateConfig`,配置校验迁移到 `shared/config-schema.ts`
+- **移除 `GH_TOKEN` 占位符本地模式推断**:开发模式必须显式配置 `DEVELOPMENT`
+- **移除前端运行时配置拉取路径**:播放器不再请求 `/api/runtime-config`
+- **移除前端 Meting token 拼接**:前端不再把 `apiToken` 拼进歌单请求 URL
+- **移除 `App.vue` 内联均衡器 / 定时关闭 / 触感反馈逻辑**:对应逻辑改由新组件和 composable 接管
+- **移除抽屉 opener `defineExpose` 引用**
+- **移除 GitHub Pages 部署 workflow**:删除 `.github/workflows/deploy-pages.yml`,部署平台收敛为 Vercel、Netlify、Cloudflare Pages
+- **移除 GitHub Pages 文档口径和相对 base 假设**:README / SUPPORT 不再宣称支持 GitHub Pages 自动部署,`vite.config.ts` 不再读取 `BASE_PATH`
+- **移除内置 DEVOTION 示例资源**:删除 `public/music/DEVOTION/audio.flac`、`cover.jpg`、`lyrics.lrc`
+- **移除 SVG 站点图标上传支持**:保留 PNG、JPEG、WebP、ICO
+
+### Tests
+
+- **播放器测试**:新增 `use-audio-player.test.ts`,覆盖公开 API、选曲播放、快速连续下一首、暂停、pending seek、播放失败自动跳过、卸载清理计时器、当前曲目被移除后的状态清空
+- **播放器 store 测试**:扩展 `player-store.test.ts`,覆盖曲库刷新同步队列、删除当前曲目、`peekNext()` / `peekPrevious()` 在循环/顺序/单曲/随机模式下的行为、纯预测不变更状态、非法持久化设置 sanitize
+- **预加载测试**:新增 `use-preload-pool.test.ts`,验证预加载预测与 store 预测一致,并覆盖预加载失败提示不误报跳过
+- **曲库列表测试**:新增 `track-list.test.ts`,覆盖虚拟列表完整滚动高度和空状态不渲染 spacer
+- **封面缓存测试**:新增 `use-cover-cache.test.ts`,覆盖 loaded / failed 缓存 512 条上限与旧项淘汰
+- **节拍分析测试**:新增 `use-beat-analyser.test.ts`,覆盖 reduced motion 下仍建立 EQ 图但不启动视觉 RAF
+- **歌词请求测试**:扩展 `lyrics-timeout.test.ts`,覆盖缓存命中时单个调用 abort、不取消共享请求,以及已 abort signal 立即拒绝
+- **音乐服务测试**:扩展 `music-service.test.ts`,覆盖公开配置加载不请求 runtime config,以及歌单请求 URL 不包含 token
+- **管理 API 测试**:新增 `src/tests/admin-api.test.ts`,覆盖 401/403 登录过期、25MiB 上传边界、部分删除失败、保存前配置校验、POST 更新检查、触发更新返回 `triggeredAt` / `triggerId`、更新状态查询
+- **管理组件测试**:新增 `src/tests/admin-components.test.ts`,覆盖 8 位密码限制、部分删除失败时保留本地曲目、站点图标上传异步状态、移除 SVG 上传类型、预发布更新开关与代理提示文案
+- **管理认证测试**:新增 `src/tests/use-admin-auth.test.ts`,覆盖 `disabled`、`env-not-ready`、普通初始化状态、非 JSON setup 响应、HTML setup 响应不写入文档
+- **配置 schema 测试**:新增 `src/tests/config-schema.test.ts`,覆盖内部地址拦截、远程歌单 endpoint 要求、播放列表/本地曲目字段、可选统计配置、`receivePrereleaseUpdates` 布尔校验
+- **路由安全测试**:扩展 `server/tests/router-security.test.ts`,覆盖未认证更新检查/状态查询、跨 Origin/Referer 写请求拒绝、同源写请求、开发 localhost 代理写请求、`/api/runtime-config` 404、非 JSON 更新请求 415、状态接口 no-store
+- **更新流程测试**:扩展 `server/tests/update-handler.test.ts`,覆盖 stable / prerelease 比较、tag fallback、SemVer 排序、预发布 opt-in、私有 GitHub proxy 拒绝、缺 token 拒绝 dispatch、dispatch body、workflow run 状态归一化与 trigger id 过滤
+- **上传安全测试**:扩展 `server/tests/upload-handler.test.ts`,覆盖允许的音乐资源和 raster icon,拒绝 service worker、manifest、robots、config/admin、可执行前端扩展、SVG、URL-like path、路径穿越、畸形编码、`.env`、workflow 文件,并覆盖删除 404 视为成功
+- **配置/环境测试**:新增 `server/tests/config-handler.test.ts`、`development-mode.test.ts`、`url-validation.test.ts`,覆盖 fail-closed 配置读取、显式 `DEVELOPMENT`、环境校验和公网 URL 校验
+- **公开配置生成测试**:新增 `server/tests/generate-public-config.test.ts`,覆盖缺失/明文/加密配置生成、解密失败、schema 失败、私密字段清洗、admin build status、`.dev.vars` 显式读取和 env 优先级
+- **Bundle 泄漏测试**:新增 `server/tests/bundle-leakage.test.ts`,防止构建产物泄露 `apiToken`、`githubProxy` 等管理员字段和测试 secret
+- **CI 验证链路**:PR、main、update workflow 均增加 `pnpm format:check`;update workflow 同步上游后运行安装、测试、类型检查、Lint、格式检查、构建,合并目标分支最新提交后再次运行测试、类型检查、构建
+
+### Docs
+
+- **README 本地开发说明更新**:端口从 5173 改为 5175,运行要求更新为 Node 22+ 与 pnpm 11.5.3+,并说明 `pnpm dev:full` 的 Vite + Wrangler Pages Functions 分工
+- **README 管理后台说明更新**:高级设置补充预发布更新;保存配置说明改为构建期写入前端公开配置,首屏不再请求管理 API
+- **README 一键更新说明重写**:补充临时分支、验证链路、失败不改目标分支、Actions 日志入口、branch protection 限制和保留用户数据规则
+- **README 部署平台说明更新**:部署按钮表移除 GitHub Pages;Cloudflare Pages 改为说明 `wrangler.toml` 的 `pages_build_output_dir` 与 `_headers` / `_redirects`
+- **README 环境变量表更新**:补充 `GITHUB_PROXY`、`DEVELOPMENT`,更新 `GH_TOKEN` 权限、`CONFIG_ENCRYPTION_KEY` 构建期用途,并移除 `/api/runtime-config` 例外描述
+- **README 加密说明更新**:明确构建期会解密并清洗公开配置,`apiToken` 不进入前端 bundle,本地开发改用 `DEVELOPMENT=true`
+- **`.env.example` / `.dev.vars.example` 更新**:明确 fine-grained PAT 需要 `Contents: Read and write` + `Actions: Write`,classic token 可用 `repo`;补充 GitHub 代理职责和 `api.github.com` 直连要求
+- **SUPPORT 部署 FAQ 更新**:从“如何部署到 GitHub Pages”改为“支持哪些部署平台”,列出 Vercel、Netlify、Cloudflare Pages
+- **agent.md 规范更新**:部署平台从 4 个收敛到 3 个,补充公开站点配置必须构建期生成、敏感字段不得进入前端 bundle、远程歌单不得预抓取 Meting 结果,并同步开发模式与环境变量口径
+
 ## [0.2.0-rc1] - 2026-06-24
 
 ### Added
 
 - **管理后台**:新增完整的 Web 管理后台(前端 SPA + 后端 serverless API),访问 `/admin` 进入。支持首次初始化、密码登录、配置可视化编辑、文件上传、版本更新检查与触发,无需手动编辑仓库文件即可管理站点
 - **`/setup` 初始化页面**:首次部署后访问 `/admin` 自动进入设置密码流程,密码经 PBKDF2-SHA256(100k 迭代 + 16 字节随机盐)哈希后存储到 `public/admin.json`,设置后 `/setup` 自动关闭(先到先得模型,利用 GitHub API 409/422 防并发初始化竞态)
-- **配置文件全文加密**:`public/config.json` 与 `public/admin.json` 写入 GitHub 仓库时使用 AES-GCM 256 加密,密钥由 `CONFIG_ENCRYPTION_KEY` 经 PBKDF2(100k 迭代)派生,仓库中只存储 `v1:base64(salt+iv+ciphertext)` 密文;本地开发模式(`GH_TOKEN` 为空或 `placeholder` / `ghp_xxx` 开头)不加密
+- **配置文件全文加密**:`public/config.json` 与 `public/admin.json` 写入 GitHub 仓库时使用 AES-GCM 256 加密,密钥由 `CONFIG_ENCRYPTION_KEY` 经 PBKDF2(100k 迭代)派生,仓库中只存储 `v1:base64(salt+iv+ciphertext)` 密文;开发模式(`DEVELOPMENT=true`)不加密
 - **`CONFIG_ENCRYPTION_KEY` 环境变量**:新增独立配置加密密钥,配置加密与 Cookie 签名均从它派生,与 `GH_TOKEN` 完全解耦,`GH_TOKEN` 可独立轮换而不影响已加密配置与已签发 Cookie;生产模式校验密钥强度(至少 32 位、拒绝全相同字符 / 纯顺序字符等弱模式)
-- **`ADMIN_DISABLED` 环境变量**:设为 `true` 或 `1` 时禁用管理后台,`/admin` 显示"已禁用"页,所有管理 API 返回 403(`/api/runtime-config` 与 `/api/setup-status` 除外,确保播放器正常加载配置)
+- **`ADMIN_DISABLED` 环境变量**:设为 `true` 或 `1` 时禁用管理后台,`/admin` 显示"已禁用"页,除状态探针外所有 `/api/*` 返回 403;播放器公开配置改为构建期硬编译,不再依赖管理 API
 - **Cookie 鉴权体系**(`server/core/auth.ts`):基于 HMAC-SHA256 签名的 7 天有效期 token(`payloadB64.sigB64`),HttpOnly + Secure + SameSite=Lax;签名密钥从 `CONFIG_ENCRYPTION_KEY` 派生;`tokenVersion` 机制——修改密码时自增并持久化,旧 Cookie 立即失效;`timingSafeEqual` 常量时间比较防时序侧信道
 - **速率限制**(`server/core/rate-limit.ts`):登录 / 初始化 / 更新端点独立限流(滑动窗口 + 超限封禁),按 `key + IP + UserAgent` 维度,登录成功后重置计数;客户端 IP 优先取 `CF-Connecting-IP`
 - **GitHub 持久化层**(`server/core/github.ts`):封装 Contents API 的文件读 / 写 / 删,8 秒超时,`sha` 乐观锁防并发覆盖,`GitHubWriteError` 携带 HTTP 状态码
-- **版本更新检查与一键触发**(`server/core/update-handler.ts` + `.github/workflows/update-from-upstream.yml`):后台关于页检查上游 Release,完整 SemVer 实现(支持预发布版本比较);一键触发 `update-from-upstream.yml` workflow 拉取上游 release 并 rsync 同步代码(保留用户数据:`config.json` / `admin.json` / `icon.*` / `music/` 等均 exclude);支持 GitHub 代理(`{url}` 占位符或前缀拼接)
+- **版本更新检查与一键触发**(`server/core/update-handler.ts` + `.github/workflows/update-from-upstream.yml`):后台关于页检查上游 Release,完整 SemVer 实现(支持预发布版本比较);一键触发 `update-from-upstream.yml` workflow 拉取上游 release 到临时分支,验证通过后自动合并回目标分支(保留用户数据:`config.json` / `admin.json` / `icon.*` / `music/` 等均 exclude);支持 GitHub 代理(`{url}` 占位符或前缀拼接)
 - **Meting API 连通性测试**(`server/core/music-api-tester.ts`):保存配置前并发测试所有启用歌单(并发 3),返回每个歌单的状态码 / 曲目数 / 错误信息与汇总结果,8 秒超时
 - **本地音乐文件上传**(`upload-handler.ts` + `LocalTrackEditor.vue`):支持音频 / 封面 / 歌词 LRC 文件上传到 `public/music/{trackId}/`,50MB 限制,删除曲目时联动删除已上传文件;路径白名单(仅允许 `public/` 前缀)+ `new URL()` 规范化防路径穿越
 - **站点图标上传**(`SiteSettingsEditor.vue`):支持 SVG / PNG / JPEG / WebP 图标上传到 `public/icon.{ext}`,本地开发模式用 DataURL 预览
@@ -34,24 +198,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Meting API 鉴权**:`services/music.ts` 的 `fetchPlaylist` 支持 `apiToken` 参数(查询字符串 `token`)
 - **`robots.txt`**:新增 `public/robots.txt`,`Disallow: /admin/` 和 `/api/`
 - **Cloudflare `_routes.json`**:限制只有 `/api/*` 走 Pages Functions,静态资源不产生 Functions 调用计费
-- **动态 preconnect**:`loadRuntimeConfig` 拿到 `apiEndpoint` 后动态创建 `<link rel="preconnect">`,移除 `index.html` 中写死的域名
+- **动态 preconnect**:播放器使用构建期公开配置中的 `apiEndpoint` 动态创建 `<link rel="preconnect">`,移除 `index.html` 中写死的域名
 - **多平台 API 路由**:Vercel(`api/[...path].ts`)、Cloudflare(`functions/api/[[path]].ts`)、Netlify(`netlify/functions/api.ts` + `netlify.toml` redirect)三平台统一入口
 - **服务端独立 tsconfig**:`tsconfig.server.json` 用于 `server/` 目录类型检查
 - **开发体验**:`package.json` 新增 `dev:admin`(wrangler pages dev :8788)与 `dev:full`(并行跑前端 + 后端);`vite.config.ts` 新增 `/api` 代理到 :8788,测试纳入 `server/tests/**/*.test.ts`
 - **服务端单元测试**:新增 `admin-auth`、`admin-config-validation`、`crypto`、`router-security`、`update-handler`、`upload-handler` 共 6 个测试文件
 - **`update-from-upstream.yml` workflow**:fork 仓库一键同步上游最新 release,支持 GitHub 代理,rsync 保留用户数据
-- **GitHub Pages SPA 404 fallback**:`deploy-pages.yml` 新增 `cp dist/index.html dist/404.html`,刷新子路由不再 404
-- **Release 自动化**:`deploy-pages.yml` 区分稳定版与预发布版(`-alpha` / `-beta` / `-rc` / `-pre` / `-preview`),仅稳定版自动创建 GitHub Release(`--generate-notes --latest`)
+- **主分支验证与发布自动化**:main 分支 workflow 负责测试、类型检查、lint、构建、打 tag;仅稳定版自动创建 GitHub Release(`--generate-notes --latest`)
 - **`agent.md` 规范增补**:§3.1 模板内联事件禁止多语句、§3.3.1 共享组件库约束表、§4.2 路由 / 浮层过渡规范、§4.4 accent 半透明色 `color-mix` 派生规范
 
 ### Changed
 
 - **环境变量模型**:生产环境需 `GH_TOKEN`、`GH_REPO`、`CONFIG_ENCRYPTION_KEY` 三项;`GH_BRANCH` 可选(默认 main)、`GITHUB_PROXY` 可选;密码通过 `/setup` 设置(不再使用 `ADMIN_PASSWORD`),Cookie 签名密钥从 `CONFIG_ENCRYPTION_KEY` 派生(不再使用 `ADMIN_SECRET`)
-- **`loadRuntimeConfig` 统一走后端 API**:不再区分 DEV / PROD,统一 `fetch('/api/runtime-config')`;后端不可用(GitHub Pages)时 fallback 到 `musicConfig`(打包时静态默认配置)
-- **`config-handler` 默认配置**:`config.json` 不存在时返回默认空配置(不再 404),首次部署开箱即用;解密失败时 fallback 到默认配置(向后兼容旧明文)
+- **公开配置构建期硬编译**:播放器首屏不再请求后端配置 API,构建时从 `public/config.json` 生成公开配置并写入前端 bundle;远程歌单仍按 `apiEndpoint` 与歌单 ID 运行时请求 Meting API
+- **`config-handler` 默认配置**:`config.json` 不存在时返回默认空配置(不再 404),首次部署开箱即用;读取失败、明文配置或解密失败时管理后台会明确报错,避免静默覆盖已有配置
 - **`src/config/music.ts` 清理为纯净默认配置**:空 apiEndpoint、空数组,不再含个人数据;删除 `public/config.json`(由后台初始化创建)
 - **`MusicConfig` 类型扩展**:新增 `siteIcon?`、`umami?`、`googleAnalytics?`、`googleSiteVerification?`、`customCss?`、`customJs?` 字段,与服务端 `ConfigPayload` 与 `validateConfig` 校验对齐
-- **`App.vue` 重构**:启动时 `loadRuntimeConfig` → `applySiteBrand`(动态设置 title + favicon)+ `applySiteIntegrations`(注入统计 / 自定义 CSS/JS);顶栏新增分享按钮;`runtimeConfig` 驱动站点名称显示
+- **`App.vue` 重构**:启动时读取构建期公开配置 → `applySiteBrand`(动态设置 title + favicon)+ `applySiteIntegrations`(注入统计 / 自定义 CSS/JS);顶栏新增分享按钮;公开配置驱动站点名称显示
 - **`main.ts` 重构**:挂载 `AppShell`(而非直接 `App`),注册 router 与全局 errorHandler
 - **CSP 四处统一收紧**:`index.html` / `vercel.json` / `netlify.toml` / `wrangler.toml` 统一为 `script-src 'self' 'unsafe-inline' https:`、`connect-src 'self' https:`,不再写死 `api.music.abloom.site`、`googletagmanager.com`、`cloud.umami.is` 等具体域名
 - **管理后台 accent 颜色派生**:`src/admin/` 下所有 `rgba(var(--accent-rgb), α)` 替换为 `color-mix(in srgb, var(--accent), transparent X%)`,确保用户自定义 `--accent` 时选中态 / 徽章跟随变化
@@ -75,7 +238,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **模板内联事件多语句编译错误**:`@click="a(); b()"` 会被 Prettier 拆分号导致 Vue 编译器报 `Unexpected token, expected ","`,改用方法引用或包装函数
 - **管理后台首次访问闪现 LoginView**:`checking` 初始值从 `false` 改为 `true`,首帧显示"正在验证"而非 LoginView
 - **浮层 fixed 定位被困在父容器内**:`ConfirmModal` / `Toast` 使用 `<Teleport to="body">` 避免被 `backdrop-filter` / `transform` 父容器建立包含块
-- **`ADMIN_DISABLED` 拦截 `/api/runtime-config`**:禁用管理后台时播放器无法加载配置,现已放行 `GET /api/runtime-config`
+- **`ADMIN_DISABLED` 拦截管理 API**:禁用管理后台时仅状态探针可访问,播放器公开配置已改为构建期硬编译,不再需要运行时配置接口
 
 ## [0.1.1] - 2026-06-22
 
@@ -95,13 +258,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 设置抽屉中"音量""定时关闭""歌词字号""背景模糊""背景饱和度""节奏亮度"等 label 文字补回 `<strong>` 包裹,与"平滑切歌""动态封面背景"等 toggle 项字号 / 字重 / 颜色完全统一(共用 `.setting-group strong` 的 `0.8rem / 560 / #fff`)
 - `useFocusTrap` 改造为 `nextTick` 异步流程并加入 `pendingActivation` 守卫:容器节点 / 可聚焦元素首次渲染晚于激活时,会在 `nextTick` / `watch(containerRef)` / `onMounted` 三个时机重试,杜绝"抽屉打开但焦点没进入"的边界场景
 - `usePwaInstall` 的 `install()` 改为 `try / finally` 结构,保证 `prompt()` 或 `userChoice` 抛错时也能清空 `deferredPrompt` 引用,避免 stale 状态阻塞下一次弹窗
-- `services/updates.ts` 引入 `composeTimeoutSignal` 组合器:GitHub Releases / Tags API 请求统一加 8 秒超时,与用户提供的 `AbortSignal` 双向联动(用户取消立即透传,超时只 abort 内部 controller),失败后写空缓存,杜绝"API 永远不返回"导致更新检查 hang 死的情况
+- 更新检查统一收敛到后台 `server/core/update-handler.ts`:GitHub Releases / Tags API 请求统一加 8 秒超时,严格 SemVer 排序并按后台配置决定是否接收预发布版本,避免前台和后台两套逻辑分叉
 - `pnpm-workspace.yaml` 新增 `overrides` 锁定传递依赖 `ini >=1.3.6` / `undici >=7.28.0`,堵住 pnpm 锁文件中的若干已知安全告警
 - `agent.md §3.1` 修正:格式约定从"**写**分号"改为"**不写**分号"(与项目 prettier 实际配置 `semi: false` 一致)
 
 ### Fixed
 
-- 修复 `services/updates.ts` 的 abort 判定逻辑:`isAbortError` 在 `signal` 已 abort 时仍会被 catch 误吞,现改为直接判定 `signal?.aborted`,杜绝外部取消信号被静默丢弃
+- 修复更新链路取消与失败反馈:后台关于页卸载时会取消检查/状态轮询,网络失败不再写入前台长时间负缓存,失败原因统一显示在后台状态卡片中
 - 修复 `usePwaInstall` 接受 / 拒绝两种 `userChoice.outcome` 路径下 `deferredPrompt` 引用残留导致的"二次安装"失效问题
 - 修复 `useFocusTrap.deactivateTrap` 中对 `triggerRef.value?.focus()` 的延迟读取:`setTimeout` 触发时 `triggerRef.value` 可能已经被新一轮 activate 覆盖,改为闭包捕获 `trigger` 局部变量
 
@@ -203,7 +366,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 无障碍:`prefers-reduced-motion` / `prefers-contrast: more` 完整支持、focus trap、ARIA
 - 设置持久化:`safeStorage` 包装 localStorage、版本化迁移、200ms 防抖深度 watch
 - 工程兜底:所有外部 IO 8s `AbortController` 超时、`Promise.allSettled` 并行、LRU 缓存、失败曲目自动跳过
-- 多平台部署配置:Vercel(`vercel.json`)、Cloudflare Pages(`wrangler.toml`)、Netlify(`netlify.toml`)、GitHub Pages(`.github/workflows/deploy-pages.yml`)
+- 多平台部署配置:Vercel(`vercel.json`)、Cloudflare Pages(`wrangler.toml`)、Netlify(`netlify.toml`)
 - 安全头统一:CSP、X-Content-Type-Options、X-Frame-Options、Referrer-Policy、Permissions-Policy
 - CI/CD:PR 验证 workflow + main 分支自动部署 + 自动打 tag
 - 代码质量保证体系:ESLint + Prettier + Husky + Commitlint + lint-staged
@@ -217,6 +380,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - 修复方向键 seek 行为错误:`←` / `→` 之前会被当作绝对时间(直接跳到第 0 秒 / 第 5 秒),现已正确实现"相对当前位置 ±5 秒"的语义
 
+[0.2.0-rc2]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc2
 [0.2.0-rc1]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc1
 [0.1.1-rc.3]: https://github.com/abloom25/Meliora/releases/tag/v0.1.1-rc.3
 [0.1.1-rc.2]: https://github.com/abloom25/Meliora/releases/tag/v0.1.1-rc.2

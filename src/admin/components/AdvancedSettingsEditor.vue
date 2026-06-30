@@ -3,6 +3,7 @@
   import type { MusicConfig } from '../../types/music'
   import BaseInput from '../../components/BaseInput.vue'
   import BaseTextarea from '../../components/BaseTextarea.vue'
+  import ToggleSwitch from '../../components/ToggleSwitch.vue'
 
   const props = defineProps<{ config: MusicConfig }>()
   const emit = defineEmits<{ 'update:config': [value: MusicConfig] }>()
@@ -24,6 +25,15 @@
     set: (value: string) => updateTextField('githubProxy', value),
   })
 
+  const receivePrereleaseUpdates = computed({
+    get: () => props.config.receivePrereleaseUpdates === true,
+    set: (value: boolean) =>
+      emit('update:config', {
+        ...props.config,
+        receivePrereleaseUpdates: value,
+      }),
+  })
+
   const customCss = computed({
     get: () => props.config.customCss || '',
     set: (value: string) => updateTextField('customCss', value),
@@ -43,15 +53,23 @@
       <div class="setting-row proxy-row">
         <span class="row-label">
           <strong>GitHub 代理</strong>
-          <small>用于检查更新和触发更新时访问 GitHub</small>
+          <small>用于检查更新,并在更新流程中拉取上游代码</small>
         </span>
         <div class="proxy-field">
           <BaseInput v-model="githubProxy" type="url" placeholder="https://gh-proxy.example.com/" />
           <p v-if="githubProxy" class="proxy-warning">
-            ⚠️ 仅使用你信任的代理。更新时仓库代码会通过该代理拉取,恶意代理可能注入代码并窃取
-            GH_TOKEN。建议留空直连 GitHub,或在网络受限时使用知名公共代理。
+            仅使用你信任的代理。代理会参与拉取上游仓库代码,恶意代理可能注入代码。触发更新流程仍需要部署环境可访问
+            api.github.com。
           </p>
         </div>
+      </div>
+
+      <div class="setting-row">
+        <span class="row-label">
+          <strong>接收预发布版本</strong>
+          <small>稳定版也检查 rc、beta、alpha 等预发布更新</small>
+        </span>
+        <ToggleSwitch v-model="receivePrereleaseUpdates" />
       </div>
     </div>
 

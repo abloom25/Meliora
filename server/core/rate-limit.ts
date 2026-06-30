@@ -24,10 +24,15 @@ const attempts = new Map<string, RateLimitEntry>()
 
 function clientKey(request: Request): string {
   const headers = request.headers
-  const forwardedFor = headers.get('CF-Connecting-IP') || headers.get('X-Forwarded-For') || ''
-  const ip = forwardedFor.split(',')[0]?.trim() || 'unknown'
-  const userAgent = headers.get('User-Agent') || 'unknown'
-  return `${ip}:${userAgent}`
+  // 优先使用平台设置的可信客户端 IP:CF-Connecting-IP(Cloudflare)、X-Real-IP(Netlify 等),
+  // 最后回退 X-Forwarded-For 首项。注意:不将 User-Agent 纳入限流键 —— UA 完全由客户端控制,
+  // 纳入会主动给攻击者提供一个免费绕过维度(换 UA 即换桶)。
+  const ip =
+    headers.get('CF-Connecting-IP') ||
+    headers.get('X-Real-IP') ||
+    headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
+    'unknown'
+  return ip
 }
 
 function pruneExpired(now: number): void {

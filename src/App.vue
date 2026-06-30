@@ -18,19 +18,12 @@
   } from '@lucide/vue'
   import { musicConfig } from './config/music'
   import { APP_VERSION } from './generated/app-version'
-  import { loadConfiguredTracks, loadRuntimeConfig } from './services/music'
+  import { loadConfiguredTracks, loadMusicConfig } from './services/music'
   import { usePlayerStore } from './stores/player'
   import { filterTracks } from './utils/tracks'
   import { splitDisplayTitle } from './utils/title'
   import { applySiteIntegrations } from './utils/site-integrations'
-  import { extractThemeColor, loadThemeColor, type ThemeColor } from './utils/theme'
-  import {
-    EQ_BAND_LABELS,
-    EQ_PRESET_LIST,
-    EQ_PRESETS,
-    clampGain,
-    detectPreset,
-  } from './utils/equalizer'
+  import { extractThemeColor, type ThemeColor } from './utils/theme'
   import { useAudioPlayer } from './composables/useAudioPlayer'
   import { useLyricsWindow } from './composables/useLyricsWindow'
   import { usePwaInstall } from './composables/usePwaInstall'
@@ -43,21 +36,16 @@
   import { useCoverCache } from './composables/useCoverCache'
   import { useFocusTrap } from './composables/useFocusTrap'
   import { useDrawerSheet } from './composables/useDrawerSheet'
+  import { useHaptic } from './composables/useHaptic'
   import LyricsPanel from './components/LyricsPanel.vue'
   import PlayerControls from './components/PlayerControls.vue'
   import TrackList from './components/TrackList.vue'
   import ToggleSwitch from './components/ToggleSwitch.vue'
   import SettingRange from './components/SettingRange.vue'
+  import EqualizerPanel from './components/EqualizerPanel.vue'
+  import SleepTimerControl from './components/SleepTimerControl.vue'
   import Toast from './components/Toast.vue'
-  import type {
-    EqPresetId,
-    LyricAvailability,
-    LyricsSnapshot,
-    MusicConfig,
-    Track,
-  } from './types/music'
-
-  type HapticStyle = 'selection' | 'light' | 'medium' | 'rigid' | 'success'
+  import type { LyricAvailability, LyricsSnapshot, PublicMusicConfig, Track } from './types/music'
 
   const PLAY_MODE_META = {
     sequence: { text: '顺序播放', icon: ArrowRight },
@@ -68,7 +56,9 @@
 
   const REPO_URL = 'https://github.com/abloom25/Meliora'
 
-  const runtimeConfig = ref<MusicConfig>(musicConfig)
+  const runtimeConfig = ref<PublicMusicConfig>(musicConfig)
+
+  const { triggerHaptic, withHaptic } = useHaptic()
 
   const store = usePlayerStore()
   const { currentTrack, currentTrackId, currentTime, duration, isPlaying, settings } =
@@ -82,6 +72,12 @@
     useAudioPlayer({
       getBeatTargets: () => [artworkBackgroundRef.value, backgroundOverlayRef.value],
     })
+
+  const toggleWithHaptic = withHaptic(toggle)
+  const previousWithHaptic = withHaptic(previous, 'selection')
+  const nextWithHaptic = withHaptic(next, 'selection')
+  const cyclePlayModeWithHaptic = withHaptic(store.cyclePlayMode, 'heavy')
+
   const {
     isOpen: lyricsWindowOpen,
     setSnapshot: setLyricsWindowSnapshot,
@@ -161,6 +157,10 @@
   const sourceWarning = ref('')
   const portableDevice = ref(false)
   const phoneDevice = ref(false)
+  // 封面 CORS 回退:crossorigin="anonymous" 首次加载失败(CDN 不返回 CORS 头)时,
+  // 移除 crossorigin 重新加载,保证封面显示(取色降级为默认色)。
+  // 用 Set 记录已回退的 trackId,通过 :key 变化触发 <img> 重建。
+  const coverCorsRetry = ref(new Set<string>())
 
   // Chrome auto-hide composable (requires listOpen and settingsOpen)
   const { chromeHidden, scheduleChromeHide, revealChrome, clearChromeTimer } = useChromeAutoHide({
@@ -174,8 +174,6 @@
   const settingsDrawerRef = ref<HTMLElement | null>(null)
   const libraryHandleRef = ref<HTMLElement | null>(null)
   const settingsHandleRef = ref<HTMLElement | null>(null)
-  const libraryOpenerRef = ref<HTMLElement | null>(null)
-  const settingsOpenerRef = ref<HTMLElement | null>(null)
 
   // Focus trap for drawers
   useFocusTrap(libraryDrawerRef, listOpen, closePanelsAnimated)
@@ -313,7 +311,7 @@
     return new URL(icon, base).href
   }
 
-  function applySiteBrand(config: MusicConfig) {
+  function applySiteBrand(config: PublicMusicConfig) {
     document.title = `${config.siteName} · Music Player`
     const iconHref = resolveSiteIcon(config.siteIcon)
     let link = document.querySelector<HTMLLinkElement>("link[rel='icon']")
@@ -331,7 +329,7 @@
     loadFailed.value = false
     clearNotice()
     try {
-      const config = await loadRuntimeConfig()
+      const config = loadMusicConfig()
       runtimeConfig.value = config
       applySiteBrand(config)
       applySiteIntegrations(config)
@@ -346,8 +344,7 @@
         showNotice(sourceWarning.value)
       }
       if (!result.tracks.length) {
-        loadFailed.value = true
-        showNotice('没有载入到可播放的歌曲')
+        showNotice('暂无可播放歌曲,请在管理后台添加音乐')
       }
     } catch {
       loadFailed.value = true
@@ -462,55 +459,6 @@
     resetDrawerPositions()
   }
 
-  function triggerHaptic(style: HapticStyle = 'light') {
-    if (!phoneDevice.value || !('vibrate' in navigator)) return
-    const pattern: Record<HapticStyle, number | number[]> = {
-      selection: 6,
-      light: 9,
-      medium: 16,
-      rigid: [8, 22, 10],
-      success: [7, 34, 13],
-    }
-    navigator.vibrate(pattern[style])
-  }
-
-  function toggleWithHaptic() {
-    triggerHaptic(isPlaying.value ? 'light' : 'medium')
-    void toggle()
-  }
-
-  function previousWithHaptic() {
-    triggerHaptic('selection')
-    void previous()
-  }
-
-  function nextWithHaptic() {
-    triggerHaptic('selection')
-    void next()
-  }
-
-  function cyclePlayModeWithHaptic() {
-    triggerHaptic('rigid')
-    store.cyclePlayMode()
-  }
-
-  function applyEqPreset(preset: EqPresetId) {
-    triggerHaptic('selection')
-    if (preset === 'custom') {
-      settings.value.equalizer.preset = 'custom'
-      return
-    }
-    settings.value.equalizer.preset = preset
-    settings.value.equalizer.bands = [...EQ_PRESETS[preset].bands]
-  }
-
-  function updateEqBand(index: number, value: number) {
-    const bands = [...settings.value.equalizer.bands]
-    bands[index] = clampGain(value)
-    settings.value.equalizer.bands = bands
-    settings.value.equalizer.preset = detectPreset(bands)
-  }
-
   function toggleLyrics() {
     if (lyricAvailability.value === 'unavailable') return
     triggerHaptic('selection')
@@ -585,9 +533,25 @@
       immediateTheme = null
     }
     if (currentTrack.value?.id !== trackId) return
-    const theme = immediateTheme ?? (await loadThemeColor(image.currentSrc || image.src))
-    if (!theme || currentTrack.value?.id !== trackId) return
-    applyTheme(theme)
+    if (!immediateTheme) {
+      resetTheme()
+      return
+    }
+    applyTheme(immediateTheme)
+  }
+
+  function handleMainCoverError(trackId: string) {
+    // crossorigin="anonymous" 模式下,CDN 不返回 Access-Control-Allow-Origin 会触发 onerror。
+    // 首次失败时回退:标记该 trackId 并通过 :key 变化重建 <img>(移除 crossorigin),
+    // 保证封面显示;此时取色因 canvas 污染降级为默认色。
+    // 已回退过仍失败说明资源本身不可用,走正常的 failedCovers 标记流程。
+    if (!coverCorsRetry.value.has(trackId)) {
+      const next = new Set(coverCorsRetry.value)
+      next.add(trackId)
+      coverCorsRetry.value = next
+      return
+    }
+    markCoverFailed(trackId)
   }
 
   onMounted(() => {
@@ -616,6 +580,8 @@
     // 切歌时立即重置主封面"已就绪"状态，让新封面重新走 fade-in transition；
     // 列表里的小封面缓存（loadedCovers）保留，避免抽屉滚动时小图重复闪现。
     resetMainCover()
+    // 清空 CORS 回退标记:新封面需要重新尝试 crossorigin 加载以支持取色。
+    coverCorsRetry.value = new Set()
     lyricAvailability.value = 'unavailable'
     if (!currentTrack.value?.lyricsUrl) mobileView.value = 'cover'
     if (!currentTrack.value?.cover) {
@@ -639,12 +605,6 @@
       else clearChromeTimer()
     },
   )
-
-  // Expose refs for focus trap (used by useFocusTrap)
-  defineExpose({
-    libraryOpenerRef,
-    settingsOpenerRef,
-  })
 </script>
 
 <template>
@@ -687,7 +647,6 @@
           <Share2 :size="19" />
         </button>
         <button
-          ref="settingsOpenerRef"
           class="nav-button"
           :class="{ active: settingsOpen }"
           :aria-label="settingsOpen ? '关闭设置' : '打开设置'"
@@ -740,13 +699,14 @@
           />
           <img
             v-if="currentTrack?.cover && !failedCovers.has(currentTrack.id)"
-            :key="currentTrack.id"
+            :key="`${currentTrack.id}-${coverCorsRetry.has(currentTrack.id)}`"
             :src="currentTrack.cover"
+            :crossorigin="coverCorsRetry.has(currentTrack.id) ? undefined : 'anonymous'"
             :alt="`${currentTrack.title} 封面`"
             decoding="async"
             loading="eager"
             @load="handleMainCoverLoaded(currentTrack.id, $event)"
-            @error="markCoverFailed(currentTrack.id)"
+            @error="handleMainCoverError(currentTrack.id)"
           />
         </div>
         <Transition name="meta-swap" mode="out-in">
@@ -840,7 +800,6 @@
           <component :is="playModeIcon" :size="19" />
         </button>
         <button
-          ref="libraryOpenerRef"
           :class="{ active: listOpen }"
           :aria-label="listOpen ? '关闭曲库' : '打开曲库'"
           title="曲库"
@@ -994,94 +953,29 @@
               >
               <ToggleSwitch v-model="settings.preloadNextTrack" />
             </div>
-            <div class="setting-group sleep-setting">
-              <label>
-                <span><strong>定时关闭</strong></span>
-                <strong>{{
-                  sleepTimerMinutes ? formatSleepTimerRemaining(sleepTimerRemaining) : '关闭'
-                }}</strong>
-              </label>
-              <input
-                class="setting-range sleep-range"
-                type="range"
-                min="0"
-                max="90"
-                step="1"
-                list="sleep-timer-marks"
-                :value="sleepTimerDisplayMinutes"
-                :style="{ '--setting-progress': `${sleepTimerProgress}%` }"
-                aria-label="定时关闭"
-                @input="handleSleepTimerInput"
-                @change="handleSleepTimerChange"
-              />
-              <datalist id="sleep-timer-marks">
-                <option v-for="minutes in sleepTimerOptions" :key="minutes" :value="minutes" />
-              </datalist>
-              <div class="sleep-ticks" aria-hidden="true">
-                <span
-                  v-for="minutes in sleepTimerOptions"
-                  :key="minutes"
-                  :class="{ active: sleepTimerMinutes === minutes }"
-                  :style="{ '--tick-position': `${(minutes / 90) * 100}%` }"
-                >
-                  {{ minutes || '关' }}
-                </span>
-              </div>
-            </div>
+            <SleepTimerControl
+              :minutes="sleepTimerMinutes"
+              :remaining="sleepTimerRemaining"
+              :display-minutes="sleepTimerDisplayMinutes"
+              :progress="sleepTimerProgress"
+              :options="sleepTimerOptions"
+              :format-remaining="formatSleepTimerRemaining"
+              @input="handleSleepTimerInput"
+              @change="handleSleepTimerChange"
+            />
             <div class="setting-row toggle-row">
               <span><strong>失败后自动跳过</strong><small>继续尝试下一首歌曲</small></span>
               <ToggleSwitch v-model="settings.skipOnError" />
             </div>
           </div>
-          <div class="settings-section">
-            <h3 class="settings-section-title">音效</h3>
-            <div class="setting-row toggle-row">
-              <span><strong>均衡器</strong><small>调整各频段增益</small></span>
-              <ToggleSwitch v-model="settings.equalizer.enabled" />
-            </div>
-            <div class="setting-group eq-preset-group">
-              <label
-                ><span><strong>预设</strong></span></label
-              >
-              <div class="eq-preset-list">
-                <button
-                  v-for="preset in EQ_PRESET_LIST"
-                  :key="preset.id"
-                  class="eq-preset-button"
-                  :class="{
-                    active: settings.equalizer.preset === preset.id,
-                    'is-custom': preset.id === 'custom',
-                  }"
-                  :disabled="!settings.equalizer.enabled"
-                  @click="applyEqPreset(preset.id)"
-                >
-                  {{ preset.name }}
-                </button>
-              </div>
-            </div>
-            <div class="setting-group eq-bands">
-              <label v-for="(label, index) in EQ_BAND_LABELS" :key="label" class="eq-band-row">
-                <span class="eq-band-label">{{ label }}</span>
-                <input
-                  class="setting-range eq-band-range"
-                  type="range"
-                  min="-12"
-                  max="12"
-                  step="1"
-                  :value="settings.equalizer.bands[index]"
-                  :disabled="!settings.equalizer.enabled"
-                  :style="{
-                    '--setting-progress': `${((settings.equalizer.bands[index] + 12) / 24) * 100}%`,
-                  }"
-                  @input="updateEqBand(index, Number(($event.target as HTMLInputElement).value))"
-                />
-                <strong class="eq-band-value">
-                  {{ settings.equalizer.bands[index] > 0 ? '+' : ''
-                  }}{{ settings.equalizer.bands[index] }}dB
-                </strong>
-              </label>
-            </div>
-          </div>
+          <EqualizerPanel
+            :enabled="settings.equalizer.enabled"
+            :preset="settings.equalizer.preset"
+            :bands="settings.equalizer.bands"
+            @update:enabled="settings.equalizer.enabled = $event"
+            @update:preset="settings.equalizer.preset = $event"
+            @update:bands="settings.equalizer.bands = $event"
+          />
           <div class="settings-section">
             <h3 class="settings-section-title">显示</h3>
             <div class="setting-row toggle-row">
@@ -2054,55 +1948,6 @@
     color: rgba(255, 255, 255, 0.22);
     cursor: default;
   }
-  .setting-range {
-    display: block;
-    width: 100%;
-    height: 28px;
-    margin-top: 12px;
-    padding: 0;
-    appearance: none;
-    border-radius: 99px;
-    background: transparent;
-    cursor: pointer;
-    touch-action: none;
-    -webkit-tap-highlight-color: transparent;
-  }
-  .setting-range::-webkit-slider-runnable-track {
-    height: 7px;
-    border-radius: 99px;
-    background: linear-gradient(
-      to right,
-      rgba(255, 255, 255, 0.88) 0 var(--setting-progress),
-      rgba(255, 255, 255, 0.18) var(--setting-progress) 100%
-    );
-  }
-  .setting-range::-moz-range-track {
-    height: 7px;
-    border-radius: 99px;
-    background: linear-gradient(
-      to right,
-      rgba(255, 255, 255, 0.88) 0 var(--setting-progress),
-      rgba(255, 255, 255, 0.18) var(--setting-progress) 100%
-    );
-  }
-  .setting-range::-webkit-slider-thumb {
-    width: 24px;
-    height: 24px;
-    appearance: none;
-    border: 0;
-    border-radius: 50%;
-    background: transparent;
-    margin-top: -8.5px;
-    cursor: pointer;
-  }
-  .setting-range::-moz-range-thumb {
-    width: 24px;
-    height: 24px;
-    border: 0;
-    border-radius: 50%;
-    background: transparent;
-    cursor: pointer;
-  }
   .value-button {
     padding: 7px 10px;
     border: 0;
@@ -2112,130 +1957,6 @@
     color: rgba(255, 255, 255, 0.9);
     font-size: 0.68rem;
     cursor: pointer;
-  }
-  .sleep-setting label {
-    margin-bottom: 13px;
-  }
-  .sleep-range {
-    margin-top: 0;
-  }
-  .sleep-ticks {
-    position: relative;
-    height: 15px;
-    margin-top: 10px;
-    color: rgba(255, 255, 255, 0.38);
-    font-size: 0.62rem;
-    font-weight: 560;
-    font-variant-numeric: tabular-nums;
-  }
-  .sleep-ticks span {
-    position: absolute;
-    left: var(--tick-position);
-    min-width: 24px;
-    text-align: center;
-    transform: translateX(-50%);
-    transition: color 0.18s ease;
-  }
-  .sleep-ticks span:first-child {
-    min-width: auto;
-    text-align: left;
-    transform: none;
-  }
-  .sleep-ticks span:last-child {
-    min-width: auto;
-    text-align: right;
-    transform: translateX(-100%);
-  }
-  .sleep-ticks span.active {
-    color: rgba(255, 255, 255, 0.9);
-  }
-  .eq-preset-group {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
-  }
-  .eq-preset-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .eq-preset-button {
-    padding: 7px 12px;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 12px;
-    corner-shape: squircle;
-    background: rgba(255, 255, 255, 0.06);
-    color: rgba(255, 255, 255, 0.74);
-    font-family: inherit;
-    font-size: 0.8rem;
-    font-weight: 560;
-    cursor: pointer;
-    transition:
-      color 0.18s ease,
-      background 0.18s ease,
-      border-color 0.18s ease,
-      opacity 0.18s ease;
-  }
-  .eq-preset-button:hover:not(:disabled) {
-    color: #fff;
-    background: rgba(255, 255, 255, 0.1);
-  }
-  .eq-preset-button.active {
-    color: rgba(255, 255, 255, 0.96);
-    background: rgba(var(--accent-rgb), 0.16);
-    border-color: rgba(var(--accent-rgb), 0.32);
-  }
-  .eq-preset-button:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-  .eq-preset-button.active:disabled {
-    color: rgba(255, 255, 255, 0.74);
-    background: rgba(255, 255, 255, 0.06);
-    border-color: rgba(255, 255, 255, 0.14);
-  }
-  .eq-preset-button.is-custom {
-    font-style: italic;
-  }
-  .eq-bands {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 4px;
-    margin-top: 12px;
-  }
-  .eq-band-row {
-    display: flex;
-    align-items: center;
-    justify-content: flex-start;
-    gap: 12px;
-    padding: 5px 0;
-    border-top: 0;
-  }
-  .eq-band-label {
-    flex: 0 0 auto;
-    width: 52px;
-    color: #fff;
-    font-size: 0.8rem;
-    font-weight: 560;
-    font-variant-numeric: tabular-nums;
-  }
-  .eq-band-range {
-    flex: 1 1 auto;
-    margin-top: 0;
-  }
-  .eq-band-range:disabled {
-    opacity: 0.4;
-  }
-  .eq-band-value {
-    flex: 0 0 auto;
-    width: 52px;
-    color: #fff;
-    font-size: 0.8rem;
-    font-weight: 560;
-    font-variant-numeric: tabular-nums;
-    text-align: right;
   }
   .setting-value {
     color: rgba(255, 255, 255, 0.7);
@@ -2636,18 +2357,6 @@
       font-size: 0.62rem;
       line-height: 1.35;
     }
-    .setting-range {
-      height: 6px;
-      margin-top: 13px;
-    }
-    .sleep-setting label {
-      margin-bottom: 10px;
-    }
-    .sleep-ticks {
-      height: 14px;
-      margin-top: 8px;
-      font-size: 0.58rem;
-    }
     .value-button {
       padding: 7px 10px;
       flex: 0 0 auto;
@@ -2739,12 +2448,6 @@
     .setting-group,
     .setting-row {
       padding: 11px 10px;
-    }
-    .setting-range {
-      margin-top: 11px;
-    }
-    .sleep-ticks {
-      margin-top: 7px;
     }
   }
 

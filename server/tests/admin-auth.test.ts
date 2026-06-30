@@ -7,6 +7,7 @@ const TEST_ENV: Env = {
   GH_REPO: 'test/repo',
   GH_BRANCH: 'main',
   CONFIG_ENCRYPTION_KEY: '',
+  DEVELOPMENT: 'true',
 }
 const ENV_A: Env = {
   GH_TOKEN: 'real-token-a',

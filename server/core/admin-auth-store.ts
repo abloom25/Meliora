@@ -1,9 +1,14 @@
-import { isLocalMode, validateEncryptionKey, type Env } from './types'
+import { isDevelopmentMode, validateEncryptionKey, type Env } from './types'
 import { GitHubWriteError, readFile, writeFile, utf8ToBase64 } from './github'
 import { encryptString, decryptString, looksEncrypted } from './crypto'
 
 const ADMIN_PATH = 'public/admin.json'
-const PBKDF2_ITERATIONS = 100000
+// PBKDF2 迭代次数:遵循 OWASP 当前建议(PBKDF2-HMAC-SHA-256 ≥ 600k)。
+// 迭代次数写入哈希串(pbkdf2$<iter>$<salt>$<hash>),verifyPassword 按存储值验证,
+// 因此提升该常量向后兼容 —— 旧哈希仍按其存储次数验证,新设置/改密时使用更高的新次数。
+// 注意:此处的迭代次数仅用于管理员密码哈希,与 crypto.ts 中派生配置加密密钥的
+// PBKDF2 迭代次数相互独立(后者变更会令已加密配置不可解,不可随意调整)。
+const PBKDF2_ITERATIONS = 600000
 const MIN_PASSWORD_LENGTH = 8
 
 let localAdminCache: { passwordHash?: string; tokenVersion?: number } | null = null
@@ -12,9 +17,12 @@ let localSetupPending = false
 // tokenVersion 内存缓存:changePassword 时 bump 并写入 admin.json,
 // 使旧 Cookie token 的 ver 失效。Edge Function 实例复用期间命中缓存,
 // 新实例冷启动时从 admin.json 加载,最终一致。
-// 缓存带 30s TTL:其他实例在 changePassword 后最多 30s 内会重新从 admin.json
+// 缓存带短 TTL:其他实例在 changePassword 后最多 TTL 内会重新从 admin.json
 // 加载最新 ver,避免旧 token 在跨实例场景下长期有效,削弱"改密码即吊销"语义。
-const TOKEN_VERSION_TTL_MS = 30_000
+// TTL 取 5s(而非更长的 30s):管理后台为低频流量,单次 dashboard 加载后即命中缓存,
+// 短 TTL 对 GitHub API 调用影响可忽略,却将跨实例撤销窗口缩到最小。
+// 跨实例无共享存储是 Edge 固有限制,彻底消除需 Durable Objects / KV。
+const TOKEN_VERSION_TTL_MS = 5_000
 let cachedTokenVersion: number | null = null
 let tokenVersionExpiresAt = 0
 
@@ -105,7 +113,7 @@ interface AdminData {
 }
 
 async function readAdminData(env: Env): Promise<AdminData> {
-  if (isLocalMode(env)) {
+  if (isDevelopmentMode(env)) {
     return localAdminCache || {}
   }
   const file = await readFile(ADMIN_PATH, env)
@@ -121,7 +129,7 @@ async function readAdminData(env: Env): Promise<AdminData> {
 }
 
 async function writeAdminData(data: AdminData, env: Env): Promise<void> {
-  if (isLocalMode(env)) {
+  if (isDevelopmentMode(env)) {
     localAdminCache = data
     return
   }
@@ -136,7 +144,7 @@ async function createAdminData(
   data: AdminData,
   env: Env,
 ): Promise<{ ok: boolean; exists: boolean }> {
-  if (isLocalMode(env)) {
+  if (isDevelopmentMode(env)) {
     if (localAdminCache?.passwordHash || localSetupPending) {
       return { ok: false, exists: true }
     }
@@ -194,7 +202,7 @@ export async function setupPassword(
   env: Env,
 ): Promise<{ ok: boolean; error?: string }> {
   // 最先校验加密密钥:生产模式下 CONFIG_ENCRYPTION_KEY 必填且需达到最低强度,
-  // 否则拒绝初始化,避免用弱密钥加密后无法补救。本地开发模式跳过(不加密)。
+  // 否则拒绝初始化,避免用弱密钥加密后无法补救。开发模式跳过(不加密)。
   const keyCheck = validateEncryptionKey(env)
   if (!keyCheck.ok) {
     return { ok: false, error: keyCheck.error }

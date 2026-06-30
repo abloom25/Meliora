@@ -1,4 +1,5 @@
 name: Update from upstream
+run-name: Update from upstream ${{ inputs.target_tag || 'latest' }} ${{ inputs.trigger_id || github.run_id }}
 
 on:
   workflow_dispatch:
@@ -9,6 +10,18 @@ on:
         default: abloom25/Meliora
       github_proxy:
         description: Optional GitHub URL proxy prefix or template, for example https://proxy.example.com/ or https://proxy.example.com?url={url}
+        required: false
+        default: ''
+      target_tag:
+        description: Optional exact upstream tag selected by the admin update check
+        required: false
+        default: ''
+      allow_prerelease:
+        description: Whether prerelease tags may be selected when target_tag is omitted
+        required: false
+        default: 'false'
+      trigger_id:
+        description: Unique dispatch id used by the admin status poller
         required: false
         default: ''
 
@@ -29,12 +42,46 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Validate upstream repository input
+        env:
+          UPSTREAM_REPO: ${{ inputs.upstream_repo || 'abloom25/Meliora' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$UPSTREAM_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "Invalid upstream_repo: ${UPSTREAM_REPO}. Expected owner/repo." >&2
+            exit 1
+          fi
+
+      - name: Prepare temporary update branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_BRANCH="${GITHUB_REF_NAME}"
+          SAFE_TARGET="$(printf '%s' "$TARGET_BRANCH" | sed -E 's#[^A-Za-z0-9._-]+#-#g')"
+          TEMP_BRANCH="meliora-update/${SAFE_TARGET}-${GITHUB_RUN_ID}"
+
+          git fetch origin "${TARGET_BRANCH}"
+          git checkout -B "${TARGET_BRANCH}" "origin/${TARGET_BRANCH}"
+          git checkout -B "${TEMP_BRANCH}"
+
+          echo "TARGET_BRANCH=${TARGET_BRANCH}" >> "$GITHUB_ENV"
+          echo "TEMP_BRANCH=${TEMP_BRANCH}" >> "$GITHUB_ENV"
+          {
+            echo "### Meliora upstream update"
+            echo ""
+            echo "- Target branch: \`${TARGET_BRANCH}\`"
+            echo "- Temporary branch: \`${TEMP_BRANCH}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Resolve latest upstream release
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
           UPSTREAM_REPO: ${{ inputs.upstream_repo || 'abloom25/Meliora' }}
           GITHUB_PROXY: ${{ inputs.github_proxy }}
+          TARGET_TAG_INPUT: ${{ inputs.target_tag }}
+          ALLOW_PRERELEASE_INPUT: ${{ inputs.allow_prerelease }}
         shell: bash
         run: |
           set -euo pipefail
@@ -53,21 +100,70 @@ jobs:
 
           api_get() {
             local path="$1"
-            curl -fsSL \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "User-Agent: Meliora-Updater" \
-              "$(github_url "https://api.github.com/${path}")"
+            local url
+            url="$(github_url "https://api.github.com/${path}")"
+            if [ -n "${GITHUB_PROXY:-}" ]; then
+              curl -fsSL \
+                -H "Accept: application/vnd.github+json" \
+                -H "User-Agent: Meliora-Updater" \
+                "$url"
+            else
+              curl -fsSL \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "User-Agent: Meliora-Updater" \
+                "$url"
+            fi
           }
 
-          TAG="$(api_get "repos/${UPSTREAM_REPO}/releases/latest" 2>/dev/null | python -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))' || true)"
+          pick_latest_semver() {
+            python -c "$(cat <<'PY'
+          import json, re, sys
+          import os
+
+          data = json.load(sys.stdin)
+          extra_tag = os.environ.get('EXTRA_TAG', '').strip()
+          allow_prerelease = os.environ.get('ALLOW_PRERELEASE', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+          if extra_tag:
+              data.append({'name': extra_tag})
+          pattern = re.compile(r'^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$')
+
+          def key(tag):
+              name = tag.get('name') or tag.get('tag_name') or ''
+              match = pattern.match(name)
+              if not match:
+                  return None
+              if match.group(4) and not allow_prerelease:
+                  return None
+              prerelease = match.group(4).split('.') if match.group(4) else []
+              prerelease_key = (1,) if not prerelease else (0, tuple((0, int(part)) if part.isdigit() else (1, part) for part in prerelease))
+              return (int(match.group(1)), int(match.group(2)), int(match.group(3)), prerelease_key)
+
+          candidates = [(key(item), item.get('name') or item.get('tag_name') or '') for item in data]
+          candidates = [item for item in candidates if item[0] is not None]
+          print(max(candidates)[1] if candidates else '')
+          PY
+          )"
+          }
+
+          TARGET_TAG="${TARGET_TAG_INPUT}"
+          if [ -n "${TARGET_TAG}" ]; then
+            TAG="${TARGET_TAG}"
+          else
+            RELEASE_TAG="$(api_get "repos/${UPSTREAM_REPO}/releases/latest" 2>/dev/null | python -c 'import json,sys; print(json.load(sys.stdin).get("tag_name",""))' || true)"
+            TAG="$(api_get "repos/${UPSTREAM_REPO}/tags?per_page=100" | EXTRA_TAG="${RELEASE_TAG}" ALLOW_PRERELEASE="${ALLOW_PRERELEASE_INPUT}" pick_latest_semver || true)"
+          fi
           if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
-            TAG="$(api_get "repos/${UPSTREAM_REPO}/tags" | python -c 'import json,re,sys; tags=json.load(sys.stdin); stable=[tag["name"] for tag in tags if re.match(r"^v?\\d+\\.\\d+\\.\\d+$", tag.get("name",""))]; print((stable or [tag.get("name","") for tag in tags if tag.get("name")])[0] if tags else "")')"
+            TAG="${RELEASE_TAG:-}"
           fi
           if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
             echo "No latest release tag found for ${UPSTREAM_REPO}" >&2
             exit 1
           fi
+          python -c 'import re,sys; tag=sys.argv[1]; pattern=r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"; sys.exit(0 if re.match(pattern, tag) else 1)' "$TAG" || {
+            echo "Invalid semver tag selected: ${TAG}" >&2
+            exit 1
+          }
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Latest upstream release: ${TAG}"
 
@@ -92,9 +188,16 @@ jobs:
           }
 
           git remote add upstream "$(github_url "https://github.com/${UPSTREAM_REPO}.git")"
-          git fetch upstream "refs/tags/${TARGET_TAG}:refs/tags/upstream-${TARGET_TAG}" --force
+          if git fetch upstream "refs/tags/${TARGET_TAG}:refs/tags/upstream-${TARGET_TAG}" --force; then
+            ARCHIVE_TAG="refs/tags/upstream-${TARGET_TAG}"
+          elif [[ "${TARGET_TAG}" != v* ]] && git fetch upstream "refs/tags/v${TARGET_TAG}:refs/tags/upstream-${TARGET_TAG}" --force; then
+            ARCHIVE_TAG="refs/tags/upstream-${TARGET_TAG}"
+          else
+            echo "Upstream tag not found: ${TARGET_TAG}" >&2
+            exit 1
+          fi
           mkdir -p /tmp/meliora-upstream
-          git archive "refs/tags/upstream-${TARGET_TAG}" | tar -x -C /tmp/meliora-upstream
+          git archive "${ARCHIVE_TAG}" | tar -x -C /tmp/meliora-upstream
 
       - name: Sync code while preserving user data
         shell: bash
@@ -104,7 +207,8 @@ jobs:
             --exclude='.git/' \
             --exclude='.dev.vars' \
             --exclude='.env' \
-            --exclude='.env.*' \
+            --exclude='.env.local' \
+            --exclude='.env.production' \
             --exclude='.wrangler/' \
             --exclude='.vercel/' \
             --exclude='dist/' \
@@ -113,24 +217,102 @@ jobs:
             --exclude='dev-server.out.log' \
             --exclude='public/admin.json' \
             --exclude='public/config.json' \
-            --exclude='public/icon.*' \
-            --exclude='public/icons.svg' \
-            --exclude='public/assets/' \
             --exclude='public/music/' \
             /tmp/meliora-upstream/ ./
 
-      - name: Commit update
+      - name: Commit update on temporary branch
         env:
           TARGET_TAG: ${{ steps.release.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
-          if git diff --quiet && git diff --cached --quiet; then
-            echo "Already up to date with ${TARGET_TAG}."
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "NO_UPDATE=true" >> "$GITHUB_ENV"
+            {
+              echo ""
+              echo "No changes found for ${TARGET_TAG}; target branch is already up to date."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           git add -A
           git commit -m "chore(update): sync upstream ${TARGET_TAG}"
-          git push
+          git push origin "${TEMP_BRANCH}" --force
+          {
+            echo ""
+            echo "- Upstream tag: \`${TARGET_TAG}\`"
+            echo "- Temporary branch was pushed for validation."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up pnpm
+        if: env.NO_UPDATE != 'true'
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        if: env.NO_UPDATE != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        if: env.NO_UPDATE != 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests
+        if: env.NO_UPDATE != 'true'
+        run: pnpm test
+
+      - name: Check types
+        if: env.NO_UPDATE != 'true'
+        run: pnpm type-check
+
+      - name: Lint
+        if: env.NO_UPDATE != 'true'
+        run: pnpm lint
+
+      - name: Check formatting
+        if: env.NO_UPDATE != 'true'
+        run: pnpm format:check
+
+      - name: Build
+        if: env.NO_UPDATE != 'true'
+        run: pnpm build
+
+      - name: Merge verified update into target branch
+        if: env.NO_UPDATE != 'true'
+        env:
+          TARGET_TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${TARGET_BRANCH}"
+          git checkout "${TEMP_BRANCH}"
+          git merge --no-edit "origin/${TARGET_BRANCH}"
+          pnpm test
+          pnpm type-check
+          pnpm build
+          git push origin "${TEMP_BRANCH}" --force
+
+          git checkout "${TARGET_BRANCH}"
+          git reset --hard "origin/${TARGET_BRANCH}"
+          git merge --no-ff "${TEMP_BRANCH}" -m "chore(update): sync upstream ${TARGET_TAG}"
+          git push origin "${TARGET_BRANCH}"
+          {
+            echo ""
+            echo "Update merged into \`${TARGET_BRANCH}\` successfully."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up temporary branch
+        if: always() && env.TEMP_BRANCH != ''
+        shell: bash
+        run: |
+          set +e
+          git push origin --delete "${TEMP_BRANCH}" >/dev/null 2>&1
+          {
+            echo ""
+            echo "Temporary branch cleanup attempted: \`${TEMP_BRANCH}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

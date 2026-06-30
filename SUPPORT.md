@@ -35,9 +35,9 @@
 
 请参考 [README.md](README.md) 中的"配置本地音乐"部分。
 
-### Q: 如何部署到 GitHub Pages？
+### Q: 支持哪些部署平台？
 
-请参考 [README.md](README.md) 中的"GitHub Pages 自动部署"部分。
+目前支持 Vercel、Netlify 与 Cloudflare Pages。请参考 [README.md](README.md) 中的部署说明。
 
 ### Q: 如何部署到 Vercel？
 

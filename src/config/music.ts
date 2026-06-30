@@ -1,8 +1,4 @@
-import type { MusicConfig } from '../types/music'
+import type { PublicMusicConfig } from '../types/music'
+import { publicMusicConfig } from '../generated/public-config'
 
-export const musicConfig: MusicConfig = {
-  siteName: 'Meliora',
-  apiEndpoint: '',
-  playlists: [],
-  localTracks: [],
-}
+export const musicConfig: PublicMusicConfig = publicMusicConfig

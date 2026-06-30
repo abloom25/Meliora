@@ -4,27 +4,53 @@ const authenticated = ref(false)
 const checking = ref(true)
 const initialized = ref(false)
 const setupChecking = ref(true)
+const apiUnavailable = ref(false)
+const adminStatus = ref<'idle' | 'disabled' | 'env-not-ready'>('idle')
+const adminStatusDetail = ref('')
+
+export function markAdminUnauthenticated(): void {
+  authenticated.value = false
+  checking.value = false
+}
 
 export function useAdminAuth() {
   async function checkSetupStatus(): Promise<void> {
     setupChecking.value = true
+    apiUnavailable.value = false
+    adminStatus.value = 'idle'
+    adminStatusDetail.value = ''
     try {
       const response = await fetch('/api/setup-status', { credentials: 'include' })
-      // HTML 状态页(禁用/环境未就绪,可能为 403)需先于 !response.ok 判定并整页替换。
       const contentType = response.headers.get('Content-Type') || ''
-      if (contentType.includes('text/html')) {
-        document.open()
-        document.write(await response.text())
-        document.close()
-        return
-      }
-      if (!response.ok) {
+      if (!contentType.includes('application/json') || !response.ok) {
+        apiUnavailable.value = true
         initialized.value = true
         return
       }
-      const data = (await response.json().catch(() => ({}))) as { initialized?: boolean }
+
+      const data = (await response.json().catch(() => ({}))) as {
+        status?: string
+        detail?: string
+        initialized?: boolean
+      }
+
+      if (data.status === 'disabled') {
+        adminStatus.value = 'disabled'
+        adminStatusDetail.value = typeof data.detail === 'string' ? data.detail : ''
+        initialized.value = true
+        return
+      }
+
+      if (data.status === 'env-not-ready') {
+        adminStatus.value = 'env-not-ready'
+        adminStatusDetail.value = typeof data.detail === 'string' ? data.detail : ''
+        initialized.value = true
+        return
+      }
+
       initialized.value = Boolean(data.initialized)
     } catch {
+      apiUnavailable.value = true
       initialized.value = true
     } finally {
       setupChecking.value = false
@@ -36,13 +62,13 @@ export function useAdminAuth() {
     try {
       const response = await fetch('/api/auth', { credentials: 'include' })
       if (!response.ok) {
-        authenticated.value = false
+        markAdminUnauthenticated()
         return
       }
       const data = (await response.json()) as { authenticated?: boolean }
       authenticated.value = Boolean(data.authenticated)
     } catch {
-      authenticated.value = false
+      markAdminUnauthenticated()
     } finally {
       checking.value = false
     }
@@ -57,13 +83,13 @@ export function useAdminAuth() {
         body: JSON.stringify({ password }),
       })
       if (!response.ok) {
-        authenticated.value = false
+        markAdminUnauthenticated()
         return false
       }
       authenticated.value = true
       return true
     } catch {
-      authenticated.value = false
+      markAdminUnauthenticated()
       return false
     }
   }
@@ -97,7 +123,7 @@ export function useAdminAuth() {
     } catch {
       // 即使请求失败也清除本地状态
     } finally {
-      authenticated.value = false
+      markAdminUnauthenticated()
     }
   }
 
@@ -106,6 +132,9 @@ export function useAdminAuth() {
     checking,
     initialized,
     setupChecking,
+    apiUnavailable,
+    adminStatus,
+    adminStatusDetail,
     checkSetupStatus,
     checkAuth,
     login,

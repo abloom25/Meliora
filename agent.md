@@ -367,11 +367,12 @@ PWA       public/sw.js, public/manifest.webmanifest
   - PR 模板必填项:描述、相关 Issue、改动类型、测试情况。
   - 代码审查通过后由维护者合并。
 - **部署平台规范**:
-  - 支持 4 个部署平台:Vercel(`vercel.json`)、Cloudflare Pages(`wrangler.toml`)、Netlify(`netlify.toml`)、GitHub Pages(`.github/workflows/deploy-pages.yml`)。
-  - 所有平台配置必须统一:构建命令 `pnpm build`、输出目录 `dist`、Node 22、pnpm 11。
-  - **环境变量(3 必填)**:`GH_TOKEN`(GitHub PAT,Contents Read and write)、`GH_REPO`(`owner/repo` 格式)、`CONFIG_ENCRYPTION_KEY`(配置加密与 Cookie 签名的主密钥,至少 32 位,生产模式校验强度——拒绝全相同字符 / 纯顺序字符等弱模式)。`GH_BRANCH` 可选(默认 `main`),`GITHUB_PROXY` 可选,`ADMIN_DISABLED` 可选(设为 `true`/`1`/`yes`/`on`,大小写不敏感;禁用管理后台时除 `GET /api/runtime-config` 与状态探针(`GET /api/setup-status`、`GET /api/status-page`,返回 HTML 状态页)外,所有 `/api/*` 返回 403,`/admin` 显示"已禁用")。
+  - 支持 3 个部署平台:Vercel(`vercel.json`)、Cloudflare Pages(`wrangler.toml`)、Netlify(`netlify.toml`)。
+  - 所有平台配置必须统一:构建命令 `pnpm build`、输出目录 `dist`;运行时版本遵循 `package.json` 的 `engines` 与各平台配置。
+  - **公开站点配置方向**:播放器前端所需的公开配置(站点名称、站点图标、公开歌单、本地曲库、统计与公开自定义样式/脚本等)必须在构建期生成并硬编译进前端,因为后台保存配置本身会写仓库并触发重新部署;不要为了这些公开配置保留首屏必需的 Worker 配置接口。管理后台保存/上传/鉴权/更新等仍通过后端 API 执行,敏感密钥、`apiToken`、管理员数据、GitHub 代理配置不得进入前端 bundle。远程歌单只硬编译 `apiEndpoint` 与歌单 ID 等配置,歌曲列表仍由播放器运行时请求 Meting API,不得预抓取或硬编码 Meting 返回结果。
+  - **环境变量(3 必填)**:`GH_TOKEN`(GitHub PAT,Contents Read and write)、`GH_REPO`(`owner/repo` 格式)、`CONFIG_ENCRYPTION_KEY`(配置加密、Cookie 签名、构建期公开配置解密的主密钥,至少 32 位,生产模式校验强度——拒绝全相同字符 / 纯顺序字符等弱模式)。环境就绪提示只校验 `GH_REPO` 格式与 `CONFIG_ENCRYPTION_KEY` 强度,不因 `GH_TOKEN` 缺失或占位单独拦截。`GH_BRANCH` 可选(默认 `main`),`GITHUB_PROXY` 可选,`ADMIN_DISABLED` 可选(设为 `true`/`1`/`yes`/`on`,大小写不敏感;禁用管理后台时除状态探针(`GET /api/setup-status`、`GET /api/status-page`,返回 HTML 状态页)外,所有 `/api/*` 返回 403,`/admin` 显示"已禁用")。
     - **不再使用** `ADMIN_PASSWORD` 和 `ADMIN_SECRET`——密码通过 `/setup` 页面首次设置(PBKDF2-SHA256 100k 迭代哈希存入 `public/admin.json`);Cookie 签名密钥与配置加密密钥**均从 `CONFIG_ENCRYPTION_KEY` 派生**(`HMAC-SHA256` / `PBKDF2`),与 `GH_TOKEN` 完全解耦,`GH_TOKEN` 可独立轮换而不影响已加密配置与已签发 Cookie。
-    - 本地开发:`GH_TOKEN` 为空或 `placeholder` / `ghp_xxx` 开头时进入内存模式(配置 / 密码不持久化,加密与签名走明文降级)。
+    - 开发模式:`DEVELOPMENT=true` 时进入内存模式(配置 / 密码不持久化,加密与签名走明文降级)。
   - **安全头一致性**:所有平台的 headers 配置必须保持一致(CSP、X-Content-Type-Options、X-Frame-Options、Referrer-Policy、Permissions-Policy)。
   - **SPA Fallback**:所有平台必须配置 `/* -> /index.html` 的 200 重写,确保路由刷新有效。
   - **Service Worker 缓存控制**:`/sw.js` 必须配置 `Cache-Control: public, max-age=0, must-revalidate` + `Service-Worker-Allowed: /`,禁止浏览器长期缓存 SW。

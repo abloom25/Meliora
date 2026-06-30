@@ -27,10 +27,44 @@ const defaultSettings: PlayerSettings = {
 }
 
 export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings {
-  const result: PlayerSettings = { ...defaultSettings, ...saved }
-  result.equalizer = sanitizeEqualizer(saved?.equalizer)
-  result.settingsVersion = CURRENT_SETTINGS_VERSION
-  return result
+  const input = saved && typeof saved === 'object' ? saved : {}
+  return {
+    volume: sanitizeNumber(input.volume, defaultSettings.volume, 0, 1),
+    playMode: sanitizePlayMode(input.playMode),
+    smoothTrackChange: sanitizeBoolean(input.smoothTrackChange, defaultSettings.smoothTrackChange),
+    preloadNextTrack: sanitizeBoolean(input.preloadNextTrack, defaultSettings.preloadNextTrack),
+    dynamicBackground: sanitizeBoolean(input.dynamicBackground, defaultSettings.dynamicBackground),
+    backgroundBlur: sanitizeNumber(input.backgroundBlur, defaultSettings.backgroundBlur, 45, 130),
+    backgroundSaturation: sanitizeNumber(
+      input.backgroundSaturation,
+      defaultSettings.backgroundSaturation,
+      0.65,
+      1.8,
+    ),
+    beatBrightness: sanitizeNumber(input.beatBrightness, defaultSettings.beatBrightness, 0, 0.65),
+    lyricFontSize: sanitizeNumber(input.lyricFontSize, defaultSettings.lyricFontSize, 15, 30),
+    lyricAnimation: sanitizeBoolean(input.lyricAnimation, defaultSettings.lyricAnimation),
+    skipOnError: sanitizeBoolean(input.skipOnError, defaultSettings.skipOnError),
+    autoHideChrome: sanitizeBoolean(input.autoHideChrome, defaultSettings.autoHideChrome),
+    equalizer: sanitizeEqualizer(input.equalizer),
+    settingsVersion: CURRENT_SETTINGS_VERSION,
+  }
+}
+
+function sanitizeNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const numeric = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numeric)) return fallback
+  return Math.max(min, Math.min(max, numeric))
+}
+
+function sanitizeBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value
+  return fallback
+}
+
+function sanitizePlayMode(value: unknown): PlayMode {
+  const modes: PlayMode[] = ['sequence', 'loop', 'single', 'shuffle']
+  return modes.includes(value as PlayMode) ? (value as PlayMode) : defaultSettings.playMode
 }
 
 function loadSettings(): PlayerSettings {
@@ -68,11 +102,22 @@ export const usePlayerStore = defineStore('player', () => {
     const activeTrack = currentTrackId.value
       ? tracks.value.find((track) => track.id === currentTrackId.value)
       : undefined
-    tracks.value = activeTrack
+    const mergedTracks = activeTrack
       ? nextTracks.map((track) => (track.id === activeTrack.id ? activeTrack : track))
       : nextTracks
-    if (!queue.value.length) {
-      queue.value = [...nextTracks]
+    const trackById = new Map(mergedTracks.map((track) => [track.id, track]))
+    const queuedIds = new Set<string>()
+    const syncedQueue = queue.value
+      .map((track) => trackById.get(track.id))
+      .filter((track): track is Track => Boolean(track))
+    for (const track of syncedQueue) queuedIds.add(track.id)
+    for (const track of mergedTracks) {
+      if (!queuedIds.has(track.id)) syncedQueue.push(track)
+    }
+
+    tracks.value = mergedTracks
+    if (queue.value.length || syncedQueue.length) {
+      queue.value = syncedQueue
       bumpQueueVersion()
     }
     if (currentTrackId.value && !nextTracks.some((track) => track.id === currentTrackId.value)) {
@@ -89,41 +134,58 @@ export const usePlayerStore = defineStore('player', () => {
     errorMessage.value = ''
   }
 
+  function peekNext(manual = false): Track | null {
+    if (!queue.value.length) return null
+    if (settings.value.playMode === 'single' && !manual && currentTrack.value)
+      return currentTrack.value
+    if (settings.value.playMode === 'shuffle' && queue.value.length > 1) {
+      let nextIndex: number
+      do {
+        nextIndex = Math.floor(Math.random() * queue.value.length)
+      } while (nextIndex === currentIndex.value)
+      return queue.value[nextIndex] ?? null
+    }
+    const nextIndex = currentIndex.value + 1
+    if (nextIndex >= queue.value.length) {
+      if (settings.value.playMode === 'sequence') return null
+      return queue.value[0] ?? null
+    }
+    return queue.value[nextIndex] ?? null
+  }
+
+  function peekPrevious(): Track | null {
+    if (!queue.value.length) return null
+    let previousIndex = currentIndex.value - 1
+    if (previousIndex < 0) previousIndex = queue.value.length - 1
+    return queue.value[previousIndex] ?? null
+  }
+
   function nextTrack(manual = false, preferredTrackId?: string): Track | null {
     if (!queue.value.length) return null
     if (settings.value.playMode === 'single' && !manual && currentTrack.value)
       return currentTrack.value
-
-    let nextIndex: number
-    const preferredIndex = preferredTrackId
-      ? queue.value.findIndex((track) => track.id === preferredTrackId)
-      : -1
-    if (preferredIndex >= 0 && preferredIndex !== currentIndex.value) {
-      nextIndex = preferredIndex
-    } else if (settings.value.playMode === 'shuffle' && queue.value.length > 1) {
-      do {
-        nextIndex = Math.floor(Math.random() * queue.value.length)
-      } while (nextIndex === currentIndex.value)
-    } else {
-      nextIndex = currentIndex.value + 1
-      if (nextIndex >= queue.value.length) {
-        if (settings.value.playMode === 'sequence') return null
-        nextIndex = 0
+    let track: Track | null = null
+    if (preferredTrackId) {
+      const preferredIndex = queue.value.findIndex((item) => item.id === preferredTrackId)
+      if (preferredIndex >= 0 && preferredIndex !== currentIndex.value) {
+        track = queue.value[preferredIndex] ?? null
       }
     }
-
-    const track = queue.value[nextIndex] ?? queue.value[0] ?? null
+    if (!track) track = peekNext(manual)
     if (track) selectTrack(track, queue.value)
     return track
   }
 
   function previousTrack(preferredTrackId?: string): Track | null {
     if (!queue.value.length) return null
-    let previousIndex = preferredTrackId
-      ? queue.value.findIndex((track) => track.id === preferredTrackId)
-      : currentIndex.value - 1
-    if (previousIndex < 0) previousIndex = queue.value.length - 1
-    const track = queue.value[previousIndex] ?? null
+    let track: Track | null
+    if (preferredTrackId) {
+      let preferredIndex = queue.value.findIndex((item) => item.id === preferredTrackId)
+      if (preferredIndex < 0) preferredIndex = queue.value.length - 1
+      track = queue.value[preferredIndex] ?? null
+    } else {
+      track = peekPrevious()
+    }
     if (track) selectTrack(track, queue.value)
     return track
   }
@@ -165,6 +227,8 @@ export const usePlayerStore = defineStore('player', () => {
     errorMessage,
     setTracks,
     selectTrack,
+    peekNext,
+    peekPrevious,
     nextTrack,
     previousTrack,
     cyclePlayMode,

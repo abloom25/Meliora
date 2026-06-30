@@ -3,7 +3,13 @@
   import { Check, Loader2, PlugZap, Upload, X } from '@lucide/vue'
   import type { MusicConfig } from '../../types/music'
   import BaseInput from '../../components/BaseInput.vue'
-  import { testMusicApi, uploadFile, type MusicApiTestResult } from '../services/admin-api'
+  import {
+    MAX_UPLOAD_BYTES,
+    MAX_UPLOAD_SIZE_LABEL,
+    testMusicApi,
+    uploadFile,
+    type MusicApiTestResult,
+  } from '../services/admin-api'
 
   const props = defineProps<{ config: MusicConfig }>()
   const emit = defineEmits<{
@@ -74,28 +80,50 @@
     emit('update:config', { ...props.config, siteIcon: value })
   }
 
+  function readFileAsBase64(file: File): Promise<{ base64: string; dataUrl: string }> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => {
+        const dataUrl = typeof reader.result === 'string' ? reader.result : ''
+        const base64 = dataUrl.split(',')[1] || ''
+        if (!base64) {
+          reject(new Error('empty file result'))
+          return
+        }
+        resolve({ base64, dataUrl })
+      }
+      reader.onerror = () => reject(reader.error || new Error('file read failed'))
+      reader.onabort = () => reject(new Error('file read aborted'))
+      reader.readAsDataURL(file)
+    })
+  }
+
   async function handleIconUpload(event: Event) {
     const input = event.target as HTMLInputElement
     const file = input.files?.[0]
     if (!file) return
 
+    if (file.size > MAX_UPLOAD_BYTES) {
+      uploadStatus.value = `文件过大,最大 ${MAX_UPLOAD_SIZE_LABEL}`
+      input.value = ''
+      window.setTimeout(() => {
+        uploadStatus.value = ''
+      }, 3000)
+      return
+    }
+
     uploadStatus.value = '上传中...'
     try {
-      const reader = new FileReader()
-      reader.onload = async () => {
-        const dataUrl = reader.result as string
-        const base64 = dataUrl.split(',')[1] || ''
-        const ext = file.name.split('.').pop()?.toLowerCase() || 'svg'
-        const path = `public/icon.${ext}`
-        const result = await uploadFile(path, base64)
-        if (result.ok) {
-          setIcon(result.local && import.meta.env.DEV ? dataUrl : `./icon.${ext}`)
-          uploadStatus.value = '上传成功'
-        } else {
-          uploadStatus.value = result.error || '上传失败'
-        }
+      const { base64, dataUrl } = await readFileAsBase64(file)
+      const ext = file.name.split('.').pop()?.toLowerCase() || 'png'
+      const path = `public/icon.${ext}`
+      const result = await uploadFile(path, base64)
+      if (result.ok) {
+        setIcon(result.local && import.meta.env.DEV ? dataUrl : `./icon.${ext}`)
+        uploadStatus.value = '上传成功'
+      } else {
+        uploadStatus.value = result.error || '上传失败'
       }
-      reader.readAsDataURL(file)
     } catch {
       uploadStatus.value = '读取失败'
     } finally {
@@ -147,7 +175,7 @@
               <Upload :size="15" />
               <input
                 type="file"
-                accept="image/svg+xml,image/png,image/jpeg,image/webp"
+                accept="image/png,image/jpeg,image/webp,image/x-icon,image/vnd.microsoft.icon"
                 @change="handleIconUpload"
               />
             </label>

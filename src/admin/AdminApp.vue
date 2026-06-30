@@ -1,43 +1,41 @@
 <script setup lang="ts">
-  import { onMounted, ref } from 'vue'
+  import { onMounted } from 'vue'
+  import { adminBuildEnv } from '../generated/admin-env'
   import { useAdminAuth } from './composables/useAdminAuth'
   import LoginView from './views/LoginView.vue'
   import DashboardView from './views/DashboardView.vue'
   import SetupView from './views/SetupView.vue'
 
-  const { authenticated, checking, initialized, setupChecking, checkAuth } = useAdminAuth()
-  const apiUnavailable = ref(false)
+  const {
+    authenticated,
+    checking,
+    initialized,
+    setupChecking,
+    apiUnavailable,
+    adminStatus,
+    adminStatusDetail,
+    checkSetupStatus,
+    checkAuth,
+  } = useAdminAuth()
 
   onMounted(async () => {
-    try {
-      const response = await fetch('/api/setup-status', { credentials: 'include' })
-      // 后端在禁用/环境未就绪时会直出 HTML 状态页(可能为 403),必须先于 !response.ok 判定,
-      // 否则禁用页(403)会被提前拦截,用户看到的是误导性的"后端不可用"而非"已禁用"。
-      const contentType = response.headers.get('Content-Type') || ''
-      if (contentType.includes('text/html')) {
-        document.open()
-        document.write(await response.text())
-        document.close()
-        return
-      }
-      if (!response.ok) {
-        apiUnavailable.value = true
-        checking.value = false
-        setupChecking.value = false
-        return
-      }
-      const data = (await response.json().catch(() => ({}))) as { initialized?: boolean }
-      initialized.value = Boolean(data.initialized)
-      setupChecking.value = false
-      if (initialized.value) {
-        await checkAuth()
-      } else {
-        checking.value = false
-      }
-    } catch {
-      apiUnavailable.value = true
+    if (adminBuildEnv.status !== 'idle') {
+      adminStatus.value = adminBuildEnv.status
+      adminStatusDetail.value = adminBuildEnv.detail
+      initialized.value = true
       checking.value = false
       setupChecking.value = false
+      return
+    }
+    await checkSetupStatus()
+    if (adminStatus.value !== 'idle' || apiUnavailable.value) {
+      checking.value = false
+      return
+    }
+    if (initialized.value) {
+      await checkAuth()
+    } else {
+      checking.value = false
     }
   })
 </script>
@@ -45,7 +43,20 @@
 <template>
   <div class="admin-shell">
     <div class="admin-body">
-      <div v-if="apiUnavailable" class="admin-notice">
+      <div v-if="adminStatus === 'disabled'" class="admin-notice">
+        <h2>管理后台已禁用</h2>
+        <p>部署者已通过环境变量关闭管理后台。如需启用,请移除 ADMIN_DISABLED 环境变量并重新部署。</p>
+      </div>
+      <div v-else-if="adminStatus === 'env-not-ready'" class="admin-notice">
+        <h2>环境变量未就绪</h2>
+        <p>
+          {{
+            adminStatusDetail ||
+            '管理后台所需的必要环境变量缺失或无效,已锁定全部功能。请在部署平台配置所需变量后重新部署。'
+          }}
+        </p>
+      </div>
+      <div v-else-if="apiUnavailable" class="admin-notice">
         <h2>后端不可用</h2>
         <p>当前部署不支持管理后台。请使用 Cloudflare Pages、Vercel 或 Netlify 部署以启用此功能。</p>
       </div>

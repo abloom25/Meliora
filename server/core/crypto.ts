@@ -1,4 +1,4 @@
-import { isLocalMode, type Env } from './types'
+import { isDevelopmentMode, type Env } from './types'
 
 // 密文格式版本号。升级 KDF 参数或密文结构时递增,
 // 解密时按前缀选择对应算法,为算法升级留出迁移余地。
@@ -51,7 +51,7 @@ async function deriveKey(salt: Uint8Array, env: Env): Promise<CryptoKey> {
 }
 
 export async function encryptString(plaintext: string, env: Env): Promise<string> {
-  if (isLocalMode(env)) return plaintext
+  if (isDevelopmentMode(env)) return plaintext
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES))
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES))
   const key = await deriveKey(salt, env)
@@ -70,7 +70,7 @@ export async function encryptString(plaintext: string, env: Env): Promise<string
 }
 
 export async function decryptString(stored: string, env: Env): Promise<string> {
-  if (isLocalMode(env)) return stored
+  if (isDevelopmentMode(env)) return stored
   if (!stored.startsWith(CIPHER_PREFIX)) {
     throw new Error('Ciphertext version mismatch')
   }
@@ -84,7 +84,7 @@ export async function decryptString(stored: string, env: Env): Promise<string> {
 }
 
 // 判断内容是否为加密密文。生产模式下写入永远加密,读取时仅接受密文;
-// 明文 JSON(以 { 或 [ 开头)视为损坏或未初始化,由调用方回落到默认值。
+// 明文 JSON(以 { 或 [ 开头)视为损坏或未初始化,由调用方拒绝读取。
 export function looksEncrypted(content: string): boolean {
   return content.startsWith(CIPHER_PREFIX)
 }

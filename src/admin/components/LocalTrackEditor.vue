@@ -2,7 +2,12 @@
   import { ref } from 'vue'
   import { ChevronDown, Plus, Trash2, Upload } from '@lucide/vue'
   import type { LocalTrackConfig } from '../../types/music'
-  import { uploadFile, deleteFiles } from '../services/admin-api'
+  import {
+    MAX_UPLOAD_BYTES,
+    MAX_UPLOAD_SIZE_LABEL,
+    uploadFile,
+    deleteFiles,
+  } from '../services/admin-api'
   import ConfirmModal from './ConfirmModal.vue'
   import Collapse from '../../components/Collapse.vue'
   import BaseInput from '../../components/BaseInput.vue'
@@ -13,8 +18,8 @@
   const expanded = ref<number | null>(null)
   const pendingRemoveIndex = ref<number | null>(null)
   const removingIndex = ref<number | null>(null)
+  const removeStatus = ref('')
   const uploadStatus = ref<Record<string, string>>({})
-  const MAX_FILE_SIZE = 50 * 1024 * 1024
 
   function update(index: number, patch: Partial<LocalTrackConfig>) {
     const next = props.tracks.map((item, i) => (i === index ? { ...item, ...patch } : item))
@@ -34,7 +39,13 @@
     if (track.audio?.startsWith('./music/')) paths.push(`public${track.audio.slice(1)}`)
     if (track.cover?.startsWith('./music/')) paths.push(`public${track.cover.slice(1)}`)
     if (track.lyrics?.startsWith('./music/')) paths.push(`public${track.lyrics.slice(1)}`)
-    if (paths.length) await deleteFiles(paths)
+    if (paths.length) {
+      const result = await deleteFiles(paths)
+      if (!result.ok) {
+        removeStatus.value = result.error || '部分文件删除失败,曲目未从配置中移除'
+        return
+      }
+    }
     emit(
       'update:tracks',
       props.tracks.filter((_, i) => i !== index),
@@ -44,10 +55,12 @@
   }
 
   function requestRemove(index: number) {
+    removeStatus.value = ''
     pendingRemoveIndex.value = index
   }
 
   function cancelRemove() {
+    removeStatus.value = ''
     pendingRemoveIndex.value = null
   }
 
@@ -57,10 +70,20 @@
     removingIndex.value = index
     try {
       await remove(index)
-      pendingRemoveIndex.value = null
+      if (!removeStatus.value) {
+        pendingRemoveIndex.value = null
+      }
     } finally {
       removingIndex.value = null
     }
+  }
+
+  function getIncompleteReason(track: LocalTrackConfig): string {
+    if (!track.id.trim()) return '请先填写曲目 ID'
+    if (!track.title.trim()) return '请填写曲目标题'
+    if (!track.artist.trim()) return '请填写艺术家'
+    if (!track.audio.trim()) return '请上传音频文件'
+    return ''
   }
 
   function getExt(filename: string): string {
@@ -87,8 +110,8 @@
     if (!file) return
 
     const key = `${index}-${role}`
-    if (file.size > MAX_FILE_SIZE) {
-      uploadStatus.value[key] = '文件过大(>50MB)'
+    if (file.size > MAX_UPLOAD_BYTES) {
+      uploadStatus.value[key] = `文件过大(>${MAX_UPLOAD_SIZE_LABEL})`
       input.value = ''
       return
     }
@@ -150,6 +173,10 @@
         </template>
 
         <div class="track-body">
+          <p v-if="getIncompleteReason(track)" class="track-warning">
+            {{ getIncompleteReason(track) }}。未补全前保存会被拦截。
+          </p>
+
           <label class="field">
             <span>ID(用作文件夹名)</span>
             <BaseInput
@@ -232,7 +259,7 @@
           <div class="danger-zone">
             <span>
               <strong>删除本地曲目</strong>
-              <small>会从配置中移除该曲目,并删除已上传到本曲目目录的文件</small>
+              <small>会立即删除已上传到本曲目目录的文件,并从当前配置中移除该曲目</small>
             </span>
             <button class="remove-button" type="button" @click="requestRemove(index)">
               <Trash2 :size="14" />
@@ -267,8 +294,9 @@
             '未命名曲目'
           }}
         </strong>
-        ,并删除已上传到该曲目目录的音频、封面和歌词文件。保存前配置更改仍可通过右下角撤销恢复。
+        ,并立即删除已上传到该曲目目录的音频、封面和歌词文件。文件删除成功后,曲目会从当前配置中移除。
       </p>
+      <p v-if="removeStatus" class="remove-status">{{ removeStatus }}</p>
     </ConfirmModal>
   </div>
 </template>
@@ -388,6 +416,17 @@
     }
   }
 
+  .track-warning {
+    margin: 0;
+    padding: 8px 10px;
+    border: 1px solid rgba(255, 192, 74, 0.28);
+    border-radius: 9px;
+    background: rgba(255, 192, 74, 0.1);
+    color: #ffc04a;
+    font-size: 0.72rem;
+    line-height: 1.45;
+  }
+
   .upload-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -475,6 +514,13 @@
         line-height: 1.45;
       }
     }
+  }
+
+  .remove-status {
+    margin: 10px 0 0;
+    color: #ff8b8b;
+    font-size: 0.76rem;
+    line-height: 1.45;
   }
 
   .add-button {

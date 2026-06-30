@@ -1,4 +1,4 @@
-import type { MetingPlaylistConfig, MetingTrack, MusicConfig, Track } from '../types/music'
+import type { MetingPlaylistConfig, MetingTrack, PublicMusicConfig, Track } from '../types/music'
 import { musicConfig } from '../config/music'
 import { deduplicateTracks, mapLocalTrack, mapMetingTrack } from '../utils/tracks'
 
@@ -10,16 +10,12 @@ export interface TrackLoadResult {
 async function fetchPlaylist(
   playlist: MetingPlaylistConfig,
   apiEndpoint: string,
-  apiToken?: string,
 ): Promise<Track[]> {
   const params = new URLSearchParams({
     server: playlist.server,
     type: 'playlist',
     id: playlist.playlistId,
   })
-  if (apiToken) {
-    params.set('token', apiToken)
-  }
   // 创建本地 controller，用于实现 8 秒超时与可中止能力
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 8000)
@@ -42,10 +38,10 @@ async function fetchPlaylist(
   }
 }
 
-export async function loadConfiguredTracks(config: MusicConfig): Promise<TrackLoadResult> {
+export async function loadConfiguredTracks(config: PublicMusicConfig): Promise<TrackLoadResult> {
   const playlists = config.playlists.filter((playlist) => playlist.enabled !== false)
   const settled = await Promise.allSettled(
-    playlists.map((playlist) => fetchPlaylist(playlist, config.apiEndpoint, config.apiToken)),
+    playlists.map((playlist) => fetchPlaylist(playlist, config.apiEndpoint)),
   )
   const remoteTracks: Track[] = []
   let failedSources = 0
@@ -60,17 +56,6 @@ export async function loadConfiguredTracks(config: MusicConfig): Promise<TrackLo
     tracks: deduplicateTracks([...remoteTracks, ...localTracks]),
     failedSources,
   }
-}
-
-function isMusicConfig(value: unknown): value is MusicConfig {
-  if (typeof value !== 'object' || value === null) return false
-  const config = value as Record<string, unknown>
-  return (
-    typeof config.siteName === 'string' &&
-    typeof config.apiEndpoint === 'string' &&
-    Array.isArray(config.playlists) &&
-    Array.isArray(config.localTracks)
-  )
 }
 
 function injectPreconnect(url: string) {
@@ -92,22 +77,7 @@ function injectPreconnect(url: string) {
   document.head.appendChild(link)
 }
 
-export async function loadRuntimeConfig(): Promise<MusicConfig> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 8000)
-  try {
-    const response = await fetch('/api/runtime-config', {
-      cache: 'no-store',
-      signal: controller.signal,
-    })
-    if (!response.ok) return musicConfig
-    const payload: unknown = await response.json()
-    const config = isMusicConfig(payload) ? payload : musicConfig
-    injectPreconnect(config.apiEndpoint)
-    return config
-  } catch {
-    return musicConfig
-  } finally {
-    clearTimeout(timer)
-  }
+export function loadMusicConfig(): PublicMusicConfig {
+  injectPreconnect(musicConfig.apiEndpoint)
+  return musicConfig
 }

@@ -27,6 +27,11 @@ export interface BeatAnalyserOptions {
    * 交给 useEqualizer 绑定，由其负责按 settings 更新各频段增益。
    */
   onEqFiltersReady?: (filters: BiquadFilterNode[]) => void
+  /**
+   * 可选：当某 audio 元素因跨域污染(tainted)导致 createMediaElementSource 抛 SecurityError 时回调。
+   * 调用方应重建该 audio 为无 crossOrigin 元素，并降级节拍分析。
+   */
+  onTainted?: (audio: HTMLAudioElement) => void
 }
 
 export function useBeatAnalyser(options: BeatAnalyserOptions) {
@@ -217,11 +222,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   }
 
   async function startBeatAnalysis() {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-    if (!visibilityListenerRegistered) {
-      document.addEventListener('visibilitychange', handleVisibilityChange)
-      visibilityListenerRegistered = true
-    }
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     try {
       if (!audioContext) {
         audioContext = getAudioContext()
@@ -255,7 +256,16 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
             source.connect(eqInput)
             connectedSources.push({ source, target: eqInput })
           } catch (error) {
-            console.warn('[useAudioPlayer] createMediaElementSource failed', error)
+            const isTainted =
+              error instanceof DOMException &&
+              (error.name === 'SecurityError' || error.name === 'InvalidStateError')
+            if (isTainted) {
+              // 音频源被 CORS 污染，无法通过 Web Audio API 读取数据
+              // 通知调用方降级重建 audio(去掉 crossOrigin)，牺牲节拍分析保播放
+              options.onTainted?.(audio)
+            } else {
+              console.warn('[useAudioPlayer] createMediaElementSource failed', error)
+            }
           }
         })
         eqOutput.connect(analyser)
@@ -266,6 +276,14 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       }
       if (audioContext.state === 'suspended') await audioContext.resume()
       if (isUnmounted) return
+      if (prefersReducedMotion) {
+        pauseBeatAnalysis()
+        return
+      }
+      if (!visibilityListenerRegistered) {
+        document.addEventListener('visibilitychange', handleVisibilityChange)
+        visibilityListenerRegistered = true
+      }
       if (!beatFrame) beatFrame = window.requestAnimationFrame(updateBeatLevel)
     } catch {
       stopBeatAnalysis()

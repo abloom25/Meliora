@@ -70,27 +70,16 @@ export function usePreloadPool(options: PreloadPoolOptions) {
   function predictTrack(direction: PreloadDirection, manual = false): Track | null {
     const queue = store.queue
     if (!queue.length) return null
-    if (direction === 'next' && settings.value.playMode === 'single' && !manual)
-      return store.currentTrack
 
+    // 优先复用已缓存的预加载槽（命中时无需重新预测）
     const cachedTrack = findCachedTrack(direction)
     if (cachedTrack) return cachedTrack
 
-    if (direction === 'next' && settings.value.playMode === 'shuffle' && queue.length > 1) {
-      const candidates = queue.filter(
-        (track) => track.id !== store.currentTrack?.id && !failedTrackIds.has(track.id),
-      )
-      return candidates[Math.floor(Math.random() * candidates.length)] ?? null
-    }
-
-    for (let offset = 1; offset <= queue.length; offset += 1) {
-      const index = direction === 'next' ? store.currentIndex + offset : store.currentIndex - offset
-      if (settings.value.playMode === 'sequence' && (index >= queue.length || index < 0))
-        return null
-      const track = queue[(index + queue.length) % queue.length]
-      if (track && !failedTrackIds.has(track.id)) return track
-    }
-    return null
+    // 单一真相源：统一走 store.peekNext/peekPrevious，消除 shuffle 双抽样不一致
+    const predicted = direction === 'next' ? store.peekNext(manual) : store.peekPrevious()
+    if (!predicted) return null
+    if (failedTrackIds.has(predicted.id)) return null
+    return predicted
   }
 
   function predictNextTrack(manual = false): Track | null {
@@ -171,7 +160,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
         if (isPoolUnmounted.value || slot.track?.id !== track.id) return
         cleanup()
         failedTrackIds.add(track.id)
-        preloadMessage.value = `已跳过暂时无法播放的歌曲，正在继续播放`
+        preloadMessage.value = `预加载歌曲暂时无法播放，当前播放不受影响`
         slot.track = null
         slot.ready = null
         resolve(false)

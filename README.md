@@ -71,16 +71,16 @@
 
 ```powershell
 pnpm install
-pnpm dev          # 仅前端(5173)
-pnpm dev:full     # 前端 + 后端模拟(5173 + 8788)
+pnpm dev          # 仅前端(5175)
+pnpm dev:full     # 前端 + 后端模拟(5175 + 8788)
 ```
 
-需要 Node 20+ 与 pnpm 8+。
+需要 Node 22+ 与 pnpm 11.5.3+。
 
-- `pnpm dev`:仅启动 Vite 前端开发服务器,适合纯 UI 开发
-- `pnpm dev:full`:同时启动 Vite + Wrangler Pages Functions 本地模拟,`/api/*` 请求代理到 8788 端口,可完整测试管理后台(含 `/setup` 初始化流程)
+- `pnpm dev`:仅启动 Vite 前端开发服务器,默认端口 5175,适合纯 UI 开发
+- `pnpm dev:full`:同时启动 Vite + Wrangler Pages Functions 本地模拟,`/api/*` 请求代理到 8788 端口,可完整测试管理后台(含 `/setup` 初始化流程)。Wrangler 使用 `.wrangler/pages-dev-static` 临时静态目录启动本地 Functions,静态页面仍由 Vite 提供,不依赖 `dist` 是否存在或是否最新。
 
-本地后端默认内存模式(`GH_TOKEN` 为空或 `ghp_xxx` 开头),配置和密码不持久化,重启即重置。复制 [.dev.vars.example](.dev.vars.example) 为 `.dev.vars` 可配置真实 GitHub Token 测试完整流程。
+本地后端可使用开发模式(`.dev.vars` 中 `DEVELOPMENT=true`),配置和密码不持久化,重启即重置。复制 [.dev.vars.example](.dev.vars.example) 为 `.dev.vars` 并填入真实 GitHub Token、关闭 `DEVELOPMENT` 后可测试完整流程。
 
 ---
 
@@ -100,17 +100,21 @@ pnpm dev:full     # 前端 + 后端模拟(5173 + 8788)
 | **歌单**     | 添加/删除/启用网易云与 QQ 音乐歌单         |
 | **本地音乐** | 上传音频/封面/歌词,编辑曲目信息            |
 | **统计**     | Umami / Google Analytics 配置              |
-| **高级**     | GitHub 代理、自定义 CSS / JS               |
+| **高级**     | GitHub 代理、预发布更新、自定义 CSS / JS   |
 | **安全**     | 修改管理员密码                             |
 | **关于**     | 版本信息、检查更新、同步上游代码           |
 
-保存配置时,后台通过 GitHub API 将变更写入仓库 `public/config.json`,触发自动重新部署后生效。
+保存配置时,后台通过 GitHub API 将变更写入仓库 `public/config.json`,触发部署平台自动重新构建后生效。播放器公开配置在构建期写入前端 bundle,首屏不再请求管理 API;远程歌单仍按 `apiEndpoint` 与歌单 ID 实时请求 Meting API,不会把歌曲列表结果预构建进前端。
 
 ### 更新说明
 
-管理后台「关于」页的一键更新用于同步官方上游版本,适合未修改源码、仅通过后台管理配置和曲库的部署。
+管理后台「关于」页的一键更新用于同步官方上游版本,适合未修改源码、仅通过后台维护配置和曲库的部署。
 
-更新流程会使用上游版本覆盖仓库代码,同时保留 `public/config.json`、`public/admin.json`、`public/music/`、环境变量文件和构建产物等用户数据。如果你已经修改过源码、样式、工作流或部署配置,请不要使用后台一键更新,应自行通过 Git 合并上游代码并处理冲突。
+用户只需要点击一次“更新”。后台会触发 GitHub Actions,Actions 在 `meliora-update/*` 临时分支里同步上游代码,运行依赖安装、测试、类型检查、Lint、格式检查与构建;验证通过后再合并目标分支最新提交并执行关键验证,无冲突才自动合并并推送回目标分支。
+
+失败、冲突或推送被拒绝时目标分支保持不变,后台会显示运行状态、失败原因和 GitHub Actions 日志入口,不需要用户手动 merge。流程会保留 `public/config.json`、`public/admin.json`、`public/music/`、`.env`、`.env.local`、`.dev.vars` 和构建产物等用户数据;`.env.example`、`.dev.vars.example` 等模板文件会随上游更新。
+
+如果仓库启用了 branch protection 且禁止 `github-actions[bot]` push,自动合并会失败,需要允许 GitHub Actions 写入目标分支,或后续改用 PR auto-merge 模式。如果你已经修改过源码、样式、工作流或部署配置,请不要使用后台一键更新,应自行通过 Git 合并上游代码并处理冲突。
 
 ---
 
@@ -140,21 +144,24 @@ pnpm dev:full     # 前端 + 后端模拟(5173 + 8788)
 | **Vercel**           | [![Deploy](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fabloom25%2FMeliora)                                                                                                |
 | **Netlify**          | [![Deploy](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/abloom25/Meliora)                                                                                  |
 | **Cloudflare Pages** | [![Deploy to Cloudflare Pages](https://img.shields.io/badge/Deploy-Cloudflare%20Pages-F38020?style=flat-square&logo=cloudflare&logoColor=white)](https://deploy.workers.cloudflare.com/?url=https://github.com/abloom25/Meliora) |
-| **GitHub Pages**     | 推送到 `main` 自动部署(仅静态,无管理后台)                                                                                                                                                                                        |
 
 ### 环境变量
 
-部署后只需配置 **3 个**环境变量(在平台 Dashboard 的 Settings → Environment Variables 中):
+部署后在平台 Dashboard 的 Settings → Environment Variables 中配置环境变量:
 
-| 变量                    | 必填 | 说明                                                                                                                                         |
-| ----------------------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GH_TOKEN`              | ✅   | GitHub Personal Access Token(Contents Read and write),用于配置读写、文件上传                                                                 |
-| `GH_REPO`               | ✅   | 仓库标识,`owner/repo` 格式                                                                                                                   |
-| `CONFIG_ENCRYPTION_KEY` | ✅   | 配置加密密钥,32 位以上随机字符串。配置加密与 Cookie 签名从它派生,GH_TOKEN 可独立轮换而不影响已加密配置                                       |
-| `GH_BRANCH`             | ❌   | 目标分支,默认 `main`                                                                                                                         |
-| `ADMIN_DISABLED`        | ❌   | 设为 `true`/`1`/`yes`/`on`(大小写不敏感)时禁用管理后台,`/admin` 显示"已禁用",除 `GET /api/runtime-config` 与状态探针外所有 `/api/*` 返回 403 |
+| 变量                    | 必填 | 说明                                                                                                                                                                                            |
+| ----------------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GH_TOKEN`              | ✅   | GitHub Personal Access Token。Fine-grained token 需要 `Contents: Read and write` + `Actions: Write`; classic token 可使用 `repo` 权限。用于配置读写、文件上传、触发更新 workflow 与查询更新状态 |
+| `GH_REPO`               | ✅   | 仓库标识,`owner/repo` 格式                                                                                                                                                                      |
+| `CONFIG_ENCRYPTION_KEY` | ✅   | 配置加密密钥,32 位以上随机字符串。配置加密、Cookie 签名与构建期公开配置生成都依赖它,GH_TOKEN 可独立轮换而不影响已加密配置                                                                       |
+| `GH_BRANCH`             | ❌   | 目标分支,默认 `main`                                                                                                                                                                            |
+| `GITHUB_PROXY`          | ❌   | GitHub 代理,用于检查更新和 workflow 内拉取上游代码;触发 workflow 与查询 Actions 状态仍需部署环境可访问 `api.github.com`                                                                         |
+| `ADMIN_DISABLED`        | ❌   | 设为 `true`/`1`/`yes`/`on`(大小写不敏感)时禁用管理后台,`/admin` 显示“已禁用”,除状态探针外所有 `/api/*` 返回 403                                                                                 |
+| `DEVELOPMENT`           | ❌   | 设为 `true`/`1`/`yes`/`on`(大小写不敏感)时进入开发模式:配置与密码不持久化、加密走明文降级                                                                                                       |
 
 > 生成 `CONFIG_ENCRYPTION_KEY`:`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+
+> `CONFIG_ENCRYPTION_KEY` 需要同时提供给平台的构建环境和 Functions/运行时环境。构建期会用它解密 `public/config.json`,生成前端公开配置;如果仓库中已有密文配置但构建阶段缺少该变量,构建会失败以避免站点静默变成空配置。
 
 > ### 🎉 零配置密码
 >
@@ -167,13 +174,13 @@ pnpm dev:full     # 前端 + 后端模拟(5173 + 8788)
 
 > ### 🔒 配置文件加密
 >
-> 管理后台保存的所有配置(站点信息、API Token、歌单、Umami / GA ID 等)在写入 GitHub 仓库时**全文 AES-GCM 256 加密**,仓库中只存储 base64 密文。
+> 管理后台保存的所有配置(站点信息、API Token、歌单、Umami / GA ID 等)在写入 GitHub 仓库时**全文 AES-GCM 256 加密**,仓库中只存储 base64 密文。构建期会从中生成公开播放器配置,但 `apiToken` 不会进入前端 bundle;需要 token 的 Meting API 后续应通过专门后端代理支持。
 >
 > - **加密密钥**:从 `CONFIG_ENCRYPTION_KEY` 用 PBKDF2(100k 迭代)派生,密钥本身**不落盘、不出现在任何文件中**
 > - **密钥解耦**:`CONFIG_ENCRYPTION_KEY` 专用于加密与签名,`GH_TOKEN` 仅用于 GitHub API 读写,两者独立——`GH_TOKEN` 可随时轮换而不影响已加密的配置
 > - **加密范围**:`public/config.json`(站点配置)和 `public/admin.json`(密码哈希)均为密文存储
-> - **运行时解密**:后端 API 在返回配置给前端时自动解密,前端无感知;直接访问仓库文件或 `/admin.json` 只能看到密文
-> - **本地开发**:`GH_TOKEN` 为空或 `ghp_xxx` 开头时不加密,明文存内存,方便调试
+> - **构建期公开配置**:构建脚本解密并清洗站点公开配置后写入前端 bundle;直接访问仓库文件或 `/admin.json` 只能看到密文
+> - **本地开发**:`DEVELOPMENT=true` 时不加密,明文存内存,方便调试
 
 ### 各平台说明
 
@@ -197,7 +204,7 @@ pnpm dev:full     # 前端 + 后端模拟(5173 + 8788)
 
 - 构建命令:`pnpm build`(配置文件已指定)
 - 发布目录:`dist`(配置文件已指定)
-- 运行环境:Node 22 + pnpm 11(配置文件已指定)
+- 运行环境:Node 22 + pnpm 11.5.3(配置文件已指定)
 - 安全头、Service Worker 缓存策略、静态资源 immutable 缓存、SPA fallback 均已配置
 
 </details>
@@ -209,27 +216,12 @@ pnpm dev:full     # 前端 + 后端模拟(5173 + 8788)
 
 - 构建命令:`pnpm build`
 - 输出目录:`dist`
-- 运行环境:Node 22 + pnpm 11(配置文件已指定)
-- 安全头、Service Worker 缓存策略、静态资源 immutable 缓存、SPA fallback 均已配置
+- `wrangler.toml` 已设置 `pages_build_output_dir = "dist"`
+- 安全头、Service Worker 缓存策略、静态资源 immutable 缓存、SPA fallback 通过 [public/\_headers](public/_headers) 与 [public/\_redirects](public/_redirects) 配置,构建时会复制到 `dist`
 
 </details>
 
-<details>
-<summary><strong>GitHub Pages</strong></summary>
-
-已包含 [.github/workflows/deploy-pages.yml](.github/workflows/deploy-pages.yml),推送到 `main` 分支自动构建并部署到 GitHub Pages。
-
-工作流会依次执行测试、类型检查、Lint、构建,全绿后部署;同时按 `package.json` 版本自动打 tag。
-
-由于项目使用相对路径(`base: './'`),无需额外配置 `BASE_PATH`,项目页面(`user.github.io/Meliora`)与根仓库(`user.github.io`)均可正常工作。
-
-部署前在仓库 **Settings → Pages → Source** 选择 **GitHub Actions**。
-
-> **注意**:GitHub Pages 不支持 Edge Functions,管理后台(`/admin`)不可用,只能通过编辑 [src/config/music.ts](src/config/music.ts) 管理曲库。
-
-</details>
-
-所有平台配置统一:构建命令 `pnpm build`、输出目录 `dist`、Node 22 + pnpm 11,并保持安全头与缓存策略一致。
+所有平台配置统一:构建命令 `pnpm build`、输出目录 `dist`,并保持安全头与缓存策略一致。Node 版本遵循 `package.json` 的 `engines` 要求,Netlify 额外在 `netlify.toml` 中固定构建环境版本。
 
 ---
 
@@ -252,7 +244,7 @@ src/
 ├── components/      共享 UI 组件(ConfirmModal / ToggleSwitch / Toast 等)
 ├── composables/     业务 hook(useAudioPlayer / useBeatAnalyser 等)
 ├── stores/          Pinia 状态管理
-├── services/        远程 IO 抽象(Meting API / 歌词 / 更新)
+├── services/        远程 IO 抽象(Meting API / 歌词)
 ├── utils/           纯函数工具(无副作用、无 DOM 依赖)
 ├── workers/         Web Worker(主题色提取)
 ├── admin/           管理后台(独立子应用)

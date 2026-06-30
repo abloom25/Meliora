@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { validateConfig } from '../core/config-handler'
+import { validateMusicConfig } from '../../shared/config-schema'
 
 const validConfig = {
   siteName: 'Meliora',
@@ -10,42 +10,42 @@ const validConfig = {
 
 describe('config validation', () => {
   it('accepts a valid config', () => {
-    const result = validateConfig(validConfig)
+    const result = validateMusicConfig(validConfig)
     expect(result.valid).toBe(true)
     expect(result.errors).toHaveLength(0)
   })
 
   it('rejects non-object input', () => {
-    const result = validateConfig('not an object')
+    const result = validateMusicConfig('not an object')
     expect(result.valid).toBe(false)
     expect(result.errors).toContain('配置必须是一个对象')
   })
 
   it('rejects null input', () => {
-    const result = validateConfig(null)
+    const result = validateMusicConfig(null)
     expect(result.valid).toBe(false)
   })
 
   it('rejects missing siteName', () => {
-    const result = validateConfig({ ...validConfig, siteName: '' })
+    const result = validateMusicConfig({ ...validConfig, siteName: '' })
     expect(result.valid).toBe(false)
     expect(result.errors.some((e) => e.includes('siteName'))).toBe(true)
   })
 
   it('rejects missing apiEndpoint', () => {
-    const result = validateConfig({ ...validConfig, apiEndpoint: '' })
+    const result = validateMusicConfig({ ...validConfig, apiEndpoint: '' })
     expect(result.valid).toBe(false)
     expect(result.errors.some((e) => e.includes('apiEndpoint'))).toBe(true)
   })
 
   it('rejects non-array playlists', () => {
-    const result = validateConfig({ ...validConfig, playlists: 'not-array' })
+    const result = validateMusicConfig({ ...validConfig, playlists: 'not-array' })
     expect(result.valid).toBe(false)
     expect(result.errors.some((e) => e.includes('playlists 必须是数组'))).toBe(true)
   })
 
   it('rejects invalid server value', () => {
-    const result = validateConfig({
+    const result = validateMusicConfig({
       ...validConfig,
       playlists: [{ server: 'spotify', playlistId: '123' }],
     })
@@ -54,7 +54,7 @@ describe('config validation', () => {
   })
 
   it('rejects missing playlistId', () => {
-    const result = validateConfig({
+    const result = validateMusicConfig({
       ...validConfig,
       playlists: [{ server: 'netease' }],
     })
@@ -63,13 +63,13 @@ describe('config validation', () => {
   })
 
   it('rejects non-array localTracks', () => {
-    const result = validateConfig({ ...validConfig, localTracks: 'not-array' })
+    const result = validateMusicConfig({ ...validConfig, localTracks: 'not-array' })
     expect(result.valid).toBe(false)
     expect(result.errors.some((e) => e.includes('localTracks 必须是数组'))).toBe(true)
   })
 
   it('rejects localTrack missing audio', () => {
-    const result = validateConfig({
+    const result = validateMusicConfig({
       ...validConfig,
       localTracks: [{ id: 't1', title: 'Song', artist: 'Artist' }],
     })
@@ -78,7 +78,7 @@ describe('config validation', () => {
   })
 
   it('rejects localTrack missing id', () => {
-    const result = validateConfig({
+    const result = validateMusicConfig({
       ...validConfig,
       localTracks: [{ title: 'Song', artist: 'Artist', audio: '/x.mp3' }],
     })
@@ -87,7 +87,7 @@ describe('config validation', () => {
   })
 
   it('accepts tencent server', () => {
-    const result = validateConfig({
+    const result = validateMusicConfig({
       ...validConfig,
       playlists: [{ server: 'tencent', playlistId: '456' }],
     })

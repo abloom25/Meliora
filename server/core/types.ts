@@ -1,9 +1,21 @@
+import {
+  isDevelopmentMode as isExplicitDevelopmentMode,
+  truthy,
+  validateEncryptionKey,
+  validatePublicEnv,
+  type EnvValidation,
+  type KeyValidation,
+} from '../../shared/env-schema'
+
 export interface Env {
   GH_TOKEN: string
   GH_REPO: string
   GH_BRANCH: string
   GITHUB_PROXY?: string
   ADMIN_DISABLED?: string
+  // 显式开发模式开关。设为 true/1/yes/on(大小写、首尾空格不敏感)时进入开发模式,
+  // 配置/密码不持久化、加密签名走明文降级。
+  DEVELOPMENT?: string
   // 必填的独立配置加密密钥。配置加密与 Cookie 签名均从它派生,
   // GH_TOKEN 仅用于 GitHub API 读写,可独立轮换而不影响已加密的配置。
   CONFIG_ENCRYPTION_KEY: string
@@ -53,25 +65,23 @@ export interface ValidationResult {
   errors: string[]
 }
 
-// 本地开发模式:GH_TOKEN 为空或占位符时,配置/密码不持久化,加密与签名走明文降级。
+// 开发模式:DEVELOPMENT 显式启用。
+// 开发模式下配置/密码不持久化,加密与签名走明文降级。
 // 集中定义避免各模块重复实现导致判断条件不一致。
-export function isLocalMode(env: Env): boolean {
-  return (
-    !env.GH_TOKEN || env.GH_TOKEN.startsWith('placeholder') || env.GH_TOKEN.startsWith('ghp_xxx')
-  )
+export function isDevelopmentMode(env: Env): boolean {
+  return isExplicitDevelopmentMode(env)
 }
 
-export interface KeyValidation {
-  ok: boolean
-  error?: string
+function isBlockedIpv6Host(host: string): boolean {
+  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase()
+  if (normalized === '::' || normalized === '::1') return true
+  if (normalized.startsWith('fe80:')) return true
+  if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true
+  // IPv4-mapped IPv6 can hide private IPv4 targets after URL normalization
+  // (for example [::ffff:127.0.0.1] -> [::ffff:7f00:1]).
+  if (normalized.startsWith('::ffff:')) return true
+  return false
 }
-
-const MIN_KEY_LENGTH = 32
-// 常见弱密钥模式:全相同字符、纯顺序字符
-const WEAK_KEY_PATTERNS = [
-  /^(.)\1+$/,
-  /^(0123456789|1234567890|abcdefgh|abcdefghijklmnopqrstuvwxyz)/i,
-]
 
 // 判断 URL 是否为公网 http(s) 地址,用于防止管理员将 apiEndpoint 指向内网/元数据端点
 // 造成 SSRF(如 169.254.169.254 云元数据、localhost、私有网段)。
@@ -106,71 +116,17 @@ export function isPublicHttpUrl(raw: string): boolean {
 
   // IPv6 字面量:拒绝环回、链路本地、唯一本地地址
   if (host.startsWith('[')) {
-    if (host === '[::1]') return false
-    if (host.startsWith('[fe80')) return false
-    if (host.startsWith('[fc') || host.startsWith('[fd')) return false
+    if (isBlockedIpv6Host(host)) return false
     return true
   }
 
   return true
 }
 
-// 校验配置加密密钥强度。生产模式下 CONFIG_ENCRYPTION_KEY 必填且需达到最低强度,
-// 否则拒绝初始化(setup)并提示用户更换为随机字符串。本地开发模式不校验(不加密)。
-export function validateEncryptionKey(env: Env): KeyValidation {
-  if (isLocalMode(env)) return { ok: true }
-  const key = env.CONFIG_ENCRYPTION_KEY
-  if (!key) {
-    return {
-      ok: false,
-      error: '未设置 CONFIG_ENCRYPTION_KEY 环境变量,请在部署平台配置后再初始化',
-    }
-  }
-  if (key.length < MIN_KEY_LENGTH) {
-    return {
-      ok: false,
-      error: `CONFIG_ENCRYPTION_KEY 强度不足(至少 ${MIN_KEY_LENGTH} 位),请更换为足够长的随机字符串`,
-    }
-  }
-  for (const pattern of WEAK_KEY_PATTERNS) {
-    if (pattern.test(key)) {
-      return {
-        ok: false,
-        error: 'CONFIG_ENCRYPTION_KEY 过于简单,请更换为随机字符串',
-      }
-    }
-  }
-  return { ok: true }
-}
+export { truthy, validateEncryptionKey, type EnvValidation, type KeyValidation }
 
-export interface EnvValidation {
-  ok: boolean
-  errors: string[]
-}
-
-// 综合校验生产环境必填变量:GH_TOKEN 与 CONFIG_ENCRYPTION_KEY。
+// 综合校验生产环境必填变量:GH_REPO 与 CONFIG_ENCRYPTION_KEY。
 // 任一不满足则前端拦截到 /warning 全屏页,无法使用任何管理功能。
-// 本地开发模式直接放行,但若已设置 CONFIG_ENCRYPTION_KEY 却仍被判为本地模式
-// (GH_TOKEN 缺失/占位),视为生产环境漏配 GH_TOKEN,拒绝静默降级。
 export function validateEnv(env: Env): EnvValidation {
-  if (isLocalMode(env)) {
-    if (env.CONFIG_ENCRYPTION_KEY) {
-      return {
-        ok: false,
-        errors: [
-          'GH_TOKEN 未设置或为占位符,但已设置 CONFIG_ENCRYPTION_KEY。请配置真实 GH_TOKEN,或清除 CONFIG_ENCRYPTION_KEY 以使用本地开发模式。',
-        ],
-      }
-    }
-    return { ok: true, errors: [] }
-  }
-  const errors: string[] = []
-  if (!env.GH_TOKEN) {
-    errors.push('未设置 GH_TOKEN 环境变量,无法读写 GitHub 仓库配置')
-  }
-  const keyCheck = validateEncryptionKey(env)
-  if (!keyCheck.ok && keyCheck.error) {
-    errors.push(keyCheck.error)
-  }
-  return { ok: errors.length === 0, errors }
+  return validatePublicEnv(env)
 }

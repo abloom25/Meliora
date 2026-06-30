@@ -13,6 +13,7 @@ export const onRequest = async (context: PagesFunctionContext): Promise<Response
     GH_BRANCH: context.env.GH_BRANCH || 'main',
     GITHUB_PROXY: context.env.GITHUB_PROXY || '',
     ADMIN_DISABLED: context.env.ADMIN_DISABLED || '',
+    DEVELOPMENT: context.env.DEVELOPMENT || '',
     CONFIG_ENCRYPTION_KEY: context.env.CONFIG_ENCRYPTION_KEY || '',
   }
   return handleRequest(context.request, env)

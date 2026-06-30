@@ -1,6 +1,7 @@
 /* global self, caches, fetch, URL, Response */
 
 const CACHE_NAME = '__SW_CACHE_NAME__'
+const CACHE_PREFIX = 'meliora-shell-'
 const APP_SHELL = ['./', './manifest.webmanifest', './favicon.svg', './pwa-icon.svg']
 
 self.addEventListener('install', (event) => {
@@ -17,7 +18,11 @@ self.addEventListener('activate', (event) => {
     caches
       .keys()
       .then((keys) =>
-        Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))),
+        Promise.all(
+          keys
+            .filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME)
+            .map((key) => caches.delete(key)),
+        ),
       )
       .then(() => self.clients.claim()),
   )
@@ -34,6 +39,10 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return
   const requestUrl = new URL(event.request.url)
   if (requestUrl.origin !== self.location.origin) return
+  // API 请求(鉴权、配置等动态数据)必须始终走网络,禁止缓存。
+  // 缓存优先策略会让退出登录后的 /api/auth 仍返回旧的 { authenticated: true },
+  // 刷新页面后重新进入已登录态,导致退出登录在生产环境失效。
+  if (requestUrl.pathname.startsWith('/api/')) return
 
   if (event.request.mode === 'navigate') {
     event.respondWith(

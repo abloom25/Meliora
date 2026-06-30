@@ -1,8 +1,7 @@
 import type { Ref } from 'vue'
 import type { Track } from '../types/music'
 import { splitDisplayTitle } from '../utils/title'
-
-type HapticStyle = 'selection' | 'light' | 'medium' | 'rigid' | 'success'
+import type { HapticStyle } from './useHaptic'
 
 export interface UseTrackShareOptions {
   currentTrack: Ref<Track | null>

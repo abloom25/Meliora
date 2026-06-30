@@ -61,6 +61,7 @@
       })),
       topOffset,
       bottomOffset,
+      totalHeight: total * ITEM_HEIGHT,
       total,
     }
   })
@@ -206,56 +207,62 @@
       :class="{ scrolling: isScrolling }"
       @scroll.passive="handleScroll"
     >
-      <div :style="{ height: `${virtualItems.topOffset}px` }" />
-
-      <button
-        v-for="{ track, display, index, offset } in virtualItems.items"
-        :key="track.id"
-        :ref="(el) => bindActiveTrackElement(track.id, el)"
-        class="track-item"
-        :class="{ active: track.id === currentTrackId, focused: track.id === focusPulseTrackId }"
-        :style="{ position: 'absolute', top: `${offset}px`, left: '0', right: '0' }"
-        @click="emit('select', track)"
+      <div
+        v-if="virtualItems.total > 0"
+        class="track-virtual-spacer"
+        :style="{ height: `${virtualItems.totalHeight}px` }"
       >
-        <span class="thumb" :class="{ loaded: loadedCovers.has(track.id) }">
-          <span class="cover-placeholder"><Music :size="20" fill="currentColor" /></span>
-          <img
-            v-if="track.cover && !failedCovers.has(track.id)"
-            :src="track.cover"
-            alt=""
-            loading="lazy"
-            @load="markCoverLoaded(track.id)"
-            @error="markCoverFailed(track.id)"
-          />
-        </span>
-        <span class="track-copy">
-          <strong>
-            <span class="track-title-main">{{ display.title }}</span>
-            <span v-if="display.versions.length" class="track-title-versions">
-              <span v-for="version in display.versions" :key="version" class="track-title-version">
-                {{ version }}
-              </span>
-            </span>
-          </strong>
-          <small>{{ track.artist }}</small>
-        </span>
-        <span class="track-status">
-          <span
-            v-if="track.id === currentTrackId && isPlaying"
-            class="spectrum-meter"
-            aria-label="正在播放"
-          >
-            <i
-              v-for="(level, band) in spectrumLevels"
-              :key="band"
-              :style="{ '--spectrum-level': `${Math.max(0.08, Math.min(1, level)) * 100}%` }"
+        <button
+          v-for="{ track, display, index, offset } in virtualItems.items"
+          :key="track.id"
+          :ref="(el) => bindActiveTrackElement(track.id, el)"
+          class="track-item"
+          :class="{ active: track.id === currentTrackId, focused: track.id === focusPulseTrackId }"
+          :style="{ position: 'absolute', top: `${offset}px`, left: '0', right: '0' }"
+          @click="emit('select', track)"
+        >
+          <span class="thumb" :class="{ loaded: loadedCovers.has(track.id) }">
+            <span class="cover-placeholder"><Music :size="20" fill="currentColor" /></span>
+            <img
+              v-if="track.cover && !failedCovers.has(track.id)"
+              :src="track.cover"
+              alt=""
+              loading="lazy"
+              @load="markCoverLoaded(track.id)"
+              @error="markCoverFailed(track.id)"
             />
           </span>
-          <span v-else>{{ index + 1 }}</span>
-        </span>
-      </button>
-
-      <div :style="{ height: `${virtualItems.bottomOffset}px` }" />
+          <span class="track-copy">
+            <strong>
+              <span class="track-title-main">{{ display.title }}</span>
+              <span v-if="display.versions.length" class="track-title-versions">
+                <span
+                  v-for="version in display.versions"
+                  :key="version"
+                  class="track-title-version"
+                >
+                  {{ version }}
+                </span>
+              </span>
+            </strong>
+            <small>{{ track.artist }}</small>
+          </span>
+          <span class="track-status">
+            <span
+              v-if="track.id === currentTrackId && isPlaying"
+              class="spectrum-meter"
+              aria-label="正在播放"
+            >
+              <i
+                v-for="(level, band) in spectrumLevels"
+                :key="band"
+                :style="{ '--spectrum-level': `${Math.max(0.08, Math.min(1, level)) * 100}%` }"
+              />
+            </span>
+            <span v-else>{{ index + 1 }}</span>
+          </span>
+        </button>
+      </div>
 
       <div v-if="loading && !total" class="list-state"><span class="loader" />正在载入音乐</div>
       <div v-else-if="loadFailed && !tracks.length" class="list-state">
@@ -421,6 +428,11 @@
     &.scrolling::-webkit-scrollbar-thumb {
       background: rgba(255, 255, 255, 0.24);
     }
+  }
+
+  .track-virtual-spacer {
+    position: relative;
+    min-height: 100%;
   }
 
   .track-item {

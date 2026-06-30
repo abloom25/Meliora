@@ -1,12 +1,17 @@
-import { isLocalMode, type Env } from './types'
+import { isDevelopmentMode, type Env } from './types'
 import { getTokenVersion } from './admin-auth-store'
 
 const TOKEN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 const COOKIE_NAME = 'meliora_admin'
 
 export async function getSigningSecret(env: Env): Promise<string> {
-  if (isLocalMode(env)) {
-    return 'meliora-local-dev-signing-secret'
+  if (isDevelopmentMode(env)) {
+    // 开发模式无 CONFIG_ENCRYPTION_KEY 可用(开发便利),但仍避免使用全局常量签名密钥。
+    // 否则任何误配到公网的开发模式实例都共享同一已知密钥,Cookie 可被任意伪造。
+    // 此处以部署标识 GH_REPO 派生,使密钥随部署而异 —— GH_REPO 在公网部署中通常非全局可知,
+    // 迫使攻击者定向获取目标仓库标识才能伪造,显著抬高攻击成本。
+    // 注意:开发模式本质不安全,真正的生产防护依赖 validateEnv 拦截 + 不将开发模式暴露到公网。
+    return `meliora-local-dev-signing-secret:${env.GH_REPO?.trim() || 'default'}`
   }
   // 签名密钥原料固定使用 CONFIG_ENCRYPTION_KEY,与配置加密密钥一致且与 GH_TOKEN 解耦,
   // GH_TOKEN 轮换不影响已签发的 Cookie token。

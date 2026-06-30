@@ -1,4 +1,4 @@
-import type { GoogleAnalyticsConfig, MusicConfig, UmamiConfig } from '../types/music'
+import type { GoogleAnalyticsConfig, PublicMusicConfig, UmamiConfig } from '../types/music'
 
 const CUSTOM_CSS_ID = 'meliora-custom-css'
 const CUSTOM_JS_ID = 'meliora-custom-js'
@@ -92,7 +92,7 @@ function applyCustomJs(js: string | undefined) {
   upsertScript(CUSTOM_JS_ID, js)
 }
 
-export function applySiteIntegrations(config: MusicConfig) {
+export function applySiteIntegrations(config: PublicMusicConfig) {
   applyUmami(config.umami)
   applyGoogleAnalytics(config.googleAnalytics)
   applyGoogleSiteVerification(config.googleSiteVerification)

@@ -38,8 +38,8 @@
       return
     }
 
-    if (newPassword.value.length < 6) {
-      showMessage('新密码至少 6 位', 'error')
+    if (newPassword.value.length < 8) {
+      showMessage('新密码至少 8 位', 'error')
       return
     }
 
@@ -78,7 +78,7 @@
         <BaseInput
           v-model="newPassword"
           type="password"
-          placeholder="至少 6 位"
+          placeholder="至少 8 位"
           autocomplete="new-password"
         />
       </div>

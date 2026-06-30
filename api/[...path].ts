@@ -10,6 +10,7 @@ export default async function handler(request: Request): Promise<Response> {
     GH_BRANCH: process.env.GH_BRANCH || 'main',
     GITHUB_PROXY: process.env.GITHUB_PROXY || '',
     ADMIN_DISABLED: process.env.ADMIN_DISABLED || '',
+    DEVELOPMENT: process.env.DEVELOPMENT || '',
     CONFIG_ENCRYPTION_KEY: process.env.CONFIG_ENCRYPTION_KEY || '',
   }
   return handleRequest(request, env)

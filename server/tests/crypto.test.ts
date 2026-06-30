@@ -88,12 +88,13 @@ describe('validateEncryptionKey', () => {
     expect(result.error).toContain('简单')
   })
 
-  it('skips validation in local mode', () => {
+  it('skips validation in development mode', () => {
     const localEnv: Env = {
       GH_TOKEN: 'placeholder',
       GH_REPO: 'test/repo',
       GH_BRANCH: 'main',
       CONFIG_ENCRYPTION_KEY: '',
+      DEVELOPMENT: 'true',
     }
     expect(validateEncryptionKey(localEnv).ok).toBe(true)
   })

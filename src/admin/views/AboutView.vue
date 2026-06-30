@@ -1,8 +1,14 @@
 <script setup lang="ts">
-  import { onMounted, ref } from 'vue'
+  import { onBeforeUnmount, onMounted, ref } from 'vue'
   import { GitFork, RefreshCw, ExternalLink, Check, AlertCircle, Loader2 } from '@lucide/vue'
   import { APP_VERSION } from '../../generated/app-version'
-  import { checkUpdate, triggerUpdate, type UpdateInfo } from '../services/admin-api'
+  import {
+    checkUpdate,
+    fetchUpdateStatus,
+    triggerUpdate,
+    type UpdateInfo,
+    type UpdateStatusInfo,
+  } from '../services/admin-api'
   import type { MusicConfig } from '../../types/music'
   import ConfirmModal from '../components/ConfirmModal.vue'
 
@@ -13,18 +19,47 @@
     '基于 Vue 3、TypeScript、Pinia 和 SCSS 的沉浸式单页音乐播放器。所有远程歌单和本地音乐会合并为一个匿名曲库,页面不会显示歌单名称、平台或来源。'
 
   type CheckState = 'idle' | 'checking' | 'latest' | 'available' | 'error'
+  type UpdateRunState =
+    | 'idle'
+    | 'triggering'
+    | 'locating'
+    | 'queued'
+    | 'running'
+    | 'success'
+    | 'failed'
+    | 'cancelled'
+    | 'timed_out'
+    | 'error'
   const checkState = ref<CheckState>('idle')
+  const updateRunState = ref<UpdateRunState>('idle')
   const updateInfo = ref<UpdateInfo | null>(null)
+  const updateStatus = ref<UpdateStatusInfo | null>(null)
   const checkError = ref('')
   const showUpdateModal = ref(false)
   const updating = ref(false)
   const updateMessage = ref('')
+  const triggeredAt = ref('')
+  const triggerId = ref('')
+  const statusErrorCount = ref(0)
+  let checkController: AbortController | null = null
+  let statusController: AbortController | null = null
+  let statusTimer: number | null = null
 
   async function handleCheckUpdate(openModalOnUpdate = true) {
     if (checkState.value === 'checking') return
+    checkController?.abort()
+    checkController = new AbortController()
     checkState.value = 'checking'
     checkError.value = ''
-    const result = await checkUpdate(APP_VERSION, props.config.githubProxy)
+    const controller = checkController
+    const result = await checkUpdate(
+      APP_VERSION,
+      props.config.githubProxy,
+      props.config.receivePrereleaseUpdates === true,
+      controller.signal,
+    )
+    if (controller !== checkController) return
+    checkController = null
     if (result.ok && result.data) {
       updateInfo.value = result.data
       checkState.value = result.data.hasUpdate ? 'available' : 'latest'
@@ -32,7 +67,7 @@
         showUpdateModal.value = true
       }
     } else {
-      checkState.value = 'error'
+      checkState.value = result.error === '检查已取消' ? 'idle' : 'error'
       checkError.value = result.error || '获取失败'
     }
   }
@@ -40,19 +75,27 @@
   async function handleUpdate() {
     if (updating.value) return
     updating.value = true
+    updateRunState.value = 'triggering'
     updateMessage.value = ''
-    const result = await triggerUpdate(props.config.githubProxy)
+    clearStatusPolling()
+    const result = await triggerUpdate(
+      props.config.githubProxy,
+      updateInfo.value?.targetTag || updateInfo.value?.latestVersion || '',
+      props.config.receivePrereleaseUpdates === true,
+    )
     updating.value = false
     if (result.ok) {
       showUpdateModal.value = false
-      updateMessage.value = result.message || '已触发更新流程,请稍后刷新页面查看'
-      checkState.value = 'idle'
+      triggeredAt.value = result.triggeredAt || new Date().toISOString()
+      triggerId.value = result.triggerId || ''
+      updateRunState.value = 'locating'
+      updateMessage.value = result.message || '已触发更新流程,正在等待执行状态'
+      statusErrorCount.value = 0
+      void pollUpdateStatus(0)
     } else {
+      updateRunState.value = 'error'
       updateMessage.value = result.error || '触发失败'
     }
-    window.setTimeout(() => {
-      updateMessage.value = ''
-    }, 5000)
   }
 
   function getUpdateButtonText() {
@@ -63,8 +106,91 @@
     return '检查更新'
   }
 
+  function getRunMessage() {
+    if (updateRunState.value === 'triggering') return '正在触发更新流程...'
+    if (updateRunState.value === 'locating')
+      return '已触发更新,正在等待 GitHub Actions 创建运行记录...'
+    if (updateRunState.value === 'queued') return '更新任务已排队,等待 GitHub Actions 执行'
+    if (updateRunState.value === 'running')
+      return '正在自动同步代码并执行验证,通过后会推送到当前分支'
+    if (updateRunState.value === 'success')
+      return '更新完成,已自动同步并推送到当前分支,稍后刷新查看新版本'
+    if (updateRunState.value === 'failed') {
+      return updateStatus.value?.failure?.message || '更新失败,目标分支未写入更新'
+    }
+    if (updateRunState.value === 'cancelled') return '更新任务已取消,目标分支未写入更新'
+    if (updateRunState.value === 'timed_out') return '更新任务超时,目标分支未写入更新'
+    if (updateRunState.value === 'error')
+      return updateMessage.value || '无法获取更新状态,请稍后重试'
+    return ''
+  }
+
+  function clearStatusPolling() {
+    if (statusTimer !== null) {
+      window.clearTimeout(statusTimer)
+      statusTimer = null
+    }
+    statusController?.abort()
+    statusController = null
+  }
+
+  function scheduleStatusPolling(delayMs: number) {
+    if (!triggeredAt.value) return
+    statusTimer = window.setTimeout(() => {
+      void pollUpdateStatus()
+    }, delayMs)
+  }
+
+  function applyUpdateStatus(data: UpdateStatusInfo) {
+    updateStatus.value = data
+    if (!data.run) {
+      updateRunState.value = 'locating'
+      return
+    }
+    const status = data.run.displayStatus
+    updateRunState.value = status === 'unknown' ? 'error' : status
+    updateMessage.value = data.message
+  }
+
+  async function pollUpdateStatus(delayMs = 0) {
+    if (!triggeredAt.value) return
+    clearStatusPolling()
+    if (delayMs > 0) {
+      scheduleStatusPolling(delayMs)
+      return
+    }
+
+    statusController = new AbortController()
+    const controller = statusController
+    const result = await fetchUpdateStatus(triggeredAt.value, triggerId.value, controller.signal)
+    if (controller !== statusController) return
+    statusController = null
+
+    if (!result.ok || !result.data) {
+      statusErrorCount.value += 1
+      updateRunState.value = statusErrorCount.value >= 3 ? 'error' : updateRunState.value
+      updateMessage.value = result.error || '无法获取更新状态'
+      if (statusErrorCount.value < 3) scheduleStatusPolling(5000)
+      return
+    }
+
+    statusErrorCount.value = 0
+    applyUpdateStatus(result.data)
+    if (updateRunState.value === 'locating' || updateRunState.value === 'queued') {
+      scheduleStatusPolling(3000)
+    } else if (updateRunState.value === 'running') {
+      scheduleStatusPolling(5000)
+    }
+  }
+
   onMounted(() => {
     void handleCheckUpdate(false)
+  })
+
+  onBeforeUnmount(() => {
+    checkController?.abort()
+    checkController = null
+    clearStatusPolling()
   })
 </script>
 
@@ -106,6 +232,41 @@
 
       <Transition name="fade">
         <div v-if="updateMessage" class="update-message">{{ updateMessage }}</div>
+      </Transition>
+
+      <Transition name="fade">
+        <div v-if="updateRunState !== 'idle'" class="update-status" :class="updateRunState">
+          <div class="status-main">
+            <Loader2
+              v-if="
+                updateRunState === 'triggering' ||
+                updateRunState === 'locating' ||
+                updateRunState === 'queued' ||
+                updateRunState === 'running'
+              "
+              :size="15"
+              class="spin"
+            />
+            <Check v-else-if="updateRunState === 'success'" :size="15" />
+            <AlertCircle v-else :size="15" />
+            <span>{{ getRunMessage() }}</span>
+          </div>
+          <div v-if="updateStatus?.run?.htmlUrl" class="status-links">
+            <a :href="updateStatus.run.htmlUrl" target="_blank" rel="noopener noreferrer">
+              查看 GitHub Actions
+              <ExternalLink :size="12" />
+            </a>
+            <a
+              v-if="updateStatus.run.latestCommitUrl && updateRunState === 'success'"
+              :href="updateStatus.run.latestCommitUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              查看更新提交
+              <ExternalLink :size="12" />
+            </a>
+          </div>
+        </div>
       </Transition>
     </div>
 
@@ -276,6 +437,61 @@
     border: 1px solid color-mix(in srgb, var(--accent), transparent 75%);
     color: var(--accent);
     font-size: 0.8rem;
+  }
+
+  .update-status {
+    width: min(520px, 100%);
+    margin-top: 14px;
+    padding: 12px 14px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 14px;
+    background: rgba(0, 0, 0, 0.24);
+    color: rgba(255, 255, 255, 0.78);
+    font-size: 0.78rem;
+    text-align: left;
+
+    &.success {
+      border-color: rgba(109, 213, 140, 0.3);
+      color: #7ee09a;
+    }
+
+    &.failed,
+    &.cancelled,
+    &.timed_out,
+    &.error {
+      border-color: rgba(255, 99, 99, 0.36);
+      color: #ff9a9a;
+    }
+  }
+
+  .status-main,
+  .status-links a {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .status-main {
+    line-height: 1.5;
+  }
+
+  .status-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 10px;
+
+    a {
+      color: inherit;
+      font-size: 0.74rem;
+      text-decoration: none;
+      opacity: 0.86;
+
+      &:hover {
+        opacity: 1;
+        text-decoration: underline;
+      }
+    }
   }
 
   .modal-head {

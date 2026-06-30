@@ -12,7 +12,7 @@ const LYRICS_FETCH_TIMEOUT_MS = 8000
 
 export function loadLyricsText(url: string, signal?: AbortSignal): Promise<string> {
   const existing = lyricsCache.get(url)
-  if (existing) return existing.promise
+  if (existing) return withAbortSignal(existing.promise, signal, existing.ready)
 
   // 本地 controller：负责超时中止；同时把外部 signal 的 abort 事件转发过来
   const controller = new AbortController()
@@ -59,6 +59,39 @@ export function loadLyricsText(url: string, signal?: AbortSignal): Promise<strin
 
   lyricsCache.set(url, entry)
   return entry.promise
+}
+
+function withAbortSignal(
+  promise: Promise<string>,
+  signal: AbortSignal | undefined,
+  alreadyReady: boolean,
+): Promise<string> {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.reject(createAbortReason(signal))
+  if (alreadyReady) return promise
+
+  return new Promise<string>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup()
+      reject(createAbortReason(signal))
+    }
+    const cleanup = () => signal.removeEventListener('abort', onAbort)
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (text) => {
+        cleanup()
+        resolve(text)
+      },
+      (error) => {
+        cleanup()
+        reject(error)
+      },
+    )
+  })
+}
+
+function createAbortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('Aborted', 'AbortError')
 }
 
 export function hasCachedLyrics(url: string): boolean {

@@ -8,8 +8,8 @@ import {
   setupPassword,
   changePassword,
 } from './admin-auth-store'
-import { validateEnv } from './types'
-import { checkUpdate, triggerUpdate } from './update-handler'
+import { isDevelopmentMode, validateEnv } from './types'
+import { checkUpdate, getUpdateStatus, triggerUpdate } from './update-handler'
 import { testMusicApi } from './music-api-tester'
 import { consumeRateLimit, resetRateLimit } from './rate-limit'
 import { renderEnvNotReadyPage, renderDisabledPage } from './status-pages'
@@ -33,6 +33,20 @@ const UPDATE_RATE_LIMIT = {
   limit: 3,
   windowMs: 10 * 60 * 1000,
   blockMs: 15 * 60 * 1000,
+}
+
+const CHECK_UPDATE_RATE_LIMIT = {
+  key: 'check-update',
+  limit: 10,
+  windowMs: 10 * 60 * 1000,
+  blockMs: 5 * 60 * 1000,
+}
+
+const UPDATE_STATUS_RATE_LIMIT = {
+  key: 'update-status',
+  limit: 240,
+  windowMs: 15 * 60 * 1000,
+  blockMs: 2 * 60 * 1000,
 }
 
 // changePassword 执行 PBKDF2 100k 迭代(CPU 密集),token 泄露后可被滥用消耗 CPU,故限流。
@@ -80,6 +94,55 @@ function isStatusProbe(path: string, method: string): boolean {
   return method === 'GET' && (path === '/api/setup-status' || path === '/api/status-page')
 }
 
+function isApiWriteRequest(path: string, method: string): boolean {
+  return path.startsWith('/api/') && (method === 'POST' || method === 'PUT' || method === 'DELETE')
+}
+
+function headerMatchesRequestOrigin(headerValue: string, requestOrigin: string): boolean {
+  try {
+    return new URL(headerValue).origin === requestOrigin
+  } catch {
+    return false
+  }
+}
+
+function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const { hostname, protocol } = new URL(origin)
+    return (
+      protocol === 'http:' &&
+      (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]')
+    )
+  } catch {
+    return false
+  }
+}
+
+function headerOriginIsAllowed(headerValue: string, requestOrigin: string, env: Env): boolean {
+  if (headerMatchesRequestOrigin(headerValue, requestOrigin)) return true
+  return isDevelopmentMode(env) && isLoopbackOrigin(headerValue) && isLoopbackOrigin(requestOrigin)
+}
+
+function passesSameOriginWriteCheck(request: Request, url: URL, env: Env): boolean {
+  const origin = request.headers.get('Origin')
+  if (origin) {
+    return headerOriginIsAllowed(origin, url.origin, env)
+  }
+
+  const referer = request.headers.get('Referer')
+  if (referer) {
+    return headerOriginIsAllowed(referer, url.origin, env)
+  }
+
+  // 服务端调用、CLI、部分同源表单请求可能没有 Origin/Referer,保留这些合理调用。
+  return true
+}
+
+function isJsonRequest(request: Request): boolean {
+  const contentType = request.headers.get('Content-Type') || ''
+  return contentType.split(';', 1)[0].trim().toLowerCase() === 'application/json'
+}
+
 export async function handleRequest(request: Request, env: Env): Promise<Response> {
   if (request.method === 'OPTIONS') {
     // 管理后台 API 为同域调用(SameSite=Lax Cookie 鉴权),不需要跨域 CORS 支持。
@@ -91,6 +154,10 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
   const url = new URL(request.url)
   const path = url.pathname
 
+  if (path === '/api/runtime-config') {
+    return jsonResponse({ error: '未找到' }, 404)
+  }
+
   const envCheck = validateEnv(env)
   const isDisabled = isDisabledValue(env.ADMIN_DISABLED)
 
@@ -98,11 +165,11 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     if (isStatusProbe(path, request.method)) {
       return isDisabled ? renderDisabledPage() : renderEnvNotReadyPage(envCheck)
     }
-    // 播放器加载配置不依赖管理后台,禁用或环境未就绪时仍放行,保证前端播放能力可用。
-    if (path === '/api/runtime-config' && request.method === 'GET') {
-      return getConfig(env)
-    }
     return jsonResponse({ error: isDisabled ? '管理后台已禁用' : '环境变量未就绪' }, 403)
+  }
+
+  if (isApiWriteRequest(path, request.method) && !passesSameOriginWriteCheck(request, url, env)) {
+    return jsonResponse({ error: '跨站请求已拒绝' }, 403)
   }
 
   try {
@@ -162,31 +229,69 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       return jsonResponse({ success: true }, 200, { 'Set-Cookie': createCookieHeader(token) })
     }
 
-    if (path === '/api/runtime-config' && request.method === 'GET') {
-      return getConfig(env)
-    }
-
-    if (path === '/api/check-update' && request.method === 'GET') {
+    if (path === '/api/check-update' && request.method === 'POST') {
       if (!(await verifyAuth(request, env))) {
         return jsonResponse({ error: '未授权' }, 401)
       }
+      if (!isJsonRequest(request)) {
+        return jsonResponse({ error: 'Content-Type 必须为 application/json' }, 415)
+      }
+      const rateLimit = consumeRateLimit(request, CHECK_UPDATE_RATE_LIMIT)
+      if (!rateLimit.allowed) {
+        return rateLimitResponse(rateLimit.retryAfterSeconds)
+      }
+      const body = (await request.json().catch(() => ({}))) as {
+        current?: string
+        githubProxy?: string
+        receivePrereleaseUpdates?: boolean
+      }
       return checkUpdate(
-        url.searchParams.get('current') || '',
+        body.current || '',
         env,
-        url.searchParams.get('githubProxy') || undefined,
+        body.githubProxy || undefined,
+        body.receivePrereleaseUpdates === true,
       )
+    }
+
+    if (path === '/api/update/status' && request.method === 'GET') {
+      if (!(await verifyAuth(request, env))) {
+        return jsonResponse({ error: '未授权' }, 401)
+      }
+      const rateLimit = consumeRateLimit(request, UPDATE_STATUS_RATE_LIMIT)
+      if (!rateLimit.allowed) {
+        return rateLimitResponse(rateLimit.retryAfterSeconds)
+      }
+      const response = await getUpdateStatus(
+        env,
+        url.searchParams.get('since'),
+        url.searchParams.get('triggerId') || '',
+      )
+      response.headers.set('Cache-Control', 'no-store')
+      return response
     }
 
     if (path === '/api/update' && request.method === 'POST') {
       if (!(await verifyAuth(request, env))) {
         return jsonResponse({ error: '未授权' }, 401)
       }
+      if (!isJsonRequest(request)) {
+        return jsonResponse({ error: 'Content-Type 必须为 application/json' }, 415)
+      }
       const rateLimit = consumeRateLimit(request, UPDATE_RATE_LIMIT)
       if (!rateLimit.allowed) {
         return rateLimitResponse(rateLimit.retryAfterSeconds)
       }
-      const body = (await request.json().catch(() => ({}))) as { githubProxy?: string }
-      return triggerUpdate(env, body.githubProxy)
+      const body = (await request.json().catch(() => ({}))) as {
+        githubProxy?: string
+        targetTag?: string
+        receivePrereleaseUpdates?: boolean
+      }
+      return triggerUpdate(
+        env,
+        body.githubProxy,
+        body.targetTag,
+        body.receivePrereleaseUpdates === true,
+      )
     }
 
     if (path === '/api/change-password' && request.method === 'POST') {
@@ -253,9 +358,10 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         return jsonResponse({ error: '缺少 path 或 content' }, 400)
       }
       // 限制单次上传体积,防止超大 base64 撑爆 Edge 实例内存。
-      // content 为 base64 字符串,长度 × 3/4 ≈ 解码后字节数,按字符串长度粗略限制 25MB。
+      // content 为 base64 字符串,按 ceil(bytes / 3) * 4 精确匹配 25MiB 文件边界。
       const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
-      if (body.content.length > (MAX_UPLOAD_BYTES * 4) / 3) {
+      const MAX_UPLOAD_BASE64_LENGTH = Math.ceil(MAX_UPLOAD_BYTES / 3) * 4
+      if (body.content.length > MAX_UPLOAD_BASE64_LENGTH) {
         return jsonResponse({ error: '文件过大,最大 25MB' }, 413)
       }
       return uploadFile({ path: body.path, content: body.content }, env)
