@@ -315,6 +315,11 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       // Ignore disconnect errors during teardown.
     }
     analyser = null
+    // 挂起共享 AudioContext 释放音频硬件资源；SPA 生命周期内不 close，
+    // 后续 startBeatAnalysis 可通过 resume() 恢复。
+    if (sharedAudioContext?.state === 'running') {
+      void sharedAudioContext.suspend()
+    }
     audioContext = null
   })
 

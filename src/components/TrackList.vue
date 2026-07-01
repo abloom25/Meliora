@@ -77,7 +77,6 @@
   }
 
   function handleSearchInput(value: string) {
-    debouncedQuery.value = value
     window.clearTimeout(searchTimer)
     searchTimer = window.setTimeout(() => {
       emit('update:query', value)
@@ -146,12 +145,9 @@
     () => props.currentTrackId,
     () => void scrollActiveTrackIntoView(),
   )
-  watch(
-    () => props.query,
-    (value) => {
-      debouncedQuery.value = value
-    },
-  )
+  watch(debouncedQuery, (value) => {
+    handleSearchInput(value)
+  })
   // 用 tracks.length + 首个 track.id 替代全量 concat.join，避免 O(n) 字符串拼接
   watch(
     () => [props.tracks.length, props.tracks[0]?.id],
@@ -179,12 +175,7 @@
       <div class="search-row">
         <label class="search-box">
           <Search :size="16" />
-          <input
-            :value="debouncedQuery"
-            type="search"
-            placeholder="搜索"
-            @input="handleSearchInput(($event.target as HTMLInputElement).value)"
-          />
+          <input v-model="debouncedQuery" type="search" placeholder="搜索" />
           <button v-if="query" aria-label="清空搜索" @click="clearSearch">
             <X :size="14" />
           </button>

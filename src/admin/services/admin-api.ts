@@ -5,6 +5,7 @@ import { markAdminUnauthenticated } from '../composables/useAdminAuth'
 export interface SaveResult {
   ok: boolean
   error?: string
+  warning?: string
   message?: string
   triggeredAt?: string
   triggerId?: string
@@ -98,9 +99,40 @@ export async function saveConfig(config: MusicConfig): Promise<SaveResult> {
         error: data.details?.join('; ') || data.error || '保存失败',
       }
     }
+    if (import.meta.env.DEV) {
+      const synced = await syncLocalGeneratedConfig(config)
+      if (!synced.ok) {
+        return {
+          ok: true,
+          warning: `后端配置已保存,但本地播放器配置同步失败:${synced.error || '未知错误'}`,
+        }
+      }
+    }
     return { ok: true }
   } catch {
     return { ok: false, error: '网络错误' }
+  }
+}
+
+async function syncLocalGeneratedConfig(
+  config: MusicConfig,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const response = await fetch('/__meliora-dev/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    })
+    if (!response.ok) {
+      const data = (await response.json().catch(() => ({}))) as {
+        error?: string
+        details?: string[]
+      }
+      return { ok: false, error: data.details?.join('; ') || data.error || '同步失败' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, error: '同步接口不可用' }
   }
 }
 

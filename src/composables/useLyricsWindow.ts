@@ -336,7 +336,9 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
   }
 
   async function openViaWindowOpen(): Promise<Window> {
-    // Safari 不支持 noopener 之外的某些特性字符串,popup 确保是新窗口
+    // 使用固定的窗口名称 'meliora-lyrics' 以便跨 toggle 操作重用同一窗口。
+    // teardownWindow 在关闭/切换前会清理 cachedNodes 和事件监听器，
+    // render() 开头通过 isWindowClosed 守卫确保不会在已销毁窗口上操作 DOM。
     const win = window.open('', 'meliora-lyrics', 'popup,width=430,height=600,resizable=yes')
     if (!win) throw new Error('Lyrics window was blocked')
     await createDocument(win)

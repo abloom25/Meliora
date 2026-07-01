@@ -4,7 +4,29 @@ import { defineComponent, h, nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
 import { useAudioPlayer } from '../composables/useAudioPlayer'
 import { usePlayerStore } from '../stores/player'
+import { shouldUseIOSBackgroundSafeAudio } from '../utils/browser'
 import type { Track } from '../types/music'
+
+const startBeatAnalysisMock = vi.fn()
+
+vi.mock('../utils/browser', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/browser')>()
+  return {
+    ...actual,
+    shouldUseIOSBackgroundSafeAudio: vi.fn(() => false),
+  }
+})
+
+vi.mock('../composables/useBeatAnalyser', () => ({
+  useBeatAnalyser: vi.fn(() => ({
+    beatLevel: { value: 0 },
+    spectrumLevels: { value: [0.1, 0.1, 0.1, 0.1] },
+    startBeatAnalysis: startBeatAnalysisMock,
+    stopBeatAnalysis: vi.fn(),
+  })),
+}))
+
+const mockedShouldUseIOSBackgroundSafeAudio = vi.mocked(shouldUseIOSBackgroundSafeAudio)
 
 const tracks: Track[] = [
   { id: '1', title: 'One', artist: 'A', audioUrl: '/1.mp3', kind: 'local' },
@@ -41,8 +63,15 @@ function mountPlayer() {
 }
 
 describe('useAudioPlayer', () => {
-  beforeEach(() => setActivePinia(createPinia()))
-  afterEach(() => vi.restoreAllMocks())
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockedShouldUseIOSBackgroundSafeAudio.mockReturnValue(false)
+    startBeatAnalysisMock.mockClear()
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    document.body.innerHTML = ''
+  })
 
   it('exposes the expected public API', () => {
     const restore = stubAudioPlay()
@@ -121,6 +150,60 @@ describe('useAudioPlayer', () => {
       player.seek(30)
       // currentTime should update immediately for UI feedback
       expect(store.currentTime).toBe(30)
+    } finally {
+      restore()
+    }
+  })
+
+  it('creates inline audio elements for iOS-compatible background playback', () => {
+    mockedShouldUseIOSBackgroundSafeAudio.mockReturnValue(true)
+    const restore = stubAudioPlay()
+    try {
+      const { wrapper } = mountPlayer()
+      const audio = document.body.querySelector('audio')
+
+      expect(audio).toBeInstanceOf(HTMLAudioElement)
+      expect(audio?.hasAttribute('playsinline')).toBe(true)
+      expect(audio?.hasAttribute('webkit-playsinline')).toBe(true)
+
+      wrapper.unmount()
+      expect(document.body.querySelector('audio')).toBeNull()
+    } finally {
+      restore()
+    }
+  })
+
+  it('skips Web Audio beat analysis in iOS background-safe mode', async () => {
+    mockedShouldUseIOSBackgroundSafeAudio.mockReturnValue(true)
+    const restore = stubAudioPlay()
+    try {
+      const { player, store } = mountPlayer()
+      store.selectTrack(tracks[0]!, tracks)
+      await player.play()
+
+      expect(store.isPlaying).toBe(true)
+      expect(startBeatAnalysisMock).not.toHaveBeenCalled()
+    } finally {
+      restore()
+    }
+  })
+
+  it('does not auto-crossfade near track end in iOS background-safe mode', async () => {
+    mockedShouldUseIOSBackgroundSafeAudio.mockReturnValue(true)
+    const restore = stubAudioPlay()
+    try {
+      const { player, store } = mountPlayer()
+      store.settings.smoothTrackChange = true
+      store.selectTrack(tracks[0]!, tracks)
+      await player.play()
+
+      const audio = document.body.querySelector('audio')!
+      Object.defineProperty(audio, 'duration', { configurable: true, value: 10 })
+      audio.currentTime = 9.8
+      audio.dispatchEvent(new Event('timeupdate'))
+      await nextTick()
+
+      expect(store.currentTrackId).toBe('1')
     } finally {
       restore()
     }

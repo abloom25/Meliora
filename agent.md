@@ -111,7 +111,7 @@
 严格保持以下分层,**禁止**跨层倒置依赖:
 
 ```
-入口      src/main.ts → src/App.vue
+入口      src/main.ts → src/App.vue → src/views/PlayerView.vue
 状态      src/stores/         Pinia store
 编排      src/App.vue         只装配,不写业务
 能力      src/composables/    业务 hook(命名 useXxx)
@@ -125,7 +125,7 @@ PWA       public/sw.js, public/manifest.webmanifest
 脚本      scripts/            构建期 node 脚本
 ```
 
-依赖方向:`components / App.vue → composables → services / stores → utils / types`;Worker 入口仅允许 `import` `src/utils/` 中标记为 DOM-free 的纯模块。
+依赖方向:`views / components → composables → services / stores → utils / types`;Worker 入口仅允许 `import` `src/utils/` 中标记为 DOM-free 的纯模块。
 
 - `utils` **不得** import composables / services / stores / components。
 - `services` **不得** import composables / components。
@@ -246,7 +246,7 @@ PWA       public/sw.js, public/manifest.webmanifest
 - 命名过渡(`<Transition name="xxx">`)集中放在组件局部样式或 `global.scss`,命名采用 `domain-action` 形式(`artwork-bg-swap`、`lyrics-panel-swap`、`settings-drop`)。
 - 列表/抽屉/弹层进出场必须有动画,且持续时间在 180~420ms 之间;超过 600ms 仅用于"沉浸式"场景(如歌词牵引、主题色过渡)。
 - 长列表滚动到目标行优先采用 **FLIP** 技巧(参考 `LyricsPanel.scrollToIndex`)。
-- **路由级切换**必须用 `<router-view v-slot="{ Component }">` + `<Transition mode="out-in">`(参考 `AppShell.vue`),确保路由切换有淡入淡出。
+- **路由级切换**必须用 `<router-view v-slot="{ Component }">` + `<Transition mode="out-in">`(参考 `App.vue`),确保路由切换有淡入淡出。
 - **同容器多视图互斥切换**(如 `AdminApp.vue` 的 Setup/Login/Dashboard)必须用 `<Transition mode="out-in">` 包裹,`mode="out-in"` 确保旧组件先淡出再淡入新组件,避免布局跳动。
 - **浮层(弹窗/通知)**必须先 `<Teleport to="body">` 再 `<Transition>`。**禁止**将 `position: fixed` 的浮层直接放在带 `backdrop-filter` 或 `transform` 的父容器内——这些属性会建立包含块,导致 `fixed` 被困在父容器内变成"全屏"bug。所有 `ConfirmModal`/`Toast` 已内置 Teleport,业务方无需额外处理。
 
@@ -281,7 +281,7 @@ PWA       public/sw.js, public/manifest.webmanifest
 - **accent 半透明色派生**:
   - 管理后台(`src/admin/`)下**禁止**使用 `rgba(var(--accent-rgb, fallback), α)`——`--accent-rgb` 仅在播放器主界面由 `useThemeAccent` 通过 JS 运行时设置,admin 页面未定义该变量会永远卡在 fallback 值,导致用户自定义 `--accent` 时选中态/徽章等不跟随变化。
   - admin 下统一用 `color-mix(in srgb, var(--accent), transparent X%)` 从 `--accent` 派生半透明色(`--accent` 已用 `@property` 注册为 `<color>`,`color-mix` 可正确解析)。α→X% 换算:`X% = round((1-α) × 100)`。
-  - 播放器主界面(`src/App.vue`)可继续使用 `rgba(var(--accent-rgb), α)`,因为 JS 会设置该变量;但涉及 `calc()` 动态计算 alpha 的场景(如节拍亮度)仍须用 `--accent-rgb`(`color-mix` 不支持动态 alpha 计算)。
+  - 播放器主界面(`src/views/PlayerView.vue`)可继续使用 `rgba(var(--accent-rgb), α)`,因为 JS 会设置该变量;但涉及 `calc()` 动态计算 alpha 的场景(如节拍亮度)仍须用 `--accent-rgb`(`color-mix` 不支持动态 alpha 计算)。
 
 ---
 

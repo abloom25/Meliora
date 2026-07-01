@@ -1,10 +1,10 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import AppShell from './AppShell.vue'
+import App from './App.vue'
 import router from './router'
 import './styles/global.scss'
 
-const app = createApp(AppShell)
+const app = createApp(App)
 
 app.config.errorHandler = (error, _instance, info) => {
   console.error('[全局错误]', info, error)

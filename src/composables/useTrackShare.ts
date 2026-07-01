@@ -1,5 +1,6 @@
 import type { Ref } from 'vue'
 import type { Track } from '../types/music'
+import { createTrackShareId } from '../utils/tracks'
 import { splitDisplayTitle } from '../utils/title'
 import type { HapticStyle } from './useHaptic'
 
@@ -30,18 +31,17 @@ export function useTrackShare(options: UseTrackShareOptions) {
     if (!track) return
     onTriggerHaptic('light')
 
-    const url = new URL(window.location.href)
-    url.searchParams.set('track', track.id)
-    url.hash = ''
+    const url = new URL(window.location.pathname, window.location.origin)
+    url.searchParams.set('share', createTrackShareId(track))
     const displayTitle = splitDisplayTitle(track.title).title
     const shareTitle = `${displayTitle} - ${track.artist}`
-    const shareText = `正在 Meliora 收听 ${shareTitle}`
+    const shareText = `Meliora: ${shareTitle}`
     const shareData = {
       title: shareTitle,
       text: shareText,
       url: url.href,
     }
-    const clipboardText = `${shareText}\n${url.href}`
+    const clipboardText = `${shareTitle}\n${url.href}`
 
     try {
       if (navigator.share && (!navigator.canShare || navigator.canShare(shareData))) {

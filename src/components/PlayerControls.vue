@@ -6,7 +6,7 @@
 
   const props = withDefaults(
     defineProps<{
-      variant?: 'bar' | 'page' | 'progress' | 'mini'
+      variant?: 'bar' | 'page' | 'progress' | 'mini' | 'vertical'
       onToggle: () => void
       onPrevious: () => void
       onNext: () => void
@@ -80,7 +80,7 @@
         </button>
       </div>
 
-      <div v-if="variant !== 'bar'" class="progress-row">
+      <div v-if="variant !== 'bar' && variant !== 'vertical'" class="progress-row">
         <span v-if="variant === 'progress'" class="time elapsed">{{
           formatTime(displayTime)
         }}</span>
@@ -364,6 +364,58 @@
 
   .is-mini {
     display: block;
+  }
+
+  .is-vertical {
+    display: block;
+    width: 54px;
+
+    .transport {
+      min-width: 0;
+      width: 100%;
+      max-width: none;
+      flex: none;
+    }
+
+    .transport-buttons {
+      flex-direction: column;
+      gap: 8px;
+      padding: 6px 0;
+    }
+
+    .control-button {
+      width: 38px;
+      height: 38px;
+      color: rgba(255, 255, 255, 0.7);
+
+      &:hover {
+        background: rgba(255, 255, 255, 0.09);
+        color: rgba(255, 255, 255, 0.94);
+      }
+
+      &:focus-visible {
+        background: rgba(255, 255, 255, 0.12);
+      }
+    }
+
+    .play-button {
+      width: 46px;
+      height: 46px;
+      background: rgba(255, 255, 255, 0.9);
+      color: rgba(18, 18, 20, 0.9);
+      box-shadow:
+        0 8px 22px rgba(0, 0, 0, 0.2),
+        inset 0 1px rgba(255, 255, 255, 0.45);
+
+      &:hover {
+        background: #fff;
+        transform: scale(1.05);
+      }
+
+      &:focus-visible {
+        outline-offset: 4px;
+      }
+    }
   }
 
   .mini-buttons {

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { deduplicateTracks, filterTracks, mapMetingTrack } from '../utils/tracks'
+import {
+  createTrackShareId,
+  deduplicateTracks,
+  filterTracks,
+  mapMetingTrack,
+} from '../utils/tracks'
 import type { Track } from '../types/music'
 
 const tracks: Track[] = [
@@ -45,5 +50,35 @@ describe('track utilities', () => {
         kind: 'meting',
       },
     )
+  })
+
+  it('creates short share ids without exposing media urls', () => {
+    const track = mapMetingTrack(
+      {
+        title: 'Song',
+        author: 'Singer',
+        url: 'https://api.example.com/song/url?id=123&token=secret',
+      },
+      'netease:123',
+      0,
+    )
+
+    expect(track).not.toBeNull()
+    const shareId = createTrackShareId(track!)
+
+    expect(shareId).toMatch(/^[a-z0-9]+$/)
+    expect(shareId).not.toContain('api.example.com')
+    expect(shareId).not.toContain('secret')
+    expect(shareId.length).toBeLessThan(16)
+  })
+
+  it('does not treat internal track ids as share ids', () => {
+    const track = {
+      ...tracks[0]!,
+      id: 'meting:netease:123:0:https://api.example.com/song/url?id=123',
+      kind: 'meting' as const,
+    }
+
+    expect(createTrackShareId(track)).not.toBe(track.id)
   })
 })

@@ -25,6 +25,7 @@ src/generated/
 .vercel
 .wrangler
 .netlify
+.meliora
 
 # Editor directories and files
 .vscode/*

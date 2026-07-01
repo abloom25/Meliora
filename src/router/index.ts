@@ -1,10 +1,10 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import App from '../App.vue'
+import PlayerView from '../views/PlayerView.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
-    { path: '/', name: 'player', component: App },
+    { path: '/', name: 'player', component: PlayerView },
     {
       path: '/admin',
       name: 'admin',

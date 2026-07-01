@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
@@ -238,6 +238,34 @@ describe('generate-public-config', () => {
       const source = await readFile(result.adminEnvTargetPath, 'utf8')
 
       expect(source).toContain("status: 'idle'")
+    })
+  })
+
+  it('prefers local development config when loading dev vars for local development', async () => {
+    await withTempCwd(async (dir) => {
+      process.env.MELIORA_LOAD_DEV_VARS = 'true'
+      await writeFile(join(dir, '.dev.vars'), 'DEVELOPMENT=true\n')
+      await mkdir(join(dir, '.meliora'), { recursive: true })
+      await writeFile(
+        join(dir, '.meliora/config.local.json'),
+        JSON.stringify({
+          siteName: 'Local Generated Meliora',
+          apiEndpoint: '',
+          playlists: [],
+          localTracks: [
+            { id: 'local', title: 'Local Song', artist: 'Artist', audio: '/music/local.mp3' },
+          ],
+        }),
+      )
+
+      const result = await generatePublicConfig({
+        targetPath: join(dir, 'public-config.ts'),
+        adminEnvTargetPath: join(dir, 'admin-env.ts'),
+      })
+      const source = await readFile(result.targetPath, 'utf8')
+
+      expect(result.config.siteName).toBe('Local Generated Meliora')
+      expect(source).toContain("siteName: 'Local Generated Meliora'")
     })
   })
 

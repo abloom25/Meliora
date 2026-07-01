@@ -2,6 +2,7 @@ import { onBeforeUnmount, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
 import type { Track } from '../types/music'
+import { shouldUseIOSBackgroundSafeAudio } from '../utils/browser'
 import { useBeatAnalyser } from './useBeatAnalyser'
 import { useEqualizer } from './useEqualizer'
 import {
@@ -25,6 +26,8 @@ function createAudio(
 ) {
   const audio = new Audio()
   audio.preload = preload
+  audio.setAttribute('playsinline', '')
+  audio.setAttribute('webkit-playsinline', '')
   if (crossOrigin) audio.crossOrigin = crossOrigin
   return audio
 }
@@ -46,6 +49,7 @@ export interface UseAudioPlayerOptions {
 export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   const store = usePlayerStore()
   const { currentTrack, isPlaying, currentTime, duration, settings } = storeToRefs(store)
+  const iosBackgroundSafeAudio = shouldUseIOSBackgroundSafeAudio()
   const players: HTMLAudioElement[] = [
     createAudio('metadata'),
     createAudio('auto'),
@@ -67,6 +71,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   const pendingSeekTime = ref<number | null>(null)
   let beatAnalysisDegraded = false
   let degradationWarned = false
+  let iosAudioHost: HTMLDivElement | null = null
   // 前向声明：onTainted 回调需在 usePreloadPool 之后才能绑定（依赖 preloadSlots）。
   let taintedHandler: ((audio: HTMLAudioElement) => void) | null = null
 
@@ -88,6 +93,25 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     }, delay)
     pendingPlayerTimeouts.add(handle)
     return handle
+  }
+
+  function ensureIOSAudioHost() {
+    if (!iosBackgroundSafeAudio || typeof document === 'undefined') return null
+    if (iosAudioHost?.isConnected) return iosAudioHost
+    iosAudioHost = document.createElement('div')
+    iosAudioHost.setAttribute('aria-hidden', 'true')
+    iosAudioHost.style.cssText =
+      'position:fixed;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none;left:-9999px;bottom:0;'
+    document.body.append(iosAudioHost)
+    return iosAudioHost
+  }
+
+  function mountActiveAudioForIOS() {
+    const host = ensureIOSAudioHost()
+    if (!host) return
+    if (activeAudio.parentNode !== host) {
+      host.replaceChildren(activeAudio)
+    }
   }
 
   const { bindFilters: bindEqFilters } = useEqualizer({ settings })
@@ -219,6 +243,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   }
 
   function guardedStartBeatAnalysis() {
+    if (iosBackgroundSafeAudio) return
     if (beatAnalysisDegraded) return
     void startBeatAnalysis()
   }
@@ -469,7 +494,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     const controller = createSwitchAbort()
     try {
       const wasPlaying = isPlaying.value
-      const useCrossfade = settings.value.smoothTrackChange && wasPlaying && shouldPlay
+      const useCrossfade =
+        !iosBackgroundSafeAudio && settings.value.smoothTrackChange && wasPlaying && shouldPlay
       const slot = findSlotByTrack(track) ?? preloadSlots[direction]
 
       if (waitForReady) {
@@ -510,6 +536,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       }
 
       const { oldAudio, newAudio } = replaceActiveWithSlot(slot, direction)
+      mountActiveAudioForIOS()
       // 仅在必要时重置 currentTime，避免对预加载 slot（已经是 0）做重复浏览器调用。
       if (newAudio.currentTime > 0.01) newAudio.currentTime = 0
       setPlayerVolume(newAudio, useCrossfade ? 0 : 1)
@@ -580,6 +607,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
           if (settings.value.skipOnError && queue.length > 1) {
             preloadMessage.value = `已跳过暂时无法播放的歌曲，正在继续播放`
             activeAudio = oldAudio
+            mountActiveAudioForIOS()
             const reverseSlot = preloadSlots[direction === 'next' ? 'previous' : 'next']
             reverseSlot.audio = newAudio
             reverseSlot.track = null
@@ -663,6 +691,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       if (playerState.value !== 'idle') return
       const resolvedUrl = new URL(track.audioUrl, window.location.href).href
       if (activeAudio.src === resolvedUrl) return
+      mountActiveAudioForIOS()
       activeAudio.src = track.audioUrl
       activeAudio.load()
       automaticCrossfadeStarted = false
@@ -708,6 +737,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       const nextSlot = preloadSlots.next
       if (
         settings.value.smoothTrackChange &&
+        !iosBackgroundSafeAudio &&
         nextSlot.track &&
         nextSlot.ready &&
         !automaticCrossfadeStarted &&
@@ -821,6 +851,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   for (const audio of players) {
     bindAudioEventListeners(audio)
   }
+  mountActiveAudioForIOS()
 
   const MEDIA_SESSION_ACTIONS: MediaSessionAction[] = [
     'play',
@@ -876,6 +907,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       audio.pause()
       audio.src = ''
     }
+    iosAudioHost?.remove()
+    iosAudioHost = null
     if ('mediaSession' in navigator) {
       for (const action of MEDIA_SESSION_ACTIONS) {
         try {

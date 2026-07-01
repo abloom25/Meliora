@@ -178,6 +178,8 @@ export function useDrawerSheet({
 
   function handlePointerMove(e: PointerEvent) {
     if (!state || e.pointerId !== state.pointerId) return
+    // handle 发起的拖拽不需要 container 的 move 事件再处理一次
+    if (state.source === 'handle' && e.currentTarget === attachedContainer) return
     const dy = e.clientY - state.startY
     const dx = e.clientX - state.startX
     const now = performance.now()

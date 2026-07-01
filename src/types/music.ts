@@ -97,6 +97,7 @@ export interface PlayerSettings {
   beatBrightness: number
   lyricFontSize: number
   lyricAnimation: boolean
+  lyricTranslation: boolean
   skipOnError: boolean
   autoHideChrome: boolean
   equalizer: EqualizerSettings

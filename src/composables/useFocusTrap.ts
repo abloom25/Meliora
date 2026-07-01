@@ -1,10 +1,20 @@
-import { ref, watch, onMounted, onBeforeUnmount, nextTick, type Ref } from 'vue'
+import {
+  ref,
+  watch,
+  onMounted,
+  onBeforeUnmount,
+  nextTick,
+  type Ref,
+  type MaybeRefOrGetter,
+  toValue,
+} from 'vue'
 import { getFocusableEdges } from '../utils/dom'
 
 export function useFocusTrap(
   containerRef: Ref<HTMLElement | null>,
   active: Ref<boolean>,
   onClose?: () => void,
+  options?: { autoFocus?: MaybeRefOrGetter<boolean> },
 ) {
   const triggerRef = ref<HTMLElement | null>(null)
   let pendingActivation = false
@@ -88,7 +98,8 @@ export function useFocusTrap(
     active,
     (isActive) => {
       if (isActive) {
-        void activateTrap()
+        if (toValue(options?.autoFocus) !== false) void activateTrap()
+        else pendingActivation = false
       } else {
         deactivateTrap()
       }

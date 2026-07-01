@@ -468,10 +468,69 @@
   }
 
   @media (max-width: 720px) {
+    .site-editor {
+      gap: 12px;
+    }
+
+    .admin-section {
+      border-radius: 16px;
+    }
+
+    .section-title {
+      padding: 11px 12px 9px;
+      font-size: 0.58rem;
+    }
+
+    .setting-row {
+      align-items: stretch;
+      flex-direction: column;
+      gap: 10px;
+      padding: 13px 12px;
+    }
+
+    .row-label {
+      flex-shrink: 1;
+      min-width: 0;
+
+      small {
+        line-height: 1.4;
+      }
+    }
+
+    .token-field {
+      width: 100%;
+      max-width: none;
+    }
+
     .icon-control {
       grid-template-columns: 48px minmax(0, 1fr);
       width: 100%;
       justify-content: stretch;
+    }
+
+    .icon-input-group {
+      min-width: 0;
+    }
+
+    .upload-status {
+      grid-column: 1 / -1;
+    }
+  }
+
+  @media (max-width: 420px) {
+    .token-field,
+    .icon-input-group {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .token-toggle {
+      width: 100%;
+    }
+
+    .icon-action {
+      width: 100%;
+      height: 36px;
     }
   }
 </style>

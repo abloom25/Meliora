@@ -6,6 +6,19 @@ export function trackIdentity(track: Pick<Track, 'title' | 'artist'>): string {
   return `${normalize(track.title)}::${normalize(track.artist)}`
 }
 
+function hashShareIdentity(value: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+export function createTrackShareId(track: Pick<Track, 'title' | 'artist'>): string {
+  return hashShareIdentity(trackIdentity(track))
+}
+
 export function deduplicateTracks(tracks: Track[]): Track[] {
   const seen = new Set<string>()
   return tracks.filter((track) => {

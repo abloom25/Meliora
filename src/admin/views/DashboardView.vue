@@ -425,4 +425,34 @@
     opacity: 0;
     transform: translateY(-4px);
   }
+
+  @media (max-width: 760px) {
+    .dashboard-content {
+      flex: 1 1 auto;
+      min-height: 0;
+      padding: 14px 12px calc(86px + env(safe-area-inset-bottom));
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .admin-section {
+      border-radius: 16px;
+      padding-bottom: 10px;
+    }
+
+    .section-title {
+      padding: 11px 12px 9px;
+      font-size: 0.58rem;
+    }
+
+    .unsaved-indicator {
+      right: 12px;
+      bottom: max(12px, env(safe-area-inset-bottom));
+      left: 12px;
+      justify-content: center;
+      max-width: none;
+      padding: 9px 10px 9px 12px;
+      border-radius: 14px;
+      font-size: 0.72rem;
+    }
+  }
 </style>

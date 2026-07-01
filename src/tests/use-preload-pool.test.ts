@@ -24,6 +24,7 @@ const defaultSettings: PlayerSettings = {
   beatBrightness: 0.28,
   lyricFontSize: 20,
   lyricAnimation: true,
+  lyricTranslation: true,
   skipOnError: true,
   autoHideChrome: true,
   equalizer: { enabled: false, preset: 'flat', bands: [0, 0, 0, 0, 0] },

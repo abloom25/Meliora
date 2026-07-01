@@ -119,4 +119,16 @@
   .admin-fade-leave-to {
     opacity: 0;
   }
+
+  @media (max-width: 760px) {
+    .admin-body {
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .admin-notice {
+      max-width: min(420px, calc(100vw - 32px));
+      padding: 24px 16px;
+    }
+  }
 </style>

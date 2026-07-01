@@ -263,6 +263,7 @@ describe('player settings migration', () => {
     expect(result.playMode).toBe('loop')
     expect(result.smoothTrackChange).toBe(true)
     expect(result.autoHideChrome).toBe(true)
+    expect(result.lyricTranslation).toBe(true)
   })
 
   it('migrates legacy settings without settingsVersion to version 1 while preserving user preferences', () => {
@@ -311,6 +312,7 @@ describe('player settings migration', () => {
       beatBrightness: -1,
       lyricFontSize: '22' as unknown as number,
       lyricAnimation: null as unknown as boolean,
+      lyricTranslation: null as unknown as boolean,
       skipOnError: false,
       autoHideChrome: 1 as unknown as boolean,
       equalizer: {
@@ -331,6 +333,7 @@ describe('player settings migration', () => {
     expect(result.beatBrightness).toBe(0)
     expect(result.lyricFontSize).toBe(22)
     expect(result.lyricAnimation).toBe(true)
+    expect(result.lyricTranslation).toBe(true)
     expect(result.skipOnError).toBe(false)
     expect(result.autoHideChrome).toBe(true)
     expect(result.equalizer).toEqual({

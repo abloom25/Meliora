@@ -1,5 +1,5 @@
 <script setup lang="ts">
-  import { computed, onBeforeUnmount, onBeforeUpdate, onMounted, ref, watch } from 'vue'
+  import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, watch } from 'vue'
   import { storeToRefs } from 'pinia'
   import { usePlayerStore } from '../stores/player'
   import { hasCachedLyrics, loadLyricsText } from '../services/lyrics'
@@ -12,6 +12,14 @@
     availability: [availability: LyricAvailability]
     snapshot: [snapshot: LyricsSnapshot]
   }>()
+  const props = withDefaults(
+    defineProps<{
+      active?: boolean
+    }>(),
+    {
+      active: true,
+    },
+  )
   const LYRIC_MOTION_LEAD = 0.42
   const store = usePlayerStore()
   const { currentTrack, currentTime, settings } = storeToRefs(store)
@@ -19,17 +27,24 @@
   const activeIndex = ref(-1)
   const targetIndex = ref(-1)
   const status = ref<'idle' | 'ready' | 'empty' | 'error'>('idle')
+  const panel = ref<HTMLElement>()
   const scroller = ref<HTMLElement>()
+  const lyricsContent = ref<HTMLElement>()
   const lineElements = ref<HTMLElement[]>([])
   onBeforeUpdate(() => {
     lineElements.value = []
   })
   const userScrolling = ref(false)
   let isPanelMounted = false
+  let isProgrammaticScroll = false
   let scrollTimer = 0
   let scrollRaf = 0
+  let realignRaf = 0
+  let realignRequestId = 0
+  let programmaticScrollTimer = 0
   let requestId = 0
   let lyricsController: AbortController | null = null
+  let resizeObserver: ResizeObserver | null = null
   const lineAnimations = new Set<Animation>()
   let highlightTimer = 0
 
@@ -44,7 +59,24 @@
   onMounted(() => {
     isPanelMounted = true
     reducedMotionQuery?.addEventListener('change', handleReducedMotionChange)
+    window.addEventListener('resize', handleViewportResize, { passive: true })
+    window.visualViewport?.addEventListener('resize', handleViewportResize, { passive: true })
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(() => {
+        scheduleRealign({ animate: false })
+      })
+      observeLyricsLayout()
+    }
+    scheduleRealign({ animate: false })
   })
+
+  function observeLyricsLayout() {
+    if (!resizeObserver) return
+    resizeObserver.disconnect()
+    if (panel.value) resizeObserver.observe(panel.value)
+    if (scroller.value) resizeObserver.observe(scroller.value)
+    if (lyricsContent.value) resizeObserver.observe(lyricsContent.value)
+  }
 
   function updateStatus(nextStatus: typeof status.value) {
     status.value = nextStatus
@@ -55,7 +87,7 @@
 
   function emitSnapshot() {
     emit('snapshot', {
-      lines: lines.value,
+      lines: displayedLines.value,
       activeIndex: activeIndex.value,
       status: status.value,
     })
@@ -85,21 +117,53 @@
         return
       }
       lines.value = parsedLines
+      syncActiveLyric({ realign: false })
       updateStatus('ready')
+      await nextTick()
+      if (id !== requestId) return
+      scheduleRealign()
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return
       if (id === requestId) updateStatus('error')
     }
   }
 
-  function handleScroll() {
+  function markProgrammaticScroll() {
+    isProgrammaticScroll = true
+    window.clearTimeout(programmaticScrollTimer)
+    programmaticScrollTimer = window.setTimeout(() => {
+      isProgrammaticScroll = false
+    }, 180)
+  }
+
+  function markUserScrolling(options: { resetRestoreTimer?: boolean } = {}) {
     cancelLineAnimations()
     userScrolling.value = true
-    window.clearTimeout(scrollTimer)
-    scrollTimer = window.setTimeout(() => {
-      userScrolling.value = false
-      scrollToIndex(targetIndex.value)
-    }, 3200)
+    if (options.resetRestoreTimer ?? true) {
+      window.clearTimeout(scrollTimer)
+      scrollTimer = window.setTimeout(() => {
+        userScrolling.value = false
+        scheduleRealign()
+      }, 3200)
+    }
+  }
+
+  function handleScrollIntent() {
+    markUserScrolling({ resetRestoreTimer: true })
+  }
+
+  function handleScroll() {
+    if (isProgrammaticScroll) return
+    markUserScrolling({ resetRestoreTimer: false })
+  }
+
+  function handleKeydown(event: KeyboardEvent) {
+    const scrollKeys = new Set(['ArrowDown', 'ArrowUp', 'End', 'Home', 'PageDown', 'PageUp', ' '])
+    if (scrollKeys.has(event.key)) handleScrollIntent()
+  }
+
+  function handleViewportResize() {
+    scheduleRealign({ animate: false })
   }
 
   function cancelLineAnimations() {
@@ -107,7 +171,54 @@
     lineAnimations.clear()
   }
 
-  function scrollToIndex(index: number, onComplete?: () => void) {
+  interface ScheduleRealignOptions {
+    animate?: boolean
+  }
+
+  function scheduleRealign(options: ScheduleRealignOptions = {}) {
+    if (!props.active || userScrolling.value || targetIndex.value < 0) return
+    const id = ++realignRequestId
+    window.cancelAnimationFrame(realignRaf)
+    void nextTick(() => {
+      if (!isPanelMounted || id !== realignRequestId) return
+      realignRaf = window.requestAnimationFrame(() => {
+        if (!isPanelMounted || id !== realignRequestId) return
+        scrollToIndex(targetIndex.value, undefined, { animate: options.animate })
+      })
+    })
+  }
+
+  interface SyncActiveLyricOptions {
+    realign?: boolean
+    animate?: boolean
+  }
+
+  function syncActiveLyric(options: SyncActiveLyricOptions = {}) {
+    const nextIndex =
+      status.value === 'ready' || lines.value.length > 0
+        ? findActiveLyricIndex(lines.value, currentTime.value + LYRIC_MOTION_LEAD)
+        : -1
+    const changed = nextIndex !== targetIndex.value || nextIndex !== activeIndex.value
+
+    targetIndex.value = nextIndex
+    activeIndex.value = nextIndex
+
+    if (changed) {
+      window.clearTimeout(highlightTimer)
+      emitSnapshot()
+    }
+    if (options.realign ?? true) scheduleRealign({ animate: options.animate })
+  }
+
+  interface ScrollToIndexOptions {
+    animate?: boolean
+  }
+
+  function scrollToIndex(
+    index: number,
+    onComplete?: () => void,
+    options: ScrollToIndexOptions = {},
+  ) {
     if (userScrolling.value || index < 0) {
       onComplete?.()
       return
@@ -120,7 +231,7 @@
         return
       }
       window.cancelAnimationFrame(scrollRaf)
-      scrollRaf = window.requestAnimationFrame(() => scrollToIndex(index, onComplete))
+      scrollRaf = window.requestAnimationFrame(() => scrollToIndex(index, onComplete, options))
       return
     }
     const target = Math.max(
@@ -131,7 +242,14 @@
       ),
     )
 
-    if (!settings.value.lyricAnimation || prefersReducedMotion || !supportsWebAnimations()) {
+    const shouldAnimate =
+      options.animate !== false &&
+      settings.value.lyricAnimation &&
+      !prefersReducedMotion &&
+      supportsWebAnimations()
+
+    if (!shouldAnimate) {
+      markProgrammaticScroll()
       container.scrollTop = target
       onComplete?.()
       return
@@ -167,6 +285,7 @@
       })
     }
 
+    markProgrammaticScroll()
     container.scrollTop = target
 
     for (let i = 0; i < visibleLines.length; i += 1) {
@@ -217,34 +336,79 @@
     if (line.time !== null) emit('seek', line.time)
   }
 
-  const lineStyles = computed(() =>
-    lines.value.map((_, i) => ({
-      '--line-distance': activeIndex.value < 0 ? 0 : Math.min(Math.abs(i - activeIndex.value), 5),
-    })),
-  )
+  const lyricPanelStyle = computed(() => ({
+    '--lyric-size': `${settings.value.lyricFontSize}px`,
+  }))
+
+  const displayedLines = computed(() => {
+    if (settings.value.lyricTranslation) return lines.value
+    return lines.value.map((line) => {
+      if (!line.translation) return line
+      return {
+        time: line.time,
+        text: line.text,
+      }
+    })
+  })
+
+  function lineDistanceClass(index: number): string {
+    const distance = activeIndex.value < 0 ? 0 : Math.min(Math.abs(index - activeIndex.value), 5)
+    return `distance-${distance}`
+  }
 
   watch(
     () => currentTrack.value?.lyricsUrl,
     (url) => void loadLyrics(url),
     { immediate: true },
   )
-  watch(currentTime, (time) => {
-    const nextIndex = findActiveLyricIndex(lines.value, time + LYRIC_MOTION_LEAD)
-    if (nextIndex === targetIndex.value) return
-    targetIndex.value = nextIndex
-    window.clearTimeout(highlightTimer)
-    activeIndex.value = nextIndex
-    emitSnapshot()
-    window.requestAnimationFrame(() => {
-      scrollToIndex(nextIndex)
-    })
+  watch(currentTime, () => {
+    syncActiveLyric()
+  })
+  watch(
+    () => settings.value.lyricFontSize,
+    () => {
+      scheduleRealign({ animate: false })
+    },
+  )
+  watch(
+    () => settings.value.lyricAnimation,
+    () => {
+      scheduleRealign({ animate: false })
+    },
+  )
+  watch(
+    () => settings.value.lyricTranslation,
+    () => {
+      emitSnapshot()
+      scheduleRealign({ animate: false })
+    },
+  )
+  watch(
+    () => props.active,
+    (active) => {
+      if (!active) return
+      syncActiveLyric({ animate: false })
+    },
+  )
+  watch(lyricsContent, () => {
+    observeLyricsLayout()
+    scheduleRealign({ animate: false })
+  })
+  watch(panel, () => {
+    observeLyricsLayout()
+    scheduleRealign({ animate: false })
   })
   onBeforeUnmount(() => {
     isPanelMounted = false
     window.clearTimeout(scrollTimer)
     window.cancelAnimationFrame(scrollRaf)
+    window.cancelAnimationFrame(realignRaf)
+    window.clearTimeout(programmaticScrollTimer)
     window.clearTimeout(highlightTimer)
     lyricsController?.abort()
+    resizeObserver?.disconnect()
+    window.removeEventListener('resize', handleViewportResize)
+    window.visualViewport?.removeEventListener('resize', handleViewportResize)
     cancelLineAnimations()
     reducedMotionQuery?.removeEventListener('change', handleReducedMotionChange)
   })
@@ -252,15 +416,19 @@
 
 <template>
   <section
+    ref="panel"
     class="lyrics-panel"
     :class="{ browsing: userScrolling, 'animation-disabled': !settings.lyricAnimation }"
+    :style="lyricPanelStyle"
     aria-label="歌词"
   >
     <div
       ref="scroller"
       class="lyrics-scroll"
-      @wheel.passive="handleScroll"
-      @touchmove.passive="handleScroll"
+      @scroll.passive="handleScroll"
+      @wheel.passive="handleScrollIntent"
+      @touchmove.passive="handleScrollIntent"
+      @keydown="handleKeydown"
     >
       <Transition name="lyric-state-change" mode="out-in">
         <div
@@ -269,9 +437,9 @@
           class="lyric-stage"
         />
         <div v-else key="lyrics" class="lyric-stage">
-          <div class="lyrics-content">
+          <div ref="lyricsContent" class="lyrics-content">
             <button
-              v-for="(line, index) in lines"
+              v-for="(line, index) in displayedLines"
               :key="`${line.time}-${index}`"
               :ref="
                 (element) => {
@@ -279,20 +447,23 @@
                 }
               "
               class="lyric-line"
-              :class="{
-                active: index === activeIndex,
-                timed: line.time !== null,
-                targeted: index === targetIndex,
-              }"
-              :style="{
-                '--lyric-size': `${settings.lyricFontSize}px`,
-                ...lineStyles[index],
-              }"
+              :class="[
+                lineDistanceClass(index),
+                {
+                  active: index === activeIndex,
+                  timed: line.time !== null,
+                  targeted: index === targetIndex,
+                },
+              ]"
               :disabled="line.time === null"
               @click="seekLine(line)"
             >
               <span class="lyric-original">{{ line.text }}</span>
-              <span v-if="line.translation" class="lyric-translation">{{ line.translation }}</span>
+              <Transition name="translation-toggle">
+                <span v-if="line.translation" class="lyric-translation">{{
+                  line.translation
+                }}</span>
+              </Transition>
             </button>
           </div>
         </div>
@@ -356,11 +527,14 @@
     min-height: 100%;
     flex-direction: column;
     align-items: flex-start;
-    gap: clamp(18px, 2.5vh, 28px);
+    gap: clamp(22px, calc(var(--lyric-size) * 1.28), 42px);
     padding: 42vh 7% 46vh 3%;
   }
 
   .lyric-line {
+    --line-distance: 0;
+
+    position: relative;
     max-width: 900px;
     padding: 0;
     border: 0;
@@ -384,8 +558,40 @@
       filter 920ms cubic-bezier(0.22, 1, 0.36, 1),
       text-shadow 920ms cubic-bezier(0.22, 1, 0.36, 1);
 
+    &::before {
+      position: absolute;
+      inset: -0.2em -0.36em;
+      z-index: -1;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0);
+      opacity: 0;
+      content: '';
+      transition:
+        background 140ms ease-out,
+        opacity 140ms ease-out;
+      pointer-events: none;
+    }
+
     &.timed {
       cursor: pointer;
+    }
+    &.distance-0 {
+      --line-distance: 0;
+    }
+    &.distance-1 {
+      --line-distance: 1;
+    }
+    &.distance-2 {
+      --line-distance: 2;
+    }
+    &.distance-3 {
+      --line-distance: 3;
+    }
+    &.distance-4 {
+      --line-distance: 4;
+    }
+    &.distance-5 {
+      --line-distance: 5;
     }
     &:hover:not(.active) {
       color: rgba(255, 255, 255, 0.48);
@@ -404,6 +610,8 @@
 
   .lyric-original,
   .lyric-translation {
+    position: relative;
+    z-index: 1;
     display: block;
     scale: 1;
     transform-origin: left center;
@@ -416,6 +624,7 @@
   }
 
   .lyric-translation {
+    overflow: hidden;
     margin-top: 0.18em;
     font-size: 0.72em;
     font-weight: 590;
@@ -424,10 +633,40 @@
     opacity: 0.76;
   }
 
+  .translation-toggle-enter-active,
+  .translation-toggle-leave-active {
+    max-height: 2.2em;
+    transition:
+      max-height 360ms cubic-bezier(0.16, 1, 0.3, 1),
+      margin-top 360ms cubic-bezier(0.16, 1, 0.3, 1),
+      opacity 260ms ease,
+      translate 360ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .translation-toggle-enter-from,
+  .translation-toggle-leave-to {
+    max-height: 0;
+    margin-top: 0;
+    opacity: 0;
+    translate: 0 -0.18em;
+  }
+
+  .translation-toggle-enter-to,
+  .translation-toggle-leave-from {
+    max-height: 2.2em;
+    opacity: 0.76;
+    translate: 0 0;
+  }
+
   .lyrics-panel.browsing .lyric-line {
     opacity: 0.72;
     filter: blur(0);
     text-shadow: none;
+
+    &:hover:not(.active)::before {
+      background: rgba(255, 255, 255, 0.1);
+      opacity: 1;
+    }
 
     &.active {
       color: rgba(255, 255, 255, 0.84);
@@ -442,6 +681,8 @@
   .lyrics-panel.animation-disabled {
     .lyric-state-change-enter-active,
     .lyric-state-change-leave-active,
+    .translation-toggle-enter-active,
+    .translation-toggle-leave-active,
     .lyric-line,
     .lyric-original,
     .lyric-translation {
@@ -461,7 +702,9 @@
 
   @media (prefers-reduced-motion: reduce) {
     .lyric-state-change-enter-active,
-    .lyric-state-change-leave-active {
+    .lyric-state-change-leave-active,
+    .translation-toggle-enter-active,
+    .translation-toggle-leave-active {
       transition-duration: 0ms;
     }
 
@@ -472,7 +715,7 @@
 
   @media (max-width: 720px) {
     .lyrics-content {
-      gap: 22px;
+      gap: clamp(22px, calc(var(--lyric-size) * 1.12), 34px);
       padding: 40vh 7% 44vh;
     }
 

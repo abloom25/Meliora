@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-rc3] - 2026-07-01
+
+### Added
+
+- **歌词翻译开关**:新增 `lyricTranslation` 设置项(默认开启),关闭时翻译行通过 `<Transition name="translation-toggle">` 以 `max-height: 2.2em → 0` + `translate: 0 → -0.18em` + `opacity: 0.76 → 0` 三重过渡动画收起;`PlayerSettings` 类型与 `migrateSettings` 均新增该字段,默认值 `true` 保证向后兼容;`displayedLines` computed 在关闭时逐行剥离 `translation` 字段,同时 `emitSnapshot` 改发 `displayedLines` 而非原始 `lines`,歌词小窗同步响应翻译开关
+- **管理后台移动端导航面板**:`AdminSidebar` < 760px 时折叠为 sticky 顶栏(站点名 + 面包屑 + 汉堡按钮),新增 `<Teleport to="body">` 底部抽屉式 `mobile-nav-panel`,复用 `useDrawerSheet` 实现全屏/半屏/关闭三段吸附拖拽,`isMobileViewport()` 动态启用;面板内双列 `grid` 布局容纳 7 个导航标签,底部 `sidebar-footer` 包含「保存全部」(跨列占满)、「退出登录」、「返回播放器」三按钮;关闭时选中标签/保存/退出均自动触发 `dismissMobileNavAnimated()`,遮挡层 `.mobile-nav-backdrop` 半屏时扩大 inset 覆盖全屏并加深背景;面板样式统一玻璃拟态(`backdrop-filter: blur(52px) saturate(180%)`)+ 圆角顶部 + 底部 safe-area-inset 适配,420px 以下进一步紧凑间距
+- **`useFocusTrap` `autoFocus` 选项**:新增可选的 `options.autoFocus` 参数,类型为 `MaybeRefOrGetter<boolean>`,默认 `true`;当 `toValue(options?.autoFocus) === false` 时跳过自动聚焦但仍设置 `pendingActivation = false` 避免状态卡死,移动端 sheet 抽屉(`libraryDrawerRef`)传入 `autoFocus: () => !isMobileSheet.value` 以跳过移动端自动对焦
+- **`PlayerControls` 竖排布局 `variant="vertical"`**:新增长 54px 的纵向排列模式,播放/上一首/下一首按钮按列堆叠(`flex-direction: column`),播放按钮 46×46px 带 `box-shadow` 强调,不渲染进度条行(`variant !== 'bar' && variant !== 'vertical'`),用于歌词小窗等窄空间场景
+- **开发模式本地配置同步**:`vite.config.ts` 新增 `melioraLocalConfigPlugin`,在 Vite dev server 注册 `POST /__meliora-dev/config` 中间件;管理后台 `saveConfig` 在 `import.meta.env.DEV` 下自动将清洗后的配置 `POST` 到该端点,插件经 `validateMusicConfig` 校验后写入 `.meliora/config.local.json` 并调用 `generatePublicConfig` 重新生成 `src/generated/public-config.ts`,最后通过 `server.ws.send('full-reload')` 触发热更新,开发环境改配置后无需手动重启;`SaveResult` 新增 `warning?` 字段,同步失败时 `ok: true` 但携带 warning 提示
+- **本地开发配置优先读取**:`generatePublicConfig` 在 `MELIORA_LOAD_DEV_VARS=true` 且 `.meliora/config.local.json` 存在时,优先以它作为配置源生成本地公开配置,代替 `public/config.json`;`pnpm generate:public-config:dev` 复用此逻辑
+- **`createTrackShareId` 确定性分享标识**:`src/utils/tracks.ts` 新增基于 FNV-1a 哈希(`hashShareIdentity`)的确定性 share ID,输入为 `trackIdentity`(标题+艺术家归一化),输出为 36 进制短字符串(不含内部 URL 敏感信息);分享 URL 从 `?track=<track.id>` 改为 `?share=<hash>`,`useTrackShare` 分享文案从「正在 Meliora 收听」改为「Meliora: <标题 - 艺术家>」,剪贴板内容同步简化;`loadTracks` 改为按 `share` 参数匹配加载后自动移除参数避免分享链接残留
+- **`shouldUseIOSBackgroundSafeAudio` 浏览器能力检测**:`src/utils/browser.ts` 新增该函数,返回 `isIOSDevice() && isSafariBrowser()` 的合取,统一标识 iOS Safari 后台播放受限场景
+- **`useDeviceDetection` composable**:新增 `src/composables/useDeviceDetection.ts`,抽离原本散布在 `App.vue` 中的 `compactViewport`、`portableDevice`、`phoneDevice`、`lyricsWindowSupported` 和 `isMobileSheet`、`viewportMode`(枚举 `wide/narrow/phone`)等设备检测逻辑为独立 composable
+
+### Changed
+
+- **播放器架构拆分**:原 2500 行 `App.vue` 拆为两文件——`App.vue` 缩至 ~25 行,仅保留 `<router-view>` + `<Transition mode="out-in">` 作为路由壳(接管原 `AppShell.vue` 职责);播放器全部业务逻辑迁移至 `src/views/PlayerView.vue`;路由从 `component: App` 改为 `component: PlayerView`;`main.ts` 直接挂载 `App` 而非 `AppShell`;`AppShell.vue` 已删除;`agent.md` 分层图同步更新为 `src/main.ts → src/App.vue → src/views/PlayerView.vue`
+- **`SettingsPanel` 去 props 化**:组件不再通过 props 接收 `settings: PlayerSettings`,改为内部直接 `storeToRefs(usePlayerStore())` 获取响应式 `settings`;`PlayerView.vue` 移除 `:settings="settings"` 传递;消除了 15 处 `vue/no-mutating-props` ESLint 违规;`PlayerSettings` 类型导入从 SettingsPanel 移除,不再依赖 `src/types/music`
+- **`LyricsPanel` 滚动对齐全面重构**:
+  - 新增 `syncActiveLyric({ realign?, animate? })` 统一入口:计算当前活跃行索引 → 写入 `targetIndex`/`activeIndex` → 变更时 `emitSnapshot` → 默认触发 `scheduleRealign`
+  - 新增 `scheduleRealign({ animate? })`:通过 `realignRequestId` 版本号 + `nextTick` + `requestAnimationFrame` 双重异步守卫防止竞态,在 `active`/非 `userScrolling`/有效 `targetIndex` 前提下执行 `scrollToIndex`
+  - `scrollToIndex` 新增 `ScrollToIndexOptions` 参数:支持 `options.animate` 强制跳过动画;非动画模式下调用 `markProgrammaticScroll()` 标记程序化滚动防止误触发用户浏览模式
+  - 拆分滚动事件处理:`handleScrollIntent`(wheel/touchmove)→ 重置 restore timer;`handleScroll`(scroll 事件本身)→ 仅在非程序化滚动时标记用户浏览但不重置 timer;`isProgrammaticScroll` 通过 180ms timeout 自动复位
+  - 新增 `handleKeydown`:检测 `ArrowDown/ArrowUp/End/Home/PageDown/PageUp/Space` → 调用 `handleScrollIntent`,防止键盘导航触发用户浏览模式后自动回滚
+  - `handleViewportResize`:监听 `window.resize` 与 `visualViewport.resize`,触发无动画重对齐
+  - 新增 `ResizeObserver` 观察 `panel`/`scroller`/`lyricsContent` 三个节点,尺寸变化时自动 `scheduleRealign`;`lyricsContent` ref 变更时重新绑定 observer
+  - 歌词行间距从固定 `clamp(18px, 2.5vh, 28px)` 改为动态 `clamp(22px, calc(var(--lyric-size) * 1.28), 42px)`,随 `--lyric-size`(歌词字号)自适应
+  - `--line-distance` CSS 变量从每个 `<button>` 的 inline style 改为 `.distance-0` ~ `.distance-5` 六个 CSS class,减少每个歌词行的运行时 style 计算
+  - `--lyric-size` CSS 变量从逐个 `.lyric-line` 上移至 `.lyrics-panel` 根节点
+  - 浏览模式 hover 行新增 `::before` 伪元素半透明高亮背景效果
+  - `onMounted` / `onBeforeUnmount` 生命周期增强:挂载时注册 resize/visualViewport 监听 + 初始化 ResizeObserver + 首次 `scheduleRealign`;卸载时清理 `realignRaf`/`programmaticScrollTimer`/`resizeObserver.disconnect()`/两个 resize 事件监听
+  - 新增 `active` prop(默认 `true`):当从 mobile `cover` tab 切回 `lyrics` tab 时立即 `syncActiveLyric({ animate: false })` 无动画对齐
+  - `lyricFontSize`/`lyricAnimation`/`lyricTranslation`/`active` 四个 watcher 各自监听并触发合适的重对齐策略
+- **翻译切换动画**:翻译行包裹 `<Transition name="translation-toggle">`,CSS 定义 `max-height`(2.2em ↔ 0)、`margin-top`、`opacity`(0.76 ↔ 0)、`translate`(0 ↔ -0.18em) 四属性 360ms cubic-out 过渡;`lyrics-panel.animation-disabled` 和 `prefers-reduced-motion` 下过渡时长清零
+- **iOS Safari 后台播放适配**:`useAudioPlayer` 检测到 `shouldUseIOSBackgroundSafeAudio()` 时执行以下适配:(a)所有 `<audio>` 创建时强制设置 `playsInline` + `playsinline` + `webkit-playsinline` 属性;(b)新增 `ensureIOSAudioHost()` + `mountActiveAudioForIOS()`——在 `<body>` 中创建隐藏的 1×1px `div` 容器并将活跃 `<audio>` 节点挂载为 DOM 子节点,使 iOS Safari 在后台/锁屏时维持 Media Session 播放;(c)`guardedStartBeatAnalysis` 完全跳过——无 Web Audio 分析链路;(d)切歌关闭 `smoothTrackChange` crossfade(后台淡入淡出不可靠);(e)自动 crossfade(歌曲末尾预切换)也关闭;(f)初始化、切歌、错误恢复三条路径均调用 `mountActiveAudioForIOS()`;(g)卸载时 `iosAudioHost?.remove()` 清理
+- **`useBeatAnalyser` 音频资源释放**:`stopBeatAnalysis` 在断开 analyser 节点后,若共享 `AudioContext.state === 'running'` 则调用 `suspend()` 挂起(不 `close()`),释放音频硬件;后续 `startBeatAnalysis` 可通过 `resume()` 恢复
+- **分享链接去内部 ID 化**:`useTrackShare.shareCurrentTrack` 改用 `createTrackShareId(track)` 生成 FNV-1a 哈希作为分享参数,URL 构造从 `new URL(window.location.href)` + `.hash = ''` 改为 `new URL(window.location.pathname, window.location.origin)` 彻底去 query/hash;分享文案「正在 Meliora 收听 X」→「Meliora: X」;剪贴板文本同步更新
+- **`TrackList` 搜索输入简化**:`debouncedQuery` 从 `:value` + `@input` 手动绑定改为直接 `v-model="debouncedQuery"`,新增 `watch(debouncedQuery, (v) => handleSearchInput(v))` 替代原来的 `watch(() => props.query)` 中介;`handleSearchInput` 移除对内 `debouncedQuery.value = value` 赋值(已被 v-model 覆盖),减少一层数据流迂回
+- **管理后台全页面移动端响应式增强**:
+  - `AdminApp.vue`:<760px 时 `admin-body` 从横向 flex 改为纵向 column 并 `overflow: hidden`,等待状态 `.admin-notice` 限制最大宽度并紧凑 padding
+  - `DashboardView.vue`:移动端 `.dashboard-content` 补加底部 `calc(86px + env(safe-area-inset-bottom))` padding 避免被底部未保存指示器遮挡,section 间距和字号适配,`.unsaved-indicator` 改为全宽居中
+  - `SiteSettingsEditor.vue`/`SecurityEditor.vue`/`AdvancedSettingsEditor.vue`/`AnalyticsSettingsEditor.vue`:720px 以下各 editor 统一收紧间距、`flex-direction: column` 垂直布局、`border-radius: 16px`、section title 字号降至 0.58rem;SiteSettings 的 token 输入框和图标上传在 420px 以下全宽并对齐
+- **`useDrawerSheet` 事件去重**:`handlePointerMove` 增加判断:若拖拽由 handle 发起(`state.source === 'handle'`)且 `e.currentTarget === attachedContainer` 则直接 return,防止同一个 pointermove 在 handle 和 container 上各触发一次导致跳动
+- **`useLyricsWindow` 歌词小窗跨 toggle 复用**:`openViaWindowOpen` 的 `window.open` 使用固定窗口名称 `'meliora-lyrics'`,跨 toggle 操作时浏览器将聚焦/复用同一小窗而非每次新建;`teardownWindow` 在关闭/切歌前清理 `cachedNodes` 与事件监听,`render()` 开头通过 `isWindowClosed` 守卫防止操作已销毁窗口
+- **版本脚本路径参数化**:`generatePublicConfig` 将三个关键路径(`configPath`/`targetPath`/`adminEnvTargetPath`)从模块级常量改为 `resolve*()` 函数,并在 DEV 模式下支持 `.meliora/config.local.json` 作为优先配置源;`fileExists` 辅助函数用 `fs.access` 替代 try/catch readFile
+- **测试增强**:
+  - `use-audio-player.test.ts`:mock `shouldUseIOSBackgroundSafeAudio` 和 `useBeatAnalyser`;新增 3 个 iOS 适配测试(验证 `playsinline` 属性/DOM 挂载、跳过 Web Audio 分析、关闭自动 crossfade);`afterEach` 增加 `document.body.innerHTML = ''` 清理 DOM
+  - `tracks.test.ts`:新增 `createTrackShareId` 两个测试(输出不含敏感 URL/纯小写字母数字/长度 <16、share ID ≠ track.id)
+  - `player-store.test.ts`:迁移测试确认 `lyricTranslation` 默认值和非法值 sanitize 行为
+  - `use-preload-pool.test.ts`:默认 settings 补上 `lyricTranslation: true`
+  - `server/tests/generate-public-config.test.ts`:新增「本地开发优先读取 `.meliora/config.local.json`」测试
+- **README 补充**:
+  - 新增「本地配置同步」章节:说明 `DEVELOPMENT=true` 时配置同步流程、`.meliora/` 目录用途、`generate:public-config:dev` 的优先读取逻辑、真实生产链路测试指引
+  - header 导航新增「路线图」链接指向 `ROADMAP.md`
+  - 尾部署名补上 `and OpenAI Codex`
+- **`agent.md` 规范更新**:分层图路径、依赖方向注释、路由过渡参考文件等随架构拆分同步修正;新增 `views/` 层描述
+
+### Fixed
+
+- **`useFocusTrap` 未使用变量**:移除声明后从未引用的局部 `autoFocus` 变量(实际代码直接调用 `toValue(options?.autoFocus)`),消除对应的 `@typescript-eslint/no-unused-vars` ESLint 错误
+- **`PlayerView.vue` 未使用导入**:移除 `PlayerViewportMode` 类型导入与 `viewportMode` 解构变量(设备检测逻辑已迁至 `useDeviceDetection` 后不再被引用)
+- **`SettingsPanel.vue` 15 处 props 直接修改**:组件改为使用 Pinia store 后彻底消除 `vue/no-mutating-props` 违规
+- **5 处 Prettier 格式化违规**:`useFocusTrap.ts` import 语句、`PlayerView.vue` 缩进/解构/多行属性、`TrackList.vue` v-model 换行均由 `eslint --fix` 自动修复
+
+[0.2.0-rc3]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc3
+
 ## [0.2.0-rc2] - 2026-06-30
 
 ### Added

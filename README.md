@@ -13,7 +13,7 @@
 [![PWA](https://img.shields.io/badge/PWA-Ready-5a0fc8?style=flat-square&logo=pwa&logoColor=white)](https://web.dev/progressive-web-apps/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](CONTRIBUTING.md)
 
-[特性](#-特性) · [快速开始](#-快速开始) · [管理后台](#-管理后台) · [快捷键](#-快捷键) · [部署](#-部署) · [开发](#-开发)
+[特性](#-特性) · [快速开始](#-快速开始) · [管理后台](#-管理后台) · [快捷键](#-快捷键) · [部署](#-部署) · [开发](#-开发) · [路线图](ROADMAP.md)
 
 [在线预览](https://music.abloom.site) · [反馈问题](https://github.com/abloom25/Meliora/issues) · [贡献指南](CONTRIBUTING.md)
 
@@ -237,6 +237,15 @@ pnpm format       # Prettier
 pnpm build        # 生产构建
 ```
 
+### 本地配置同步
+
+`DEVELOPMENT=true` 时,管理后台的配置与密码仍由本地后端以内存模式处理,重启后会重置。为了让主页保持与生产一致的“构建期公开配置”读取方式,Vite 开发服务器会在后台保存配置成功后,把配置同步写入 `.meliora/config.local.json`,并重新生成 `src/generated/public-config.ts`。
+
+- `.meliora/` 已加入 `.gitignore`,仅用于本地调试。
+- 主页不会请求运行时配置接口,仍然只读取生成后的公开配置。
+- 重新执行 `pnpm generate:public-config:dev` 时,如果 `.meliora/config.local.json` 存在,会优先用它生成本地公开配置。
+- 要测试真实生产链路,请关闭 `DEVELOPMENT`,配置真实 `GH_TOKEN` / `GH_REPO` / `CONFIG_ENCRYPTION_KEY`,让后台写入仓库后再构建。
+
 ### 项目结构
 
 ```
@@ -284,6 +293,6 @@ netlify/             Netlify Function 入口
 
 如果这个项目对你有帮助,欢迎点亮 ⭐ Star
 
-Made with ❤️ by [abloom25](https://github.com/abloom25)
+Made with ❤️ by [abloom25](https://github.com/abloom25) and OpenAI Codex
 
 </div>

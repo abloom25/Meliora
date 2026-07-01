@@ -131,6 +131,10 @@ export function isSafariBrowser(): boolean {
   return /Safari/i.test(ua) && !/Chrome/i.test(ua)
 }
 
+export function shouldUseIOSBackgroundSafeAudio(): boolean {
+  return isIOSDevice() && isSafariBrowser()
+}
+
 // iOS Safari 不支持 Fullscreen API(即使在桌面模式添加到主屏幕也只有 minimal-ui)
 export function isFullscreenUnsupportedByPlatform(): boolean {
   return isIOSDevice() && !getFullscreenAPI().supported

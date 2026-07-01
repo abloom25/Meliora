@@ -254,4 +254,33 @@
       white-space: nowrap;
     }
   }
+
+  @media (max-width: 720px) {
+    .admin-section {
+      border-radius: 16px;
+    }
+
+    .section-title {
+      padding: 11px 12px 9px;
+      font-size: 0.58rem;
+    }
+
+    .analytics-header {
+      padding: 13px 12px;
+    }
+
+    .setting-row {
+      align-items: stretch;
+      flex-direction: column;
+      gap: 10px;
+      padding: 13px 12px;
+    }
+
+    .row-label {
+      strong,
+      small {
+        white-space: normal;
+      }
+    }
+  }
 </style>

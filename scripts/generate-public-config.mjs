@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { webcrypto } from 'node:crypto'
@@ -15,9 +15,6 @@ const DEFAULT_PUBLIC_CONFIG = {
   localTracks: [],
 }
 
-const defaultConfigPath = join(process.cwd(), 'public/config.json')
-const defaultTargetPath = join(process.cwd(), 'src/generated/public-config.ts')
-const defaultAdminEnvTargetPath = join(process.cwd(), 'src/generated/admin-env.ts')
 const schemaSourcePath = join(process.cwd(), 'shared/config-schema.ts')
 const envSchemaSourcePath = join(process.cwd(), 'shared/env-schema.ts')
 const schemaBuildPath = join(
@@ -73,11 +70,36 @@ async function loadBuildEnv() {
   return { ...env, ...process.env }
 }
 
+async function fileExists(path) {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function truthy(value) {
   const v = String(value ?? '')
     .trim()
     .toLowerCase()
   return v === 'true' || v === '1' || v === 'yes' || v === 'on'
+}
+
+function resolveDefaultConfigPath() {
+  return join(process.cwd(), 'public/config.json')
+}
+
+function resolveDefaultLocalDevConfigPath() {
+  return join(process.cwd(), '.meliora/config.local.json')
+}
+
+function resolveDefaultTargetPath() {
+  return join(process.cwd(), 'src/generated/public-config.ts')
+}
+
+function resolveDefaultAdminEnvTargetPath() {
+  return join(process.cwd(), 'src/generated/admin-env.ts')
 }
 
 function cloneJson(value) {
@@ -310,9 +332,14 @@ async function renderAdminEnvModule(env) {
 
 export async function generatePublicConfig(options = {}) {
   const buildEnv = { ...(await loadBuildEnv()), ...(options.adminEnv ?? {}) }
-  const configPath = options.configPath ?? defaultConfigPath
-  const targetPath = options.targetPath ?? defaultTargetPath
-  const adminEnvTargetPath = options.adminEnvTargetPath ?? defaultAdminEnvTargetPath
+  const localDevConfigPath = resolveDefaultLocalDevConfigPath()
+  const configPath =
+    options.configPath ??
+    (shouldLoadDevVars() && (await fileExists(localDevConfigPath))
+      ? localDevConfigPath
+      : resolveDefaultConfigPath())
+  const targetPath = options.targetPath ?? resolveDefaultTargetPath()
+  const adminEnvTargetPath = options.adminEnvTargetPath ?? resolveDefaultAdminEnvTargetPath()
   const encryptionKey = options.encryptionKey ?? buildEnv.CONFIG_ENCRYPTION_KEY ?? ''
 
   const config = await loadStoredConfig(configPath, encryptionKey)
