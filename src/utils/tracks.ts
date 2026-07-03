@@ -1,9 +1,16 @@
 import type { LocalTrackConfig, MetingTrack, Track } from '../types/music'
+import { splitDisplayTitle } from './title'
 
 const normalize = (value: string) => value.trim().toLocaleLowerCase().replace(/\s+/g, ' ')
 
-export function trackIdentity(track: Pick<Track, 'title' | 'artist'>): string {
-  return `${normalize(track.title)}::${normalize(track.artist)}`
+type TrackIdentityInput = Pick<Track, 'title' | 'artist' | 'titleVersions'>
+
+function normalizedTitleParts(track: TrackIdentityInput): string {
+  return [track.title, ...(track.titleVersions ?? [])].map(normalize).filter(Boolean).join('::')
+}
+
+export function trackIdentity(track: TrackIdentityInput): string {
+  return `${normalizedTitleParts(track)}::${normalize(track.artist)}`
 }
 
 function hashShareIdentity(value: string): string {
@@ -15,16 +22,41 @@ function hashShareIdentity(value: string): string {
   return (hash >>> 0).toString(36)
 }
 
-export function createTrackShareId(track: Pick<Track, 'title' | 'artist'>): string {
+export function createTrackShareId(track: TrackIdentityInput): string {
   return hashShareIdentity(trackIdentity(track))
 }
 
-export function deduplicateTracks(tracks: Track[]): Track[] {
-  const seen = new Set<string>()
+export function formatTrackDisplayTitle(track: TrackIdentityInput): string {
+  return [track.title, ...(track.titleVersions ?? []).map((version) => `(${version})`)].join(' ')
+}
+
+export function trackMatchesShareId(track: Track, shareId: string): boolean {
+  return createTrackShareId(track) === shareId || Boolean(track.shareAliases?.includes(shareId))
+}
+
+export function mergeTrackShareAliases(target: Track, source: Track) {
+  const aliases = new Set([...(target.shareAliases ?? []), ...(source.shareAliases ?? [])])
+  aliases.delete(createTrackShareId(target))
+  if (aliases.size) {
+    target.shareAliases = [...aliases]
+  } else {
+    delete target.shareAliases
+  }
+}
+
+export function deduplicateTracks(
+  tracks: Track[],
+  mergeDuplicate?: (kept: Track, duplicate: Track) => void,
+): Track[] {
+  const seen = new Map<string, Track>()
   return tracks.filter((track) => {
     const identity = trackIdentity(track)
-    if (seen.has(identity)) return false
-    seen.add(identity)
+    const kept = seen.get(identity)
+    if (kept) {
+      mergeDuplicate?.(kept, track)
+      return false
+    }
+    seen.set(identity, track)
     return true
   })
 }
@@ -34,32 +66,50 @@ export function filterTracks(tracks: Track[], query: string): Track[] {
   if (!keyword) return tracks
   return tracks.filter(
     (track) =>
-      normalize(track.title).includes(keyword) || normalize(track.artist).includes(keyword),
+      normalize(track.title).includes(keyword) ||
+      normalize(track.artist).includes(keyword) ||
+      (track.titleVersions ?? []).some((version) => normalize(version).includes(keyword)),
   )
 }
 
 export function mapMetingTrack(track: MetingTrack, sourceKey: string, index: number): Track | null {
   if (!track.title?.trim() || !track.url?.trim()) return null
-  return {
+  const rawTitle = track.title.trim()
+  const displayTitle = splitDisplayTitle(track.title)
+  const mapped: Track = {
     id: `meting:${sourceKey}:${index}:${track.url}`,
-    title: track.title.trim(),
+    title: displayTitle.title,
+    titleVersions: displayTitle.versions.length ? displayTitle.versions : undefined,
     artist: track.author?.trim() || '未知艺术家',
     cover: track.pic?.trim() || undefined,
     audioUrl: track.url.trim(),
-    lyricsUrl: track.lrc?.trim() || undefined,
     kind: 'meting',
   }
+  const legacyShareId = createTrackShareId({
+    title: rawTitle,
+    artist: mapped.artist,
+  })
+  if (legacyShareId !== createTrackShareId(mapped)) mapped.shareAliases = [legacyShareId]
+  return mapped
 }
 
 export function mapLocalTrack(track: LocalTrackConfig): Track {
-  return {
+  const rawTitle = track.title.trim()
+  const displayTitle = splitDisplayTitle(track.title)
+  const mapped: Track = {
     id: `local:${track.id}`,
-    title: track.title,
+    title: displayTitle.title,
+    titleVersions: displayTitle.versions.length ? displayTitle.versions : undefined,
     artist: track.artist,
     album: track.album,
     cover: track.cover,
     audioUrl: track.audio,
-    lyricsUrl: track.lyrics,
     kind: 'local',
   }
+  const legacyShareId = createTrackShareId({
+    title: rawTitle,
+    artist: mapped.artist,
+  })
+  if (legacyShareId !== createTrackShareId(mapped)) mapped.shareAliases = [legacyShareId]
+  return mapped
 }

@@ -2,10 +2,10 @@
   import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, watch } from 'vue'
   import { storeToRefs } from 'pinia'
   import { usePlayerStore } from '../stores/player'
-  import { hasCachedLyrics, loadLyricsText } from '../services/lyrics'
-  import { findActiveLyricIndex, hasMeaningfulLyrics, parseLyrics } from '../utils/lyrics'
+  import { hasCachedTrackLyrics, loadTrackLyrics } from '../services/lyrics'
+  import { findActiveLyricIndex } from '../utils/lyrics'
   import { supportsWebAnimations } from '../utils/browser'
-  import type { LyricAvailability, LyricLine, LyricsSnapshot } from '../types/music'
+  import type { LyricAvailability, LyricLine, LyricsSnapshot, Track } from '../types/music'
 
   const emit = defineEmits<{
     seek: [time: number]
@@ -22,7 +22,7 @@
   )
   const LYRIC_MOTION_LEAD = 0.42
   const store = usePlayerStore()
-  const { currentTrack, currentTime, settings } = storeToRefs(store)
+  const { currentTrack, currentTrackVersion, currentTime, settings } = storeToRefs(store)
   const lines = ref<LyricLine[]>([])
   const activeIndex = ref(-1)
   const targetIndex = ref(-1)
@@ -93,7 +93,7 @@
     })
   }
 
-  async function loadLyrics(url?: string) {
+  async function loadLyrics(track: Track | null) {
     const id = ++requestId
     lines.value = []
     lineElements.value = []
@@ -101,17 +101,16 @@
     targetIndex.value = -1
     window.clearTimeout(highlightTimer)
     lyricsController?.abort()
-    if (!url) {
+    if (!track) {
       updateStatus('empty')
       return
     }
-    if (!hasCachedLyrics(url)) updateStatus('empty')
+    if (!hasCachedTrackLyrics(track)) updateStatus('empty')
     lyricsController = new AbortController()
     try {
-      const text = await loadLyricsText(url, lyricsController.signal)
+      const parsedLines = await loadTrackLyrics(track, lyricsController.signal)
       if (id !== requestId) return
-      const parsedLines = parseLyrics(text)
-      if (!hasMeaningfulLyrics(parsedLines)) {
+      if (!parsedLines.length) {
         lines.value = []
         updateStatus('empty')
         return
@@ -357,8 +356,8 @@
   }
 
   watch(
-    () => currentTrack.value?.lyricsUrl,
-    (url) => void loadLyrics(url),
+    () => [currentTrack.value?.id, currentTrackVersion.value] as const,
+    () => void loadLyrics(currentTrack.value),
     { immediate: true },
   )
   watch(currentTime, () => {

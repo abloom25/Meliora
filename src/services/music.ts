@@ -1,48 +1,76 @@
-import type { MetingPlaylistConfig, MetingTrack, PublicMusicConfig, Track } from '../types/music'
+import type {
+  LocalTrackConfig,
+  MetingPlaylistConfig,
+  PublicMusicConfig,
+  Track,
+} from '../types/music'
 import { musicConfig } from '../config/music'
-import { deduplicateTracks, mapLocalTrack, mapMetingTrack } from '../utils/tracks'
+import { mergeTrackLyricsProvider } from './lyrics'
+import { localMusicAdapter } from './music-adapters/local'
+import { metingMusicAdapter } from './music-adapters/meting'
+import type { MusicProviderAdapter } from './music-adapters/types'
+import { deduplicateTracks, mergeTrackShareAliases } from '../utils/tracks'
 
 export interface TrackLoadResult {
   tracks: Track[]
   failedSources: number
 }
 
-async function fetchPlaylist(
-  playlist: MetingPlaylistConfig,
-  apiEndpoint: string,
-): Promise<Track[]> {
-  const params = new URLSearchParams({
-    server: playlist.server,
-    type: 'playlist',
-    id: playlist.playlistId,
-  })
-  // 创建本地 controller，用于实现 8 秒超时与可中止能力
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 8000)
-  try {
-    const response = await fetch(`${apiEndpoint}?${params.toString()}`, {
-      signal: controller.signal,
-    })
-    if (!response.ok) throw new Error(`Meting request failed with ${response.status}`)
+export interface MusicAdapterRegistry {
+  meting: MusicProviderAdapter<MetingPlaylistConfig>
+  local: MusicProviderAdapter<LocalTrackConfig>
+}
 
-    const payload: unknown = await response.json()
-    if (!Array.isArray(payload)) throw new Error('Meting response is not a track list')
+export interface LoadConfiguredTracksOptions {
+  adapters?: Partial<MusicAdapterRegistry>
+}
 
-    const sourceKey = `${playlist.server}:${playlist.playlistId}`
-    return (payload as MetingTrack[])
-      .map((track, index) => mapMetingTrack(track, sourceKey, index))
-      .filter((track): track is Track => track !== null)
-  } finally {
-    // 无论成功失败都要清理定时器，避免资源泄漏
-    clearTimeout(timer)
+const DEFAULT_ADAPTERS: MusicAdapterRegistry = {
+  meting: metingMusicAdapter,
+  local: localMusicAdapter,
+}
+
+const MUSIC_SOURCE_TIMEOUT_MS = 8000
+
+interface ConfiguredSource {
+  load(config: PublicMusicConfig): Promise<Track[]>
+}
+
+function createConfiguredSource<TSource>(
+  adapter: MusicProviderAdapter<TSource>,
+  source: TSource,
+): ConfiguredSource {
+  return {
+    load(config) {
+      return adapter.load(source, {
+        apiEndpoint: config.apiEndpoint,
+        timeoutMs: MUSIC_SOURCE_TIMEOUT_MS,
+      })
+    },
   }
 }
 
-export async function loadConfiguredTracks(config: PublicMusicConfig): Promise<TrackLoadResult> {
+function createConfiguredSources(
+  config: PublicMusicConfig,
+  adapters: MusicAdapterRegistry,
+): ConfiguredSource[] {
   const playlists = config.playlists.filter((playlist) => playlist.enabled !== false)
-  const settled = await Promise.allSettled(
-    playlists.map((playlist) => fetchPlaylist(playlist, config.apiEndpoint)),
-  )
+  return [
+    ...playlists.map((playlist) => createConfiguredSource(adapters.meting, playlist)),
+    ...config.localTracks.map((track) => createConfiguredSource(adapters.local, track)),
+  ]
+}
+
+export async function loadConfiguredTracks(
+  config: PublicMusicConfig,
+  options: LoadConfiguredTracksOptions = {},
+): Promise<TrackLoadResult> {
+  const adapters: MusicAdapterRegistry = {
+    ...DEFAULT_ADAPTERS,
+    ...options.adapters,
+  }
+  const sources = createConfiguredSources(config, adapters)
+  const settled = await Promise.allSettled(sources.map((source) => source.load(config)))
   const remoteTracks: Track[] = []
   let failedSources = 0
 
@@ -51,9 +79,11 @@ export async function loadConfiguredTracks(config: PublicMusicConfig): Promise<T
     else failedSources += 1
   })
 
-  const localTracks = config.localTracks.map(mapLocalTrack)
   return {
-    tracks: deduplicateTracks([...remoteTracks, ...localTracks]),
+    tracks: deduplicateTracks(remoteTracks, (kept, duplicate) => {
+      mergeTrackLyricsProvider(duplicate, kept)
+      mergeTrackShareAliases(kept, duplicate)
+    }),
     failedSources,
   }
 }

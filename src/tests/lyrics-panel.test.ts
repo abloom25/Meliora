@@ -3,37 +3,37 @@ import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import LyricsPanel from '../components/LyricsPanel.vue'
-import { loadLyricsText } from '../services/lyrics'
+import { loadTrackLyrics } from '../services/lyrics'
 import { usePlayerStore } from '../stores/player'
 import { supportsWebAnimations } from '../utils/browser'
-import type { LyricsSnapshot, Track } from '../types/music'
+import type { LyricLine, LyricsSnapshot, Track } from '../types/music'
 
 vi.mock('../services/lyrics', () => ({
-  hasCachedLyrics: vi.fn(() => false),
-  loadLyricsText: vi.fn(),
+  hasCachedTrackLyrics: vi.fn(() => false),
+  loadTrackLyrics: vi.fn(),
+  transferTrackLyricsProvider: vi.fn(),
 }))
 
 vi.mock('../utils/browser', () => ({
   supportsWebAnimations: vi.fn(() => false),
 }))
 
-const mockedLoadLyricsText = vi.mocked(loadLyricsText)
+const mockedLoadTrackLyrics = vi.mocked(loadTrackLyrics)
 const mockedSupportsWebAnimations = vi.mocked(supportsWebAnimations)
 
-const lyricsText = [
-  '[00:00.00]Line zero',
-  '[00:05.00]Line one',
-  '[00:10.00]Line two (Translation two)',
-  '[00:15.00]Line three',
-  '[00:20.00]Line four',
-].join('\n')
+const lyricsLines: LyricLine[] = [
+  { time: 0, text: 'Line zero' },
+  { time: 5, text: 'Line one' },
+  { time: 10, text: 'Line two', translation: 'Translation two' },
+  { time: 15, text: 'Line three' },
+  { time: 20, text: 'Line four' },
+]
 
 const track: Track = {
   id: 'track-1',
   title: 'Test Track',
   artist: 'Meliora',
   audioUrl: '/music/test.mp3',
-  lyricsUrl: '/lyrics/test.lrc',
   kind: 'local',
 }
 
@@ -200,9 +200,9 @@ async function mountLyricsPanel(options: { currentTime?: number; active?: boolea
 
 async function resolveDeferredLyrics(
   wrapper: VueWrapper,
-  deferred: ReturnType<typeof makeDeferred<string>>,
+  deferred: ReturnType<typeof makeDeferred<LyricLine[]>>,
 ) {
-  deferred.resolve(lyricsText)
+  deferred.resolve(lyricsLines)
   await flushVueUpdates()
   setPanelLayout(wrapper)
   await nextTick()
@@ -219,8 +219,8 @@ async function moveTo(store: ReturnType<typeof usePlayerStore>, wrapper: VueWrap
 describe('LyricsPanel scrolling alignment', () => {
   beforeEach(() => {
     vi.useFakeTimers()
-    mockedLoadLyricsText.mockReset()
-    mockedLoadLyricsText.mockResolvedValue(lyricsText)
+    mockedLoadTrackLyrics.mockReset()
+    mockedLoadTrackLyrics.mockResolvedValue(lyricsLines)
     rafCallbacks = []
     installAnimationFrameMock()
     MockResizeObserver.instances = []
@@ -237,8 +237,8 @@ describe('LyricsPanel scrolling alignment', () => {
   })
 
   it('selects and scrolls to currentTime immediately after lyrics finish loading', async () => {
-    const deferred = makeDeferred<string>()
-    mockedLoadLyricsText.mockReturnValueOnce(deferred.promise)
+    const deferred = makeDeferred<LyricLine[]>()
+    mockedLoadTrackLyrics.mockReturnValueOnce(deferred.promise)
     const { wrapper } = await mountLyricsPanel({ currentTime: 12 })
 
     await resolveDeferredLyrics(wrapper, deferred)
@@ -302,6 +302,18 @@ describe('LyricsPanel scrolling alignment', () => {
     expect(
       snapshotWithoutTranslation?.lines.find((line) => line.text === 'Line two'),
     ).not.toHaveProperty('translation')
+  })
+
+  it('reloads lyrics when the active track object is preserved but its store version changes', async () => {
+    const { store } = await mountLyricsPanel()
+    await flushVueUpdates()
+    expect(mockedLoadTrackLyrics).toHaveBeenCalledTimes(1)
+
+    mockedLoadTrackLyrics.mockResolvedValueOnce([{ time: 0, text: 'Reloaded line' }])
+    store.setTracks([{ ...track, title: 'Test Track Reloaded' }])
+    await flushVueUpdates()
+
+    expect(mockedLoadTrackLyrics).toHaveBeenCalledTimes(2)
   })
 
   it('realigns the same active line after ResizeObserver and window resize notifications', async () => {

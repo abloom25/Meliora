@@ -1,5 +1,5 @@
 import { onBeforeUnmount, ref, type Ref } from 'vue'
-import { loadLyricsText } from '../services/lyrics'
+import { loadTrackLyrics } from '../services/lyrics'
 import { usePlayerStore } from '../stores/player'
 import type { PlayerSettings, Track } from '../types/music'
 
@@ -21,10 +21,9 @@ export function preloadCover(url?: string) {
   return image.decode?.().catch(() => undefined) ?? Promise.resolve()
 }
 
-export async function preloadLyrics(url?: string) {
-  if (!url) return
+export async function preloadLyrics(track: Track) {
   try {
-    await loadLyricsText(url)
+    await loadTrackLyrics(track)
   } catch {
     // Lyrics failure must not block audio playback.
   }
@@ -184,7 +183,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     if (direction === 'next') {
       void preloadCover(track.cover)
     }
-    void preloadLyrics(track.lyricsUrl)
+    void preloadLyrics(track)
     return slot.ready
   }
 

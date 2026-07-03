@@ -53,6 +53,47 @@ jobs:
             exit 1
           fi
 
+      - name: Validate GitHub proxy input
+        env:
+          GITHUB_PROXY: ${{ inputs.github_proxy }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import ipaddress
+          import os
+          import sys
+          from urllib.parse import quote, urlparse
+
+          proxy = os.environ.get("GITHUB_PROXY", "").strip()
+          if not proxy:
+              sys.exit(0)
+
+          probe = proxy.replace("{url}", quote("https://api.github.com", safe="")) if "{url}" in proxy else proxy
+          parsed = urlparse(probe)
+          if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+              raise SystemExit("Invalid github_proxy: expected a public http(s) URL")
+
+          host = parsed.hostname.lower().strip("[]")
+          if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+              raise SystemExit("Invalid github_proxy: localhost/private names are not allowed")
+
+          try:
+              address = ipaddress.ip_address(host)
+          except ValueError:
+              sys.exit(0)
+
+          if (
+              address.is_private
+              or address.is_loopback
+              or address.is_link_local
+              or address.is_multicast
+              or address.is_reserved
+              or address.is_unspecified
+          ):
+              raise SystemExit("Invalid github_proxy: private or reserved IP addresses are not allowed")
+          PY
+
       - name: Prepare temporary update branch
         shell: bash
         run: |
@@ -103,12 +144,12 @@ jobs:
             local url
             url="$(github_url "https://api.github.com/${path}")"
             if [ -n "${GITHUB_PROXY:-}" ]; then
-              curl -fsSL \
+              curl -fsSL --max-redirs 0 \
                 -H "Accept: application/vnd.github+json" \
                 -H "User-Agent: Meliora-Updater" \
                 "$url"
             else
-              curl -fsSL \
+              curl -fsSL --max-redirs 0 \
                 -H "Accept: application/vnd.github+json" \
                 -H "Authorization: Bearer ${GH_TOKEN}" \
                 -H "User-Agent: Meliora-Updater" \
@@ -282,6 +323,10 @@ jobs:
         if: env.NO_UPDATE != 'true'
         run: pnpm build
 
+      - name: Check built bundle leakage
+        if: env.NO_UPDATE != 'true'
+        run: pnpm test:bundle
+
       - name: Merge verified update into target branch
         if: env.NO_UPDATE != 'true'
         env:
@@ -292,9 +337,13 @@ jobs:
           git fetch origin "${TARGET_BRANCH}"
           git checkout "${TEMP_BRANCH}"
           git merge --no-edit "origin/${TARGET_BRANCH}"
+          pnpm install --frozen-lockfile
           pnpm test
           pnpm type-check
+          pnpm lint
+          pnpm format:check
           pnpm build
+          pnpm test:bundle
           git push origin "${TEMP_BRANCH}" --force
 
           git checkout "${TARGET_BRANCH}"

@@ -14,7 +14,12 @@
     Save,
     Info,
     Menu,
+    FileJson,
+    PanelLeftClose,
+    PanelLeftOpen,
   } from '@lucide/vue'
+
+  const SIDEBAR_COLLAPSED_KEY = 'meliora:admin-sidebar-collapsed'
 
   defineProps<{
     active: string
@@ -36,12 +41,30 @@
     { id: 'analytics', label: '统计', icon: BarChart3 },
     { id: 'advanced', label: '高级', icon: SlidersHorizontal },
     { id: 'security', label: '安全', icon: ShieldCheck },
+    { id: 'transfer', label: '迁移', icon: FileJson },
     { id: 'about', label: '关于', icon: Info },
   ]
 
   const menuOpen = ref(false)
+  const desktopCollapsed = ref(loadDesktopCollapsed())
   const mobileNavPanelRef = ref<HTMLElement | null>(null)
   const mobileNavHandleRef = ref<HTMLElement | null>(null)
+
+  function loadDesktopCollapsed(): boolean {
+    try {
+      return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true'
+    } catch {
+      return false
+    }
+  }
+
+  function persistDesktopCollapsed(value: boolean) {
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(value))
+    } catch {
+      // localStorage can be unavailable in privacy modes; the UI still works for this session.
+    }
+  }
 
   function getSheetHeight(el: HTMLElement | null): number {
     if (!el) return window.innerHeight
@@ -107,6 +130,11 @@
     menuOpen.value = true
   }
 
+  function toggleDesktopCollapse() {
+    desktopCollapsed.value = !desktopCollapsed.value
+    persistDesktopCollapsed(desktopCollapsed.value)
+  }
+
   function onSidebarClick(event: MouseEvent) {
     if (!menuOpen.value || !isMobileViewport()) return
     const target = event.target as HTMLElement | null
@@ -116,10 +144,22 @@
 </script>
 
 <template>
-  <aside class="admin-sidebar" @click="onSidebarClick">
+  <aside class="admin-sidebar" :class="{ collapsed: desktopCollapsed }" @click="onSidebarClick">
     <div class="sidebar-header">
-      <h1>Meliora</h1>
-      <span class="header-sub">管理后台</span>
+      <div class="sidebar-brand">
+        <h1>Meliora</h1>
+        <span class="header-sub">管理后台</span>
+      </div>
+      <button
+        type="button"
+        class="sidebar-collapse-toggle"
+        :aria-label="desktopCollapsed ? '展开管理导航' : '折叠管理导航'"
+        :title="desktopCollapsed ? '展开导航' : '折叠导航'"
+        @click="toggleDesktopCollapse"
+      >
+        <PanelLeftOpen v-if="desktopCollapsed" :size="17" />
+        <PanelLeftClose v-else :size="17" />
+      </button>
     </div>
 
     <button
@@ -139,10 +179,11 @@
         type="button"
         class="sidebar-tab"
         :class="{ active: active === tab.id }"
+        :title="desktopCollapsed ? tab.label : undefined"
         @click="selectTab(tab.id)"
       >
         <component :is="tab.icon" :size="18" />
-        <span>{{ tab.label }}</span>
+        <span class="sidebar-label">{{ tab.label }}</span>
       </button>
     </nav>
 
@@ -188,7 +229,7 @@
               @click="selectTab(tab.id)"
             >
               <component :is="tab.icon" :size="18" />
-              <span>{{ tab.label }}</span>
+              <span class="sidebar-label">{{ tab.label }}</span>
             </button>
           </nav>
 
@@ -200,15 +241,15 @@
               @click="emitAndClose('save')"
             >
               <Save :size="16" />
-              <span>{{ saving ? '保存中...' : '保存全部' }}</span>
+              <span class="sidebar-label">{{ saving ? '保存中...' : '保存全部' }}</span>
             </button>
             <button type="button" class="sidebar-action logout" @click="emitAndClose('logout')">
               <LogOut :size="15" />
-              <span>退出登录</span>
+              <span class="sidebar-label">退出登录</span>
             </button>
             <button type="button" class="sidebar-action" @click="emitAndClose('back')">
               <ArrowLeft :size="15" />
-              <span>返回播放器</span>
+              <span class="sidebar-label">返回播放器</span>
             </button>
           </div>
         </aside>
@@ -216,17 +257,33 @@
     </Teleport>
 
     <div class="sidebar-footer desktop-footer">
-      <button type="button" class="sidebar-save" :disabled="saving" @click="emitAndClose('save')">
+      <button
+        type="button"
+        class="sidebar-save"
+        :disabled="saving"
+        :title="desktopCollapsed ? (saving ? '保存中...' : '保存全部') : undefined"
+        @click="emitAndClose('save')"
+      >
         <Save :size="16" />
-        <span>{{ saving ? '保存中...' : '保存全部' }}</span>
+        <span class="sidebar-label">{{ saving ? '保存中...' : '保存全部' }}</span>
       </button>
-      <button type="button" class="sidebar-action logout" @click="emitAndClose('logout')">
+      <button
+        type="button"
+        class="sidebar-action logout"
+        :title="desktopCollapsed ? '退出登录' : undefined"
+        @click="emitAndClose('logout')"
+      >
         <LogOut :size="15" />
-        <span>退出登录</span>
+        <span class="sidebar-label">退出登录</span>
       </button>
-      <button type="button" class="sidebar-action" @click="emitAndClose('back')">
+      <button
+        type="button"
+        class="sidebar-action"
+        :title="desktopCollapsed ? '返回播放器' : undefined"
+        @click="emitAndClose('back')"
+      >
         <ArrowLeft :size="15" />
-        <span>返回播放器</span>
+        <span class="sidebar-label">返回播放器</span>
       </button>
     </div>
   </aside>
@@ -234,6 +291,9 @@
 
 <style scoped lang="scss">
   .admin-sidebar {
+    --sidebar-icon-track: 44px;
+    --sidebar-collapse-size: 32px;
+
     flex-shrink: 0;
     width: 200px;
     display: flex;
@@ -241,22 +301,67 @@
     border-right: 1px solid rgba(255, 255, 255, 0.08);
     padding: 20px 12px 18px;
     gap: 16px;
+    transition:
+      width 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+      padding 0.22s cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .sidebar-header {
-    padding: 0 14px 4px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) var(--sidebar-icon-track);
+    align-items: start;
+    gap: 8px;
+    padding: 0 0 4px 14px;
+  }
+
+  .sidebar-brand {
+    min-width: 0;
+    overflow: hidden;
+    transition:
+      opacity 0.12s ease,
+      width 0.12s ease;
+
     h1 {
       margin: 0;
       color: #fff;
       font-size: 1.15rem;
       font-weight: 700;
       letter-spacing: -0.02em;
+      white-space: nowrap;
     }
+  }
 
-    .header-sub {
-      color: var(--text-subtle);
-      font-size: 0.7rem;
-      font-weight: 540;
+  .header-sub {
+    display: block;
+    color: var(--text-subtle);
+    font-size: 0.7rem;
+    font-weight: 540;
+    white-space: nowrap;
+  }
+
+  .sidebar-collapse-toggle {
+    display: inline-flex;
+    width: var(--sidebar-collapse-size);
+    height: var(--sidebar-collapse-size);
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    justify-self: center;
+    margin-top: 1px;
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.055);
+    color: rgba(255, 255, 255, 0.62);
+    cursor: pointer;
+    transition:
+      background 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+      border-color 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+      color 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+
+    &:hover {
+      border-color: rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.09);
+      color: rgba(255, 255, 255, 0.86);
     }
   }
 
@@ -271,6 +376,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    min-width: 0;
     padding: 11px 14px;
     border: none;
     border-radius: 14px;
@@ -294,6 +400,22 @@
     }
   }
 
+  .sidebar-tab > svg,
+  .sidebar-save > svg,
+  .sidebar-action > svg {
+    flex: 0 0 auto;
+  }
+
+  .sidebar-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: clip;
+    white-space: nowrap;
+    transition:
+      opacity 0.12s ease,
+      width 0.12s ease;
+  }
+
   .sidebar-footer {
     display: flex;
     flex-direction: column;
@@ -305,6 +427,7 @@
     align-items: center;
     justify-content: flex-start;
     gap: 8px;
+    min-width: 0;
     padding: 10px 14px;
     border: none;
     border-radius: 14px;
@@ -329,6 +452,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
     padding: 9px 14px;
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 14px;
@@ -361,6 +485,41 @@
     display: none;
   }
 
+  .admin-sidebar.collapsed {
+    width: 72px;
+    padding-right: 14px;
+    padding-left: 14px;
+
+    .sidebar-header {
+      padding: 0 0 4px;
+      grid-template-columns: var(--sidebar-icon-track);
+    }
+
+    .sidebar-brand,
+    .sidebar-label {
+      width: 0;
+      opacity: 0;
+      overflow: hidden;
+      pointer-events: none;
+      white-space: nowrap;
+      transition-duration: 0ms;
+    }
+
+    .sidebar-brand {
+      display: none;
+    }
+
+    .sidebar-tab,
+    .sidebar-save,
+    .sidebar-action {
+      justify-content: center;
+      gap: 0;
+      width: 100%;
+      padding-right: 0;
+      padding-left: 0;
+    }
+  }
+
   @media (max-width: 760px) {
     .admin-sidebar {
       --admin-mobile-nav-top: calc(58px + env(safe-area-inset-top));
@@ -384,9 +543,30 @@
       backdrop-filter: blur(24px) saturate(160%);
     }
 
+    .admin-sidebar.collapsed {
+      width: 100%;
+      padding: max(9px, env(safe-area-inset-top)) 12px 9px;
+
+      .sidebar-header {
+        justify-content: flex-start;
+      }
+
+      .sidebar-brand,
+      .sidebar-label {
+        display: block;
+        width: auto;
+        opacity: 1;
+        overflow: visible;
+        pointer-events: auto;
+      }
+    }
+
     .sidebar-header {
       min-width: 0;
       padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
 
       h1 {
         overflow: hidden;
@@ -398,6 +578,10 @@
       .header-sub {
         font-size: 0.64rem;
       }
+    }
+
+    .sidebar-collapse-toggle {
+      display: none;
     }
 
     .desktop-nav,
@@ -543,6 +727,7 @@
     }
 
     .mobile-nav-panel .sidebar-tab {
+      display: flex;
       flex: 0 0 auto;
       width: 100%;
       gap: 10px;
@@ -565,9 +750,12 @@
 
     .mobile-nav-panel .sidebar-save,
     .mobile-nav-panel .sidebar-action {
+      display: flex;
       width: 100%;
       min-height: 42px;
       justify-content: center;
+      gap: 8px;
+      padding: 0 12px;
     }
 
     .mobile-nav-backdrop-enter-active,

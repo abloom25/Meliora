@@ -74,6 +74,28 @@ describe('admin-api', () => {
     expect(auth.authenticated.value).toBe(false)
   })
 
+  it('can check updates passively without marking admin auth as expired on 403', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ success: true }))
+      .mockResolvedValueOnce(jsonResponse({ error: '未授权' }, { status: 403 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { useAdminAuth } = await import('../admin/composables/useAdminAuth')
+    const { checkUpdate } = await import('../admin/services/admin-api')
+    const auth = useAdminAuth()
+
+    await expect(auth.login('password')).resolves.toBe(true)
+    expect(auth.authenticated.value).toBe(true)
+
+    const result = await checkUpdate('0.2.0', '', false, undefined, {
+      markUnauthenticated: false,
+    })
+
+    expect(result).toEqual({ ok: false, error: '未授权' })
+    expect(auth.authenticated.value).toBe(true)
+  })
+
   it('accepts base64 content length produced by an exact 25 MiB file', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ path: 'public/music/a/audio.mp3' }))
     vi.stubGlobal('fetch', fetchMock)

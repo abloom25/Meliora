@@ -64,6 +64,31 @@ describe('loadLyricsText timeout', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('lets the first caller abort without cancelling the shared lyrics request', async () => {
+    let resolveFetch!: (response: Response) => void
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      return new Promise<Response>((resolve, reject) => {
+        resolveFetch = resolve
+        init?.signal?.addEventListener('abort', () => {
+          reject(init.signal?.reason ?? new DOMException('Aborted', 'AbortError'))
+        })
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const controller = new AbortController()
+    const first = loadLyricsText('https://example.test/first-caller-abort.lrc', controller.signal)
+    const second = loadLyricsText('https://example.test/first-caller-abort.lrc')
+    first.catch(() => {})
+
+    controller.abort(new DOMException('Caller aborted', 'AbortError'))
+
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' })
+    resolveFetch(new Response('shared lyric'))
+    await expect(second).resolves.toBe('shared lyric')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('rejects immediately when a cache hit is called with an already aborted signal', async () => {
     const fetchMock = vi.fn(() => Promise.resolve(new Response('ready lyric')))
     vi.stubGlobal('fetch', fetchMock)

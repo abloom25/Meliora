@@ -45,3 +45,6 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Check built bundle leakage
+        run: pnpm test:bundle

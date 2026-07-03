@@ -100,7 +100,7 @@
               <small>启用 Umami 访问统计</small>
             </span>
           </button>
-          <ToggleSwitch v-model="umamiEnabled" />
+          <ToggleSwitch v-model="umamiEnabled" aria-label="启用 Umami 访问统计" />
         </div>
       </template>
       <div class="analytics-body">
@@ -130,7 +130,7 @@
               <small>GA4 访问统计和 Search Console 验证</small>
             </span>
           </button>
-          <ToggleSwitch v-model="googleAnalyticsEnabled" />
+          <ToggleSwitch v-model="googleAnalyticsEnabled" aria-label="启用 Google Analytics" />
         </div>
       </template>
       <div class="analytics-body">

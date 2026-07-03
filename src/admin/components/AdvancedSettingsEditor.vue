@@ -69,7 +69,7 @@
           <strong>接收预发布版本</strong>
           <small>稳定版也检查 rc、beta、alpha 等预发布更新</small>
         </span>
-        <ToggleSwitch v-model="receivePrereleaseUpdates" />
+        <ToggleSwitch v-model="receivePrereleaseUpdates" aria-label="接收预发布版本" />
       </div>
     </div>
 

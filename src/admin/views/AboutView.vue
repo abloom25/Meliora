@@ -57,6 +57,7 @@
       props.config.githubProxy,
       props.config.receivePrereleaseUpdates === true,
       controller.signal,
+      { markUnauthenticated: openModalOnUpdate },
     )
     if (controller !== checkController) return
     checkController = null
@@ -176,10 +177,14 @@
 
     statusErrorCount.value = 0
     applyUpdateStatus(result.data)
+    const retryDelayMs =
+      result.data.retryAfterSeconds && result.data.retryAfterSeconds > 0
+        ? result.data.retryAfterSeconds * 1000
+        : null
     if (updateRunState.value === 'locating' || updateRunState.value === 'queued') {
-      scheduleStatusPolling(3000)
+      scheduleStatusPolling(retryDelayMs ?? 3000)
     } else if (updateRunState.value === 'running') {
-      scheduleStatusPolling(5000)
+      scheduleStatusPolling(retryDelayMs ?? 5000)
     }
   }
 
@@ -195,79 +200,81 @@
 </script>
 
 <template>
-  <div class="about-page">
-    <div class="about-hero">
-      <div class="hero-icon">
-        <img src="/favicon.svg" alt="Meliora" />
-      </div>
-
-      <h1 class="hero-title">Meliora</h1>
-      <span class="hero-version">v{{ APP_VERSION }}</span>
-
-      <p class="hero-desc">{{ projectDesc }}</p>
-
-      <div class="hero-meta">
-        <a class="meta-link" :href="REPO_URL" target="_blank" rel="noopener noreferrer">
-          <GitFork :size="15" />
-          <span>GitHub 仓库</span>
-          <ExternalLink :size="12" class="external-icon" />
-        </a>
-        <button
-          type="button"
-          class="meta-update-btn"
-          :class="checkState"
-          :disabled="checkState === 'checking'"
-          @click="handleCheckUpdate(true)"
-        >
-          <span>{{ getUpdateButtonText() }}</span>
-          <Loader2 v-if="checkState === 'checking'" :size="15" class="spin" />
-          <Check v-else-if="checkState === 'latest'" :size="15" />
-          <AlertCircle
-            v-else-if="checkState === 'available' || checkState === 'error'"
-            :size="15"
-          />
-          <RefreshCw v-else :size="15" />
-        </button>
-      </div>
-
-      <Transition name="fade">
-        <div v-if="updateMessage" class="update-message">{{ updateMessage }}</div>
-      </Transition>
-
-      <Transition name="fade">
-        <div v-if="updateRunState !== 'idle'" class="update-status" :class="updateRunState">
-          <div class="status-main">
-            <Loader2
-              v-if="
-                updateRunState === 'triggering' ||
-                updateRunState === 'locating' ||
-                updateRunState === 'queued' ||
-                updateRunState === 'running'
-              "
-              :size="15"
-              class="spin"
-            />
-            <Check v-else-if="updateRunState === 'success'" :size="15" />
-            <AlertCircle v-else :size="15" />
-            <span>{{ getRunMessage() }}</span>
-          </div>
-          <div v-if="updateStatus?.run?.htmlUrl" class="status-links">
-            <a :href="updateStatus.run.htmlUrl" target="_blank" rel="noopener noreferrer">
-              查看 GitHub Actions
-              <ExternalLink :size="12" />
-            </a>
-            <a
-              v-if="updateStatus.run.latestCommitUrl && updateRunState === 'success'"
-              :href="updateStatus.run.latestCommitUrl"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              查看更新提交
-              <ExternalLink :size="12" />
-            </a>
-          </div>
+  <div class="about-root">
+    <div class="about-page">
+      <div class="about-hero">
+        <div class="hero-icon">
+          <img src="/favicon.svg" alt="Meliora" />
         </div>
-      </Transition>
+
+        <h1 class="hero-title">Meliora</h1>
+        <span class="hero-version">v{{ APP_VERSION }}</span>
+
+        <p class="hero-desc">{{ projectDesc }}</p>
+
+        <div class="hero-meta">
+          <a class="meta-link" :href="REPO_URL" target="_blank" rel="noopener noreferrer">
+            <GitFork :size="15" />
+            <span>GitHub 仓库</span>
+            <ExternalLink :size="12" class="external-icon" />
+          </a>
+          <button
+            type="button"
+            class="meta-update-btn"
+            :class="checkState"
+            :disabled="checkState === 'checking'"
+            @click="handleCheckUpdate(true)"
+          >
+            <span>{{ getUpdateButtonText() }}</span>
+            <Loader2 v-if="checkState === 'checking'" :size="15" class="spin" />
+            <Check v-else-if="checkState === 'latest'" :size="15" />
+            <AlertCircle
+              v-else-if="checkState === 'available' || checkState === 'error'"
+              :size="15"
+            />
+            <RefreshCw v-else :size="15" />
+          </button>
+        </div>
+
+        <Transition name="fade">
+          <div v-if="updateMessage" class="update-message">{{ updateMessage }}</div>
+        </Transition>
+
+        <Transition name="fade">
+          <div v-if="updateRunState !== 'idle'" class="update-status" :class="updateRunState">
+            <div class="status-main">
+              <Loader2
+                v-if="
+                  updateRunState === 'triggering' ||
+                  updateRunState === 'locating' ||
+                  updateRunState === 'queued' ||
+                  updateRunState === 'running'
+                "
+                :size="15"
+                class="spin"
+              />
+              <Check v-else-if="updateRunState === 'success'" :size="15" />
+              <AlertCircle v-else :size="15" />
+              <span>{{ getRunMessage() }}</span>
+            </div>
+            <div v-if="updateStatus?.run?.htmlUrl" class="status-links">
+              <a :href="updateStatus.run.htmlUrl" target="_blank" rel="noopener noreferrer">
+                查看 GitHub Actions
+                <ExternalLink :size="12" />
+              </a>
+              <a
+                v-if="updateStatus.run.latestCommitUrl && updateRunState === 'success'"
+                :href="updateStatus.run.latestCommitUrl"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                查看更新提交
+                <ExternalLink :size="12" />
+              </a>
+            </div>
+          </div>
+        </Transition>
+      </div>
     </div>
 
     <ConfirmModal
@@ -295,6 +302,10 @@
 </template>
 
 <style scoped lang="scss">
+  .about-root {
+    display: block;
+  }
+
   .about-page {
     min-height: calc(100vh - 48px);
     display: flex;

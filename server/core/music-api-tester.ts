@@ -31,7 +31,7 @@ async function fetchWithTimeout(url: string): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS)
   try {
-    return await fetch(url, { signal: controller.signal })
+    return await fetch(url, { signal: controller.signal, redirect: 'manual' })
   } finally {
     clearTimeout(timer)
   }
@@ -70,6 +70,16 @@ async function testPlaylistApi(
 
   try {
     const response = await fetchWithTimeout(`${config.apiEndpoint.trim()}?${params.toString()}`)
+    if (response.status >= 300 && response.status < 400) {
+      return {
+        server: playlist.server,
+        playlistId: playlist.playlistId,
+        ok: false,
+        status: response.status,
+        trackCount: 0,
+        error: '重定向已拒绝',
+      }
+    }
     if (!response.ok) {
       return {
         server: playlist.server,

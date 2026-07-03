@@ -1,5 +1,8 @@
 <script setup lang="ts">
-  defineProps<{ modelValue: boolean }>()
+  defineProps<{
+    modelValue: boolean
+    ariaLabel?: string
+  }>()
   defineEmits<{ 'update:modelValue': [value: boolean] }>()
 </script>
 
@@ -8,6 +11,7 @@
     <input
       type="checkbox"
       :checked="modelValue"
+      :aria-label="ariaLabel"
       @change="$emit('update:modelValue', ($event.target as HTMLInputElement).checked)"
     />
     <i />

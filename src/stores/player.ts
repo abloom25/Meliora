@@ -1,6 +1,7 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import type { PlayMode, PlayerSettings, Track } from '../types/music'
+import { transferTrackLyricsProvider } from '../services/lyrics'
 import { safeStorage } from '../utils/storage'
 import { createDefaultEqualizer, sanitizeEqualizer } from '../utils/equalizer'
 
@@ -82,6 +83,7 @@ export const usePlayerStore = defineStore('player', () => {
   const tracks = ref<Track[]>([])
   const queue = ref<Track[]>([])
   const queueVersion = ref(0)
+  const currentTrackVersion = ref(0)
   const currentTrackId = ref<string | null>(safeStorage.getItem(LAST_TRACK_KEY))
   const isPlaying = ref(false)
   const currentTime = ref(0)
@@ -100,12 +102,26 @@ export const usePlayerStore = defineStore('player', () => {
     queueVersion.value += 1
   }
 
+  function bumpCurrentTrackVersion() {
+    currentTrackVersion.value += 1
+  }
+
   function setTracks(nextTracks: Track[]) {
     const activeTrack = currentTrackId.value
       ? tracks.value.find((track) => track.id === currentTrackId.value)
       : undefined
     const mergedTracks = activeTrack
-      ? nextTracks.map((track) => (track.id === activeTrack.id ? activeTrack : track))
+      ? nextTracks.map((track) => {
+          if (track.id !== activeTrack.id) return track
+          transferTrackLyricsProvider(track, activeTrack)
+          delete activeTrack.titleVersions
+          delete activeTrack.shareAliases
+          delete activeTrack.album
+          delete activeTrack.cover
+          Object.assign(activeTrack, track)
+          bumpCurrentTrackVersion()
+          return activeTrack
+        })
       : nextTracks
     const trackById = new Map(mergedTracks.map((track) => [track.id, track]))
     const queuedIds = new Set<string>()
@@ -219,6 +235,7 @@ export const usePlayerStore = defineStore('player', () => {
     tracks,
     queue,
     queueVersion,
+    currentTrackVersion,
     currentTrackId,
     currentTrack,
     currentIndex,

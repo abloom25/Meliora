@@ -13,12 +13,13 @@
     Shuffle,
   } from '@lucide/vue'
   import { musicConfig } from '../config/music'
+  import { hasTrackLyricsSource } from '../services/lyrics'
   import { loadConfiguredTracks, loadMusicConfig } from '../services/music'
   import { usePlayerStore } from '../stores/player'
-  import { createTrackShareId, filterTracks } from '../utils/tracks'
-  import { splitDisplayTitle } from '../utils/title'
+  import { filterTracks, trackMatchesShareId } from '../utils/tracks'
   import { applySiteIntegrations } from '../utils/site-integrations'
   import { extractThemeColor, type ThemeColor } from '../utils/theme'
+  import { isInteractiveElement } from '../utils/dom'
   import { useAudioPlayer } from '../composables/useAudioPlayer'
   import { useLyricsWindow } from '../composables/useLyricsWindow'
   import { usePwaInstall } from '../composables/usePwaInstall'
@@ -55,7 +56,7 @@
     useDeviceDetection()
 
   const store = usePlayerStore()
-  const { currentTrack, currentTrackId, currentTime, duration, isPlaying, settings } =
+  const { currentTrack, currentTrackId, currentTime, duration, isPlaying, settings, tracks } =
     storeToRefs(store)
   // --beat-level 高频写入的目标节点：通过 ref 收集真正消费该变量的容器，
   // useBeatAnalyser 会在 RAF 中直接 setProperty 到这些节点，跳过根 :style 的样式重算。
@@ -229,18 +230,23 @@
 
   function onTopbarClick(e: MouseEvent) {
     if (!listOpen.value && !settingsOpen.value) return
-    const target = e.target as HTMLElement | null
-    if (target && target.closest('button, a, [role="button"], input, label')) return
+    if (isInteractiveElement(e.target)) return
     closePanelsAnimated()
   }
 
   const filteredTracks = computed(() => filterTracks(store.tracks, query.value))
-  const currentDisplayTitle = computed(() =>
-    currentTrack.value ? splitDisplayTitle(currentTrack.value.title) : null,
-  )
+  const currentDisplayTitle = computed(() => {
+    const track = currentTrack.value
+    if (!track) return null
+    return {
+      title: track.title,
+      versions: track.titleVersions ?? [],
+    }
+  })
   const lyricsVisible = computed(
     () => lyricsEnabled.value && lyricAvailability.value !== 'unavailable',
   )
+  const settingsAvailable = computed(() => tracks.value.length > 0)
   const lyricsPanelActive = computed(() =>
     isMobileSheet.value
       ? lyricsVisible.value && mobileView.value === 'lyrics'
@@ -322,8 +328,10 @@
       store.setTracks(result.tracks)
       const url = new URL(window.location.href)
       const sharedTrackId = url.searchParams.get('share')
-      const sharedTrack = result.tracks.find((track) => createTrackShareId(track) === sharedTrackId)
-      if (sharedTrack) store.selectTrack(sharedTrack, result.tracks)
+      const sharedTrack = sharedTrackId
+        ? store.tracks.find((track) => trackMatchesShareId(track, sharedTrackId))
+        : null
+      if (sharedTrack) store.selectTrack(sharedTrack, store.tracks)
       if (sharedTrackId) {
         url.searchParams.delete('share')
         window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}`)
@@ -391,6 +399,7 @@
   }
 
   function toggleSettings() {
+    if (!settingsAvailable.value) return
     triggerHaptic('light')
     if (settingsOpen.value) {
       if (usesSheetDrawer()) {
@@ -422,6 +431,11 @@
     panelsSoftenedTimer = window.setTimeout(() => {
       panelsSoftened.value = false
     }, 320)
+  })
+  watch(settingsAvailable, (available) => {
+    if (!available && settingsOpen.value) {
+      settingsOpen.value = false
+    }
   })
 
   watch(compactViewport, () => {
@@ -554,7 +568,7 @@
     // 清空 CORS 回退标记:新封面需要重新尝试 crossorigin 加载以支持取色。
     coverCorsRetry.value = new Set()
     lyricAvailability.value = 'unavailable'
-    if (!currentTrack.value?.lyricsUrl) mobileView.value = 'cover'
+    if (!hasTrackLyricsSource(currentTrack.value)) mobileView.value = 'cover'
     if (!currentTrack.value?.cover) {
       resetTheme()
     }
@@ -620,9 +634,12 @@
         </button>
         <button
           class="nav-button settings-button"
-          :class="{ active: settingsOpen }"
-          :aria-label="settingsOpen ? '关闭设置' : '打开设置'"
-          title="设置"
+          :class="{ active: settingsOpen && settingsAvailable }"
+          :aria-label="
+            settingsAvailable ? (settingsOpen ? '关闭设置' : '打开设置') : '暂无歌曲,设置不可用'
+          "
+          :title="settingsAvailable ? '设置' : '暂无歌曲,设置不可用'"
+          :disabled="!settingsAvailable"
           @click="toggleSettings"
         >
           <Settings :size="19" />

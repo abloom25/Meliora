@@ -11,8 +11,38 @@ export function getFocusableEdges(container: HTMLElement): {
 }
 
 export function isEditableElement(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false
+  if (!(target instanceof Element)) return false
   return Boolean(
-    target.closest('input:not([type="hidden"]),textarea,[contenteditable="true"],[role="search"]'),
+    target.closest(
+      'input:not([type="hidden"]),textarea,select,[contenteditable]:not([contenteditable="false"]),[role="search"]',
+    ),
+  )
+}
+
+export function isInteractiveElement(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false
+  return Boolean(
+    target.closest(
+      [
+        'a[href]',
+        'button',
+        'label',
+        'summary',
+        'input:not([type="hidden"])',
+        'select',
+        'textarea',
+        '[contenteditable]:not([contenteditable="false"])',
+        '[role="button"]',
+        '[role="checkbox"]',
+        '[role="link"]',
+        '[role="menuitem"]',
+        '[role="radio"]',
+        '[role="search"]',
+        '[role="slider"]',
+        '[role="switch"]',
+        '[role="tab"]',
+        '[tabindex]:not([tabindex="-1"])',
+      ].join(','),
+    ),
   )
 }

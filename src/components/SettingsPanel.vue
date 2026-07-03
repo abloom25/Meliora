@@ -52,7 +52,7 @@
           ><span><SlidersHorizontal :size="17" /><strong>音量</strong></span
           ><strong>{{ Math.round(settings.volume * 100) }}%</strong></label
         >
-        <SettingRange v-model="settings.volume" :min="0" :max="1" :step="0.01" />
+        <SettingRange v-model="settings.volume" aria-label="音量" :min="0" :max="1" :step="0.01" />
       </div>
       <div class="setting-row">
         <span
@@ -64,11 +64,11 @@
       </div>
       <div class="setting-row toggle-row">
         <span><strong>平滑切歌</strong><small>切歌前淡出，载入后淡入</small></span>
-        <ToggleSwitch v-model="settings.smoothTrackChange" />
+        <ToggleSwitch v-model="settings.smoothTrackChange" aria-label="平滑切歌" />
       </div>
       <div class="setting-row toggle-row">
         <span><strong>预加载前后歌曲</strong><small>当前歌曲载入后准备上一首和下一首</small></span>
-        <ToggleSwitch v-model="settings.preloadNextTrack" />
+        <ToggleSwitch v-model="settings.preloadNextTrack" aria-label="预加载前后歌曲" />
       </div>
       <SleepTimerControl
         :minutes="sleepTimerMinutes"
@@ -82,7 +82,7 @@
       />
       <div class="setting-row toggle-row">
         <span><strong>失败后自动跳过</strong><small>继续尝试下一首歌曲</small></span>
-        <ToggleSwitch v-model="settings.skipOnError" />
+        <ToggleSwitch v-model="settings.skipOnError" aria-label="失败后自动跳过" />
       </div>
     </div>
 
@@ -99,7 +99,7 @@
       <h3 class="settings-section-title">显示</h3>
       <div class="setting-row toggle-row">
         <span><strong>自动隐藏上下控件</strong><small>鼠标闲置 30 秒后只保留歌曲内容</small></span>
-        <ToggleSwitch v-model="settings.autoHideChrome" />
+        <ToggleSwitch v-model="settings.autoHideChrome" aria-label="自动隐藏上下控件" />
       </div>
       <div v-if="!portableDevice" class="setting-row toggle-row">
         <span
@@ -108,6 +108,7 @@
         >
         <ToggleSwitch
           :model-value="fullscreenActive"
+          aria-label="全屏模式"
           @update:model-value="emit('toggleFullscreenMode')"
         />
       </div>
@@ -116,15 +117,21 @@
           ><span><strong>歌词字号</strong></span
           ><strong>{{ settings.lyricFontSize }}px</strong></label
         >
-        <SettingRange v-model="settings.lyricFontSize" :min="15" :max="30" :step="1" />
+        <SettingRange
+          v-model="settings.lyricFontSize"
+          aria-label="歌词字号"
+          :min="15"
+          :max="30"
+          :step="1"
+        />
       </div>
       <div class="setting-row toggle-row">
         <span><strong>歌词动画</strong><small>开启牵拉、淡入淡出与状态切换动画</small></span>
-        <ToggleSwitch v-model="settings.lyricAnimation" />
+        <ToggleSwitch v-model="settings.lyricAnimation" aria-label="歌词动画" />
       </div>
       <div class="setting-row toggle-row">
         <span><strong>歌词翻译</strong><small>显示歌词中解析出的翻译文本</small></span>
-        <ToggleSwitch v-model="settings.lyricTranslation" />
+        <ToggleSwitch v-model="settings.lyricTranslation" aria-label="歌词翻译" />
       </div>
       <button
         v-if="lyricsWindowSupported"
@@ -167,28 +174,46 @@
       <h3 class="settings-section-title">背景</h3>
       <div class="setting-row toggle-row">
         <span><strong>动态封面背景</strong><small>使用当前封面渲染背景</small></span>
-        <ToggleSwitch v-model="settings.dynamicBackground" />
+        <ToggleSwitch v-model="settings.dynamicBackground" aria-label="动态封面背景" />
       </div>
       <div class="setting-group">
         <label
           ><span><strong>背景模糊</strong></span
           ><strong>{{ settings.backgroundBlur }}px</strong></label
         >
-        <SettingRange v-model="settings.backgroundBlur" :min="45" :max="130" :step="1" />
+        <SettingRange
+          v-model="settings.backgroundBlur"
+          aria-label="背景模糊"
+          :min="45"
+          :max="130"
+          :step="1"
+        />
       </div>
       <div class="setting-group">
         <label
           ><span><strong>背景饱和度</strong></span
           ><strong>{{ Math.round(settings.backgroundSaturation * 100) }}%</strong></label
         >
-        <SettingRange v-model="settings.backgroundSaturation" :min="0.7" :max="1.8" :step="0.05" />
+        <SettingRange
+          v-model="settings.backgroundSaturation"
+          aria-label="背景饱和度"
+          :min="0.7"
+          :max="1.8"
+          :step="0.05"
+        />
       </div>
       <div class="setting-group">
         <label
           ><span><strong>节奏亮度</strong></span
           ><strong>{{ Math.round(settings.beatBrightness * 100) }}%</strong></label
         >
-        <SettingRange v-model="settings.beatBrightness" :min="0" :max="0.65" :step="0.05" />
+        <SettingRange
+          v-model="settings.beatBrightness"
+          aria-label="节奏亮度"
+          :min="0"
+          :max="0.65"
+          :step="0.05"
+        />
       </div>
     </div>
 

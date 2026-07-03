@@ -4,6 +4,7 @@ import { basename, extname, join, relative } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const distDir = join(process.cwd(), 'dist')
+const explicitBundleCheck = process.argv.some((arg) => arg.includes('bundle-leakage.test.ts'))
 const textExtensions = new Set([
   '',
   '.css',
@@ -44,9 +45,10 @@ function isAdminOrSharedBundle(path: string): boolean {
 }
 
 describe('built bundle leakage checks', () => {
-  it.skipIf(!existsSync(distDir))(
+  it.skipIf(!existsSync(distDir) && !explicitBundleCheck)(
     'does not ship removed runtime config or known secrets',
     async () => {
+      expect(existsSync(distDir), 'dist must exist before running bundle leakage checks').toBe(true)
       const files = await listTextFiles(distDir)
       const leaks: string[] = []
 

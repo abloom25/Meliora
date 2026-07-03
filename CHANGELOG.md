@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-rc4] - 2026-07-03
+
+### Added
+
+- **管理后台配置迁移页**:新增 `src/admin/views/ConfigTransferView.vue`,并在 `AdminSidebar` 中加入「迁移」导航项(`FileJson` 图标);页面提供「导出未加密配置」和「导入未加密配置」两块操作面板,导出前调用 `validateMusicConfig(props.config)` 对当前表单配置做完整 schema 校验,通过后生成 `meliora-config-plain-<ISO 时间>.json`;导出确认弹窗明确提示明文 JSON 会包含站点配置、音乐 API Token、GitHub 代理、预发布开关等敏感字段,同时说明管理员登录密码不会被反向导出;导入流程通过隐藏 `<input type="file" accept="application/json,.json">` 读取 JSON,解析失败提示「JSON 格式无效」,schema 校验失败时拼接具体错误,校验通过后先进入「覆盖当前配置?」确认弹窗,确认后仅更新后台表单并提示「确认无误后请保存」,不会直接提交到仓库
+- **桌面侧边栏折叠模式**:`AdminSidebar` 新增 `desktopCollapsed` 状态与 `meliora:admin-sidebar-collapsed` localStorage 持久化键,桌面端可通过 `PanelLeftClose` / `PanelLeftOpen` 图标按钮在 200px 完整导航和 72px 图标导航间切换;折叠后隐藏品牌文案和 tab 文案,保留图标、tooltip、保存/退出/返回按钮的可访问标题;移动端强制恢复完整 sticky 顶栏布局,避免折叠状态污染手机导航
+- **音乐来源适配器层**:新增 `src/services/music-adapters/types.ts` 定义 `MusicProviderAdapter<TSource>` 与 `MusicProviderContext`;新增 `local.ts` / `meting.ts` 两个 adapter,分别处理本地曲目映射和 Meting 歌单拉取;`loadConfiguredTracks` 支持通过 `LoadConfiguredTracksOptions.adapters` 注入测试/自定义 adapter,并把每个来源统一封装为 `ConfiguredSource.load(config)` 任务,后续新增其他音乐来源时不再需要把逻辑塞进 `src/services/music.ts`
+- **曲目级歌词 Provider 注册表**:`src/services/lyrics.ts` 新增 `TrackLyricsProvider`、`registerTrackLyrics`、`loadTrackLyrics`、`hasTrackLyricsSource`、`hasCachedTrackLyrics`、`transferTrackLyricsProvider`、`mergeTrackLyricsProvider`;歌词来源从 `Track.lyricsUrl` 字段迁移到 WeakMap 注册表,本地曲目 provider 优先级为 20,Meting provider 优先级为 10,去重时高优先级 provider 会保留到最终曲目;`loadLrcLyrics` 统一负责 `loadLyricsText` + `parseLyrics` + 空歌词过滤
+- **分享别名与标题版本兼容**:`Track` 类型新增 `titleVersions?` 和 `shareAliases?`,并将 `kind` 扩展为 `'meting' | 'remote' | 'local'`;`mapMetingTrack` / `mapLocalTrack` 通过 `splitDisplayTitle` 把标题中的版本信息拆入 `titleVersions`,`formatTrackDisplayTitle` 用于显示和分享文案;`trackIdentity` 将主标题和所有版本标题一起参与归一化,`trackMatchesShareId` 同时匹配当前哈希和历史 `shareAliases`,保证旧版基于原始标题生成的 `?share=` 链接在标题拆分后仍能定位歌曲
+- **更新 workflow 防护测试**:新增 `server/tests/update-workflow.test.ts`,静态校验 `.github/workflows/update-from-upstream.yml` 必须包含 GitHub proxy 输入校验、`curl --max-redirs 0`、以及合并目标分支后重新执行 `pnpm install --frozen-lockfile`、`pnpm test`、`pnpm type-check`、`pnpm lint`、`pnpm format:check`、`pnpm build`、`pnpm test:bundle`
+- **音乐 API 重定向测试**:新增 `server/tests/music-api-tester.test.ts`,覆盖后台音乐 API 测试遇到 302 重定向时不会跟随到内网/元数据地址,并返回 `error: '重定向已拒绝'`
+- **配置迁移、管理导航和播放器测试补充**:新增 `src/tests/admin-config-transfer.test.ts` 覆盖迁移入口、桌面侧边栏折叠恢复、明文配置导出风险确认、合法 JSON 导入覆盖确认、非法 JSON 校验失败;新增/扩展 `about-update-status`、`admin-about-navigation`、`dom-utils`、`settings-controls-a11y`、`track-lyrics-service`、`use-drawer-sheet`、`use-keyboard-shortcuts` 等测试,覆盖本次 UI 与数据流改动
+
+### Changed
+
+- **管理后台页面壳层重组**:`DashboardView.vue` 新增 `.dashboard-shell` 包裹 `AdminSidebar` 和 `dashboard-content`,桌面端保持横向布局,760px 以下改为纵向布局;tab 切换新增 `transfer` 分支,将 `ConfigTransferView` 接入主后台并复用现有 `showMessage` 通知;确认弹窗和 Toast 移入 shell 内部,确保迁移页、关于页和设置页的遮罩层级一致
+- **关于页更新轮询更精细**:`AboutView.vue` 调用 `checkUpdate` 时传入 `{ markUnauthenticated: openModalOnUpdate }`,避免静默轮询状态时误把认证弹窗打断到前台;`refreshUpdateStatus` 开始读取服务端返回的 `retryAfterSeconds`,当 workflow 状态为 `locating` / `queued` / `running` 时优先使用服务端建议的轮询间隔,否则回退到 3s/5s;模板外层增加 `.about-root`,让关于页在后台 shell 中布局更稳定
+- **管理后台表单可访问性补强**:`AdvancedSettingsEditor` 的预发布开关、`AnalyticsSettingsEditor` 的 Umami/Google Analytics 开关、`PlaylistEditor` 的歌单启用开关均补充明确 `aria-label`,让图标/开关控件在读屏器中不再只有泛化状态
+- **播放器歌词加载链路改为按曲目加载**:`LyricsPanel.vue` 不再监听 `currentTrack.lyricsUrl`,改为监听 `[currentTrack.id, currentTrackVersion]` 并调用 `loadTrackLyrics(currentTrack)`;歌词缓存判断改为 `hasCachedTrackLyrics(track)`,空歌词/无 provider 统一进入 `empty`;`usePreloadPool` 和 `useAudioPlayer` 的歌词预加载也改为传入完整 `Track`,使本地曲目、Meting 曲目和未来 adapter 曲目的歌词来源都走同一套 provider 机制
+- **当前曲目对象保活更新**:`src/stores/player.ts` 新增 `currentTrackVersion`;`setTracks` 在刷新曲库时若当前歌曲仍存在,保留原 `activeTrack` 引用并把新字段 `Object.assign` 回去,同时调用 `transferTrackLyricsProvider(track, activeTrack)` 迁移歌词 provider 并递增 `currentTrackVersion`;这样可以避免音频播放中的当前曲目对象被替换导致播放状态、歌词和预加载出现短暂脱节
+- **曲目去重保留元数据**:`deduplicateTracks` 从 `Set` 改为 `Map<string, Track>`,新增 `mergeDuplicate` 回调;`loadConfiguredTracks` 在远程/本地来源去重时会合并歌词 provider 和分享别名,避免同一首歌在多个来源出现时丢失歌词来源或旧分享链接兼容信息
+- **搜索和展示支持标题版本**:`filterTracks` 会同时匹配 `track.titleVersions`;`TrackList` 不再对 `track.title` 现场调用 `splitDisplayTitle`,而是直接消费 `track.title` 与 `track.titleVersions`,避免列表渲染时重复拆分标题;播放器顶部标题同样改为从 `currentTrack.titleVersions` 读取版本信息
+- **分享文案统一使用展示标题**:`useTrackShare` 从 `splitDisplayTitle(track.title)` 改为 `formatTrackDisplayTitle(track)`,分享标题包含主标题和版本信息,分享 URL 继续使用 `?share=<createTrackShareId(track)>`,但打开链接时 `PlayerView` 通过 `trackMatchesShareId` 匹配当前哈希或历史别名
+- **设置面板空曲库禁用**:`PlayerView.vue` 新增 `settingsAvailable = tracks.length > 0`;没有歌曲时设置按钮禁用,`aria-label` / `title` 显示「暂无歌曲,设置不可用」,如果曲库变空时设置面板已打开会自动关闭,避免空曲库下进入无意义设置抽屉
+- **顶栏点击关闭面板更稳**:`PlayerView.onTopbarClick` 改用 `isInteractiveElement(e.target)` 判断交互元素,替代手写 `closest('button, a, [role="button"], input, label')`,让 label、输入框、按钮及后续扩展的交互控件不误触发关闭面板
+- **开发生成流程统一**:`package.json` 新增 `generate:dev`,将 `predev`、`pretype-check`、`pretest`、`pretest:watch`、`prelint` 统一改为 `pnpm generate:dev`;`test:bundle` 显式加入脚本,本地与 CI 都能用同一命令检查构建产物泄漏
+- **CI 质量门禁加严**:`main-validation.yml` 与 `pr-validation.yml` 在 `pnpm build` 后新增 `pnpm test:bundle`;`update-from-upstream.yml` 在验证阶段和合并目标分支后都加入 bundle 泄漏检查,并在最终合并前补跑 `pnpm install --frozen-lockfile`、lint、format:check,减少临时分支落后目标分支时绕过质量门禁的可能
+- **GitHub proxy 输入和请求策略收紧**:`update-from-upstream.yml` 新增 `Validate GitHub proxy input` 步骤,拒绝非 http(s)、无 hostname、localhost、`.localhost`、`.local`、私有/回环/link-local/组播/reserved/unspecified IP;workflow 中经代理访问 GitHub API 的 `curl` 改为 `--max-redirs 0`,避免代理或恶意响应把请求重定向到非预期地址
+- **bundle 泄漏测试显式执行时必须有 dist**:`server/tests/bundle-leakage.test.ts` 增加 `explicitBundleCheck`,只有普通全量测试且 `dist` 不存在时才 skip;当用户显式运行 `pnpm test:bundle` 时如果 `dist` 缺失会直接失败,避免误以为检查已执行
+
+### Fixed
+
+- **歌词请求取消误伤共享缓存**:`loadLyricsText` 调整 Abort 语义:缓存层内部 `AbortController` 只负责 8 秒超时,调用方传入的 `signal` 只取消当前等待(`withAbortSignal`),不再把外部 abort 转发到共享 fetch;修复快速切歌、预加载和面板重载同时请求同一个歌词 URL 时,一个消费者取消会把其他消费者一起取消的问题
+- **更新检查拒绝 GitHub 重定向**:`server/core/update-handler.ts` 对 latest release、tags、workflow runs、workflow dispatch 请求均设置 `redirect: 'manual'`;当 GitHub 或代理返回 3xx 时,检查更新映射为 `400` 并提示「GitHub 代理重定向已拒绝,请使用直连的公网代理地址」,防止代理配置把服务端请求带到非预期目标
+- **音乐 API 测试拒绝重定向**:`server/core/music-api-tester.ts` 的 `fetchWithTimeout` 增加 `redirect: 'manual'`,歌单测试遇到 3xx 时返回失败结果、保留状态码并显示「重定向已拒绝」,避免后台测试接口跟随重定向访问内网地址
+- **当前曲目刷新后歌词不更新**:曲库重新加载时如果当前曲目 ID 不变但歌词 provider、标题版本或分享别名发生变化,现在通过 `currentTrackVersion` 触发 `LyricsPanel` 重新加载歌词,同时保留当前播放对象引用,修复配置更新/远程歌单刷新后歌词仍使用旧来源的问题
+- **旧分享链接在标题拆分后失效**:`mapMetingTrack` / `mapLocalTrack` 会根据拆分前原始标题生成 legacy share ID,当它与新 share ID 不一致时写入 `shareAliases`;`PlayerView` 打开 `?share=` 时同时匹配别名,修复标题从「歌名 (版本)」拆为 `title + titleVersions` 后旧链接找不到歌曲的问题
+- **空曲库仍可打开设置**:设置按钮在 `tracks.length === 0` 时禁用并自动关闭已打开的设置面板,避免没有任何歌曲时打开设置抽屉造成误导
+- **明文配置导入/导出类型构建问题**:`admin-config-transfer.test.ts` 改为显式保存导出的 Blob holder,并使用 `find(...).exists()` 做 Vue Test Utils 断言,修复 `vue-tsc -b` 在项目引用构建下对可选链和 `get().exists()` 的类型误判
+- **音乐 adapter 联合泛型构建问题**:`src/services/music.ts` 将 `ConfiguredMusicSource<T>` 联合改为闭包式 `ConfiguredSource.load(config)`,消除 `ConfiguredMusicSource<LocalTrackConfig>` 被错误传给 `ConfiguredMusicSource<MetingPlaylistConfig>` 的 TypeScript 构建错误
+
 ## [0.2.0-rc3] - 2026-07-01
 
 ### Added
@@ -71,6 +112,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`SettingsPanel.vue` 15 处 props 直接修改**:组件改为使用 Pinia store 后彻底消除 `vue/no-mutating-props` 违规
 - **5 处 Prettier 格式化违规**:`useFocusTrap.ts` import 语句、`PlayerView.vue` 缩进/解构/多行属性、`TrackList.vue` v-model 换行均由 `eslint --fix` 自动修复
 
+[0.2.0-rc4]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc4
 [0.2.0-rc3]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc3
 
 ## [0.2.0-rc2] - 2026-06-30

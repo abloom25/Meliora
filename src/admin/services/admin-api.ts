@@ -300,6 +300,7 @@ export async function checkUpdate(
   githubProxy?: string,
   receivePrereleaseUpdates = false,
   signal?: AbortSignal,
+  options: { markUnauthenticated?: boolean } = {},
 ): Promise<{ ok: boolean; data?: UpdateInfo; error?: string }> {
   try {
     const response = await fetch('/api/check-update', {
@@ -314,7 +315,7 @@ export async function checkUpdate(
       signal,
     })
     if (!response.ok) {
-      if (markUnauthenticatedResponse(response)) {
+      if (options.markUnauthenticated !== false && markUnauthenticatedResponse(response)) {
         return { ok: false, error: '登录已过期,请重新登录' }
       }
       const data = (await response.json().catch(() => ({}))) as { error?: string; detail?: string }

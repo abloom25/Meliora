@@ -132,9 +132,13 @@ async function fetchLatestRelease(
   const url = githubUrl(`/repos/${UPSTREAM_REPO}/releases/latest`, proxy)
   const response = await fetch(url, {
     headers: githubHeaders(env, url),
+    redirect: 'manual',
     signal,
   })
 
+  if (response.status >= 300 && response.status < 400) {
+    throw createGitHubError(`GitHub latest release redirected: ${response.status}`, response.status)
+  }
   if (response.status === 404) return null
   if (!response.ok) {
     throw createGitHubError(`GitHub latest release failed: ${response.status}`, response.status)
@@ -152,9 +156,13 @@ async function fetchLatestTag(
   const url = githubUrl(`/repos/${UPSTREAM_REPO}/tags?per_page=100`, proxy)
   const response = await fetch(url, {
     headers: githubHeaders(env, url),
+    redirect: 'manual',
     signal,
   })
 
+  if (response.status >= 300 && response.status < 400) {
+    throw createGitHubError(`GitHub tags redirected: ${response.status}`, response.status)
+  }
   if (!response.ok) {
     throw createGitHubError(`GitHub tags failed: ${response.status}`, response.status)
   }
@@ -180,6 +188,9 @@ function mapGitHubError(error: unknown): { error: string; status: number } {
   if (isAbortError(error)) return { error: '检查更新超时,请稍后重试', status: 504 }
 
   const status = (error as GitHubRequestError).status ?? 0
+  if (status >= 300 && status < 400) {
+    return { error: 'GitHub 代理重定向已拒绝,请使用直连的公网代理地址', status: 400 }
+  }
   if (status === 401 || status === 403) {
     return { error: 'GitHub 鉴权失败或速率受限,请检查 GH_TOKEN 权限', status: 502 }
   }
@@ -353,6 +364,7 @@ async function fetchWorkflowRuns(env: Env, signal: AbortSignal): Promise<GitHubW
   )
   const response = await fetch(url, {
     headers: githubHeaders(env, url),
+    redirect: 'manual',
     signal,
   })
 
@@ -504,6 +516,7 @@ export async function triggerUpdate(
         Authorization: `Bearer ${env.GH_TOKEN}`,
         'Content-Type': 'application/json',
       },
+      redirect: 'manual',
       body: JSON.stringify({
         ref: env.GH_BRANCH || 'main',
         inputs: {

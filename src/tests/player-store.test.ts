@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { loadTrackLyrics, registerTrackLyrics } from '../services/lyrics'
 import { migrateSettings, usePlayerStore } from '../stores/player'
 import type { PlayerSettings, Track } from '../types/music'
 
@@ -95,6 +96,51 @@ describe('player store', () => {
     expect(store.queue[1]).toBe(activeTrack)
     expect(store.tracks.map((track) => track.id)).toEqual(['2', '3', '4'])
     expect(store.currentTrackId).toBe('2')
+  })
+
+  it('updates active track metadata and lyrics provider while preserving the active object', async () => {
+    const store = usePlayerStore()
+    store.setTracks(tracks)
+    store.selectTrack(tracks[1]!, tracks)
+    const activeTrack = store.currentTrack
+    const initialTrackVersion = store.currentTrackVersion
+    const refreshedTrack: Track = {
+      ...tracks[1]!,
+      title: 'Two updated',
+      titleVersions: ['Live'],
+      cover: '/cover.jpg',
+    }
+    registerTrackLyrics(refreshedTrack, {
+      cacheKey: 'lyrics:updated',
+      load: () => Promise.resolve([{ time: 2, text: 'Updated lyric' }]),
+    })
+
+    store.setTracks([tracks[0]!, refreshedTrack, tracks[2]!])
+
+    expect(store.currentTrack).toBe(activeTrack)
+    expect(store.currentTrackVersion).toBe(initialTrackVersion + 1)
+    expect(store.currentTrack).toMatchObject({
+      title: 'Two updated',
+      titleVersions: ['Live'],
+      cover: '/cover.jpg',
+    })
+    expect(store.currentTrack).not.toHaveProperty('revision')
+    await expect(loadTrackLyrics(store.currentTrack!)).resolves.toEqual([
+      { time: 2, text: 'Updated lyric' },
+    ])
+
+    store.setTracks([
+      tracks[0]!,
+      { id: '2', title: 'Two plain', artist: 'B', audioUrl: '/2.mp3', kind: 'local' },
+      tracks[2]!,
+    ])
+
+    expect(store.currentTrack).toBe(activeTrack)
+    expect(store.currentTrackVersion).toBe(initialTrackVersion + 2)
+    expect(store.currentTrack).toMatchObject({ title: 'Two plain' })
+    expect(store.currentTrack).not.toHaveProperty('titleVersions')
+    expect(store.currentTrack).not.toHaveProperty('cover')
+    await expect(loadTrackLyrics(store.currentTrack!)).resolves.toEqual([])
   })
 
   it('clears the current track when it no longer exists after refreshing the library', () => {

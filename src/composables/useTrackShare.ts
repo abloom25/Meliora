@@ -1,7 +1,6 @@
 import type { Ref } from 'vue'
 import type { Track } from '../types/music'
-import { createTrackShareId } from '../utils/tracks'
-import { splitDisplayTitle } from '../utils/title'
+import { createTrackShareId, formatTrackDisplayTitle } from '../utils/tracks'
 import type { HapticStyle } from './useHaptic'
 
 export interface UseTrackShareOptions {
@@ -33,8 +32,7 @@ export function useTrackShare(options: UseTrackShareOptions) {
 
     const url = new URL(window.location.pathname, window.location.origin)
     url.searchParams.set('share', createTrackShareId(track))
-    const displayTitle = splitDisplayTitle(track.title).title
-    const shareTitle = `${displayTitle} - ${track.artist}`
+    const shareTitle = `${formatTrackDisplayTitle(track)} - ${track.artist}`
     const shareText = `Meliora: ${shareTitle}`
     const shareData = {
       title: shareTitle,

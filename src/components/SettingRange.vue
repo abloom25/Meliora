@@ -8,8 +8,9 @@
       max: number
       step?: number
       disabled?: boolean
+      ariaLabel?: string
     }>(),
-    { step: 1, disabled: false },
+    { step: 1, disabled: false, ariaLabel: undefined },
   )
 
   const emit = defineEmits<{ 'update:modelValue': [value: number] }>()
@@ -34,6 +35,7 @@
     :step="step"
     :value="modelValue"
     :disabled="disabled"
+    :aria-label="ariaLabel"
     :style="{ '--setting-progress': `${progress}%` }"
     @input="onInput"
   />

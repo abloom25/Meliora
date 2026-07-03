@@ -1,5 +1,5 @@
 import { onMounted, onBeforeUnmount, type Ref } from 'vue'
-import { isEditableElement } from '../utils/dom'
+import { isInteractiveElement } from '../utils/dom'
 
 export function useKeyboardShortcuts({
   currentTime,
@@ -25,7 +25,7 @@ export function useKeyboardShortcuts({
   }
 
   function handler(e: KeyboardEvent) {
-    if (isEditableElement(e.target)) {
+    if (isInteractiveElement(e.target)) {
       return
     }
 

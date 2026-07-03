@@ -47,7 +47,11 @@
     <h3 class="settings-section-title">音效</h3>
     <div class="setting-row toggle-row">
       <span><strong>均衡器</strong><small>调整各频段增益</small></span>
-      <ToggleSwitch :model-value="enabled" @update:model-value="emit('update:enabled', $event)" />
+      <ToggleSwitch
+        :model-value="enabled"
+        aria-label="均衡器"
+        @update:model-value="emit('update:enabled', $event)"
+      />
     </div>
     <div class="setting-group eq-preset-group">
       <label

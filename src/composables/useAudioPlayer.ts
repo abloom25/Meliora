@@ -522,7 +522,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         slot.audio.src = track.audioUrl
         slot.audio.load()
         void preloadCover(track.cover)
-        void preloadLyrics(track.lyricsUrl)
+        void preloadLyrics(track)
       }
 
       // ===== 极简同步阶段：只做 audio 引用切换 + reactivity =====

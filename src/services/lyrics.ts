@@ -1,4 +1,7 @@
+import { toRaw } from 'vue'
 import { LruCache } from '../utils/lru-cache'
+import type { LyricLine, Track } from '../types/music'
+import { hasMeaningfulLyrics, parseLyrics } from '../utils/lyrics'
 
 interface LyricsCacheEntry {
   promise: Promise<string>
@@ -6,38 +9,40 @@ interface LyricsCacheEntry {
 }
 
 const lyricsCache = new LruCache<string, LyricsCacheEntry>(64)
+const trackLyricsProviders = new WeakMap<Track, TrackLyricsProvider>()
 
 // 歌词请求的默认超时时间（毫秒）
 const LYRICS_FETCH_TIMEOUT_MS = 8000
 
+export interface TrackLyricsProvider {
+  cacheKey: string
+  priority?: number
+  isCached?: () => boolean
+  load: (signal?: AbortSignal) => Promise<LyricLine[]>
+}
+
+function trackLyricsKey(track: Track): Track {
+  return toRaw(track) as Track
+}
+
 export function loadLyricsText(url: string, signal?: AbortSignal): Promise<string> {
   const existing = lyricsCache.get(url)
   if (existing) return withAbortSignal(existing.promise, signal, existing.ready)
+  if (signal?.aborted) return Promise.reject(createAbortReason(signal))
 
-  // 本地 controller：负责超时中止；同时把外部 signal 的 abort 事件转发过来
+  // 本地 controller 只负责缓存层请求超时。调用方 abort 只取消自己的等待,
+  // 不取消共享 fetch,避免快速切歌时把同 URL 的预加载/后续请求一起误伤。
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), LYRICS_FETCH_TIMEOUT_MS)
 
-  // 链接外部 signal：外部 abort → 本地 abort
-  // 将 forwardAbort 存入 entry 以便 cleanup 时精准移除，防止误删其他请求的监听器
-  const entry: LyricsCacheEntry & { forwardAbort?: () => void } = {
+  const entry: LyricsCacheEntry = {
     ready: false,
     promise: Promise.resolve(''),
   }
-  const forwardAbort = () => controller.abort(signal?.reason)
-  entry.forwardAbort = forwardAbort
-  if (signal) {
-    if (signal.aborted) {
-      controller.abort(signal.reason)
-    } else {
-      signal.addEventListener('abort', forwardAbort, { once: true })
-    }
-  }
 
-  // 清理本次请求占用的资源（定时器与外部 signal 监听器）
+  // 清理本次缓存层请求占用的资源。
   const cleanup = () => {
     clearTimeout(timer)
-    if (signal) signal.removeEventListener('abort', entry.forwardAbort!)
   }
 
   entry.promise = fetch(url, { cache: 'force-cache', signal: controller.signal })
@@ -58,7 +63,7 @@ export function loadLyricsText(url: string, signal?: AbortSignal): Promise<strin
     })
 
   lyricsCache.set(url, entry)
-  return entry.promise
+  return withAbortSignal(entry.promise, signal, false)
 }
 
 function withAbortSignal(
@@ -97,4 +102,49 @@ function createAbortReason(signal: AbortSignal): unknown {
 export function hasCachedLyrics(url: string): boolean {
   if (!lyricsCache.has(url)) return false
   return lyricsCache.get(url)?.ready ?? false
+}
+
+export async function loadLrcLyrics(url: string, signal?: AbortSignal): Promise<LyricLine[]> {
+  const text = await loadLyricsText(url, signal)
+  const lines = parseLyrics(text)
+  return hasMeaningfulLyrics(lines) ? lines : []
+}
+
+export function registerTrackLyrics(track: Track, provider: TrackLyricsProvider) {
+  trackLyricsProviders.set(trackLyricsKey(track), provider)
+}
+
+export function transferTrackLyricsProvider(source: Track, target: Track) {
+  const targetKey = trackLyricsKey(target)
+  const provider = trackLyricsProviders.get(trackLyricsKey(source))
+  if (provider) {
+    trackLyricsProviders.set(targetKey, provider)
+  } else {
+    trackLyricsProviders.delete(targetKey)
+  }
+}
+
+export function mergeTrackLyricsProvider(source: Track, target: Track) {
+  const sourceProvider = trackLyricsProviders.get(trackLyricsKey(source))
+  if (!sourceProvider) return
+  const targetKey = trackLyricsKey(target)
+  const targetProvider = trackLyricsProviders.get(targetKey)
+  if (targetProvider && (targetProvider.priority ?? 0) >= (sourceProvider.priority ?? 0)) return
+  transferTrackLyricsProvider(source, target)
+}
+
+export function loadTrackLyrics(track: Track, signal?: AbortSignal): Promise<LyricLine[]> {
+  const provider = trackLyricsProviders.get(trackLyricsKey(track))
+  if (provider) return provider.load(signal)
+  return Promise.resolve([])
+}
+
+export function hasTrackLyricsSource(track: Track | null | undefined): boolean {
+  return Boolean(track && trackLyricsProviders.has(trackLyricsKey(track)))
+}
+
+export function hasCachedTrackLyrics(track: Track): boolean {
+  const provider = trackLyricsProviders.get(trackLyricsKey(track))
+  if (provider?.isCached) return provider.isCached()
+  return false
 }

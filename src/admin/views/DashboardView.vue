@@ -14,6 +14,7 @@
   import AnalyticsSettingsEditor from '../components/AnalyticsSettingsEditor.vue'
   import AdvancedSettingsEditor from '../components/AdvancedSettingsEditor.vue'
   import SecurityEditor from '../components/SecurityEditor.vue'
+  import ConfigTransferView from './ConfigTransferView.vue'
   import AboutView from './AboutView.vue'
 
   const router = useRouter()
@@ -185,115 +186,131 @@
 </script>
 
 <template>
-  <AdminSidebar
-    :active="activeTab"
-    :config="config"
-    :saving="saving"
-    @update:active="activeTab = $event"
-    @save="requestSave"
-    @logout="handleLogout"
-    @back="handleBack"
-  />
+  <div class="dashboard-shell">
+    <AdminSidebar
+      :active="activeTab"
+      :config="config"
+      :saving="saving"
+      @update:active="activeTab = $event"
+      @save="requestSave"
+      @logout="handleLogout"
+      @back="handleBack"
+    />
 
-  <main class="dashboard-content">
-    <div v-if="loading" class="content-loading">加载配置中...</div>
+    <main class="dashboard-content">
+      <div v-if="loading" class="content-loading">加载配置中...</div>
 
-    <template v-else-if="hasConfig && config">
-      <Transition name="tab-fade" mode="out-in">
-        <SiteSettingsEditor
-          v-if="activeTab === 'site'"
-          key="site"
-          :config="config"
-          @update:config="config = $event"
-          @notify="(message: string, type: 'success' | 'error') => showMessage(message, type)"
-        />
-        <div v-else-if="activeTab === 'playlists'" key="playlists" class="tab-wrapper">
-          <div class="admin-section">
-            <h3 class="section-title">远程歌单</h3>
-            <PlaylistEditor
-              :playlists="config.playlists"
-              @update:playlists="config = { ...config, playlists: $event }"
-            />
+      <template v-else-if="hasConfig && config">
+        <Transition name="tab-fade" mode="out-in">
+          <SiteSettingsEditor
+            v-if="activeTab === 'site'"
+            key="site"
+            :config="config"
+            @update:config="config = $event"
+            @notify="(message: string, type: 'success' | 'error') => showMessage(message, type)"
+          />
+          <div v-else-if="activeTab === 'playlists'" key="playlists" class="tab-wrapper">
+            <div class="admin-section">
+              <h3 class="section-title">远程歌单</h3>
+              <PlaylistEditor
+                :playlists="config.playlists"
+                @update:playlists="config = { ...config, playlists: $event }"
+              />
+            </div>
           </div>
-        </div>
-        <div v-else-if="activeTab === 'local'" key="local" class="tab-wrapper">
-          <div class="admin-section">
-            <h3 class="section-title">本地音乐</h3>
-            <LocalTrackEditor
-              :tracks="config.localTracks"
-              @update:tracks="config = { ...config, localTracks: $event }"
-            />
+          <div v-else-if="activeTab === 'local'" key="local" class="tab-wrapper">
+            <div class="admin-section">
+              <h3 class="section-title">本地音乐</h3>
+              <LocalTrackEditor
+                :tracks="config.localTracks"
+                @update:tracks="config = { ...config, localTracks: $event }"
+              />
+            </div>
           </div>
+          <AnalyticsSettingsEditor
+            v-else-if="activeTab === 'analytics'"
+            key="analytics"
+            :config="config"
+            @update:config="config = $event"
+          />
+          <AdvancedSettingsEditor
+            v-else-if="activeTab === 'advanced'"
+            key="advanced"
+            :config="config"
+            @update:config="config = $event"
+          />
+          <SecurityEditor v-else-if="activeTab === 'security'" key="security" />
+          <ConfigTransferView
+            v-else-if="activeTab === 'transfer'"
+            key="transfer"
+            :config="config"
+            @update:config="config = $event"
+            @notify="(message: string, type: 'success' | 'error') => showMessage(message, type)"
+          />
+          <AboutView v-else-if="activeTab === 'about'" key="about" :config="config" />
+        </Transition>
+      </template>
+
+      <div v-else class="content-loading">配置加载失败,请刷新重试</div>
+
+      <Toast :message="message" :type="messageType || 'info'" @dismiss="clearMessage" />
+
+      <Transition name="unsaved-fade">
+        <div v-if="hasUnsavedChanges" class="unsaved-indicator">
+          <span class="unsaved-dot" />
+          <span>有未保存的更改</span>
+          <button type="button" class="unsaved-revert" title="撤销更改" @click="requestRevert">
+            <Undo2 :size="14" />
+          </button>
         </div>
-        <AnalyticsSettingsEditor
-          v-else-if="activeTab === 'analytics'"
-          key="analytics"
-          :config="config"
-          @update:config="config = $event"
-        />
-        <AdvancedSettingsEditor
-          v-else-if="activeTab === 'advanced'"
-          key="advanced"
-          :config="config"
-          @update:config="config = $event"
-        />
-        <SecurityEditor v-else-if="activeTab === 'security'" key="security" />
-        <AboutView v-else-if="activeTab === 'about'" key="about" :config="config" />
       </Transition>
-    </template>
+    </main>
 
-    <div v-else class="content-loading">配置加载失败,请刷新重试</div>
+    <ConfirmModal
+      :visible="showSaveConfirm"
+      title="确认提交到 Git 仓库?"
+      cancel-text="取消"
+      confirm-text="确定保存"
+      @cancel="showSaveConfirm = false"
+      @confirm="confirmSave"
+    >
+      <p>保存会将配置变更提交到 GitHub 仓库,触发自动构建部署。</p>
+    </ConfirmModal>
 
-    <Toast :message="message" :type="messageType || 'info'" @dismiss="clearMessage" />
+    <ConfirmModal
+      :visible="showRevertConfirm"
+      title="撤销未保存的更改?"
+      cancel-text="取消"
+      confirm-text="确认撤销"
+      danger
+      @cancel="showRevertConfirm = false"
+      @confirm="confirmRevert"
+    >
+      <p>会恢复到上一次成功加载或保存的配置,当前未保存的修改会被丢弃。</p>
+    </ConfirmModal>
 
-    <Transition name="unsaved-fade">
-      <div v-if="hasUnsavedChanges" class="unsaved-indicator">
-        <span class="unsaved-dot" />
-        <span>有未保存的更改</span>
-        <button type="button" class="unsaved-revert" title="撤销更改" @click="requestRevert">
-          <Undo2 :size="14" />
-        </button>
-      </div>
-    </Transition>
-  </main>
-
-  <ConfirmModal
-    :visible="showSaveConfirm"
-    title="确认提交到 Git 仓库?"
-    cancel-text="取消"
-    confirm-text="确定保存"
-    @cancel="showSaveConfirm = false"
-    @confirm="confirmSave"
-  >
-    <p>保存会将配置变更提交到 GitHub 仓库,触发自动构建部署。</p>
-  </ConfirmModal>
-
-  <ConfirmModal
-    :visible="showRevertConfirm"
-    title="撤销未保存的更改?"
-    cancel-text="取消"
-    confirm-text="确认撤销"
-    danger
-    @cancel="showRevertConfirm = false"
-    @confirm="confirmRevert"
-  >
-    <p>会恢复到上一次成功加载或保存的配置,当前未保存的修改会被丢弃。</p>
-  </ConfirmModal>
-
-  <ConfirmModal
-    :visible="showExitConfirm"
-    title="有未保存的更改"
-    cancel-text="留下"
-    confirm-text="放弃更改并离开"
-    danger
-    @cancel="showExitConfirm = false"
-    @confirm="confirmExit"
-  >
-    <p>当前配置有未保存的修改,离开后将丢失。确定要离开吗?</p>
-  </ConfirmModal>
+    <ConfirmModal
+      :visible="showExitConfirm"
+      title="有未保存的更改"
+      cancel-text="留下"
+      confirm-text="放弃更改并离开"
+      danger
+      @cancel="showExitConfirm = false"
+      @confirm="confirmExit"
+    >
+      <p>当前配置有未保存的修改,离开后将丢失。确定要离开吗?</p>
+    </ConfirmModal>
+  </div>
 </template>
 
 <style scoped lang="scss">
+  .dashboard-shell {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    overflow: hidden;
+  }
+
   .dashboard-content {
     flex: 1;
     min-width: 0;
@@ -427,6 +444,10 @@
   }
 
   @media (max-width: 760px) {
+    .dashboard-shell {
+      flex-direction: column;
+    }
+
     .dashboard-content {
       flex: 1 1 auto;
       min-height: 0;

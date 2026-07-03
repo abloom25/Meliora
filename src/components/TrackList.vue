@@ -3,7 +3,6 @@
   import type { ComponentPublicInstance } from 'vue'
   import { Music, RefreshCw, Search, X } from '@lucide/vue'
   import type { Track } from '../types/music'
-  import { splitDisplayTitle } from '../utils/title'
   import { useCoverCache } from '../composables/useCoverCache'
 
   const props = defineProps<{
@@ -43,7 +42,14 @@
   let resizeObserver: ResizeObserver | null = null
 
   const displayList = computed(() =>
-    props.tracks.map((track, index) => ({ track, display: splitDisplayTitle(track.title), index })),
+    props.tracks.map((track, index) => ({
+      track,
+      display: {
+        title: track.title,
+        versions: track.titleVersions ?? [],
+      },
+      index,
+    })),
   )
 
   const virtualItems = computed(() => {

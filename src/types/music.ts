@@ -49,15 +49,22 @@ export interface MusicConfig extends PublicMusicConfig {
   receivePrereleaseUpdates?: boolean
 }
 
+export interface LyricLine {
+  time: number | null
+  text: string
+  translation?: string
+}
+
 export interface Track {
   id: string
   title: string
+  titleVersions?: string[]
+  shareAliases?: string[]
   artist: string
   album?: string
   cover?: string
   audioUrl: string
-  lyricsUrl?: string
-  kind: 'meting' | 'local'
+  kind: 'meting' | 'remote' | 'local'
 }
 
 export interface MetingTrack {
@@ -66,12 +73,6 @@ export interface MetingTrack {
   pic?: string
   url?: string
   lrc?: string
-}
-
-export interface LyricLine {
-  time: number | null
-  text: string
-  translation?: string
 }
 
 export interface LyricsSnapshot {

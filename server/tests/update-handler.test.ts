@@ -124,6 +124,26 @@ describe('server update handler', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('rejects redirected GitHub proxy responses during update checks', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { Location: 'http://127.0.0.1:8080/releases/latest' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await checkUpdate('0.2.0', ENV, 'https://proxy.example.com/?url={url}')
+    const data = (await response.json()) as { error?: string }
+
+    expect(response.status).toBe(400)
+    expect(data.error).toContain('重定向')
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://proxy.example.com/?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fabloom25%2FMeliora%2Freleases%2Flatest',
+      expect.objectContaining({ redirect: 'manual' }),
+    )
+  })
+
   it('rejects workflow dispatch without a usable GitHub token', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)

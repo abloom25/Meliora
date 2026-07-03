@@ -17,5 +17,11 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["server/**/*.ts", "shared/**/*.ts"]
+  "include": [
+    "server/**/*.ts",
+    "shared/**/*.ts",
+    "api/**/*.ts",
+    "functions/**/*.ts",
+    "netlify/**/*.ts"
+  ]
 }

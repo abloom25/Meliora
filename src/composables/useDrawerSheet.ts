@@ -56,6 +56,23 @@ export function useDrawerSheet({
   let openRaf1 = 0
   let openRaf2 = 0
 
+  function clearDismissTimer() {
+    if (!dismissTimer) return
+    window.clearTimeout(dismissTimer)
+    dismissTimer = 0
+  }
+
+  function clearOpenFrames() {
+    if (openRaf1) {
+      window.cancelAnimationFrame(openRaf1)
+      openRaf1 = 0
+    }
+    if (openRaf2) {
+      window.cancelAnimationFrame(openRaf2)
+      openRaf2 = 0
+    }
+  }
+
   function detentOffset(d: DrawerDetent) {
     if (d === 'full') return 0
     if (d === 'half') {
@@ -218,6 +235,7 @@ export function useDrawerSheet({
   }
 
   function dismissAnimated() {
+    clearDismissTimer()
     dragging.value = false
     state = null
     const previous = detent.value
@@ -235,6 +253,7 @@ export function useDrawerSheet({
   }
 
   function settleTo(target: DrawerDetent) {
+    clearDismissTimer()
     dragging.value = false
     state = null
 
@@ -327,6 +346,8 @@ export function useDrawerSheet({
     active,
     (isActive) => {
       if (isActive) {
+        clearDismissTimer()
+        clearOpenFrames()
         // Start from closed (off-screen) so the transform transition animates the slide-in
         detent.value = 'closed'
         dragOffset.value = 0
@@ -341,6 +362,7 @@ export function useDrawerSheet({
           })
         })
       } else {
+        clearOpenFrames()
         detent.value = 'closed'
         dragOffset.value = 0
         state = null
@@ -354,24 +376,15 @@ export function useDrawerSheet({
     detachContainer()
     detachHandle()
     state = null
-    if (dismissTimer) {
-      window.clearTimeout(dismissTimer)
-      dismissTimer = 0
-    }
-    if (openRaf1) {
-      window.cancelAnimationFrame(openRaf1)
-      openRaf1 = 0
-    }
-    if (openRaf2) {
-      window.cancelAnimationFrame(openRaf2)
-      openRaf2 = 0
-    }
+    clearDismissTimer()
+    clearOpenFrames()
   })
 
   /** Total Y translation (px) from the fully-open position. */
   const translateY = computed(() => detentOffset(detent.value) + dragOffset.value)
 
   function snapTo(target: DrawerDetent) {
+    clearDismissTimer()
     if (target === 'closed') {
       onDismiss()
       return
@@ -381,6 +394,7 @@ export function useDrawerSheet({
   }
 
   function resetPosition(target: DrawerDetent = active.value ? 'full' : 'closed') {
+    clearDismissTimer()
     state = null
     dragging.value = false
     detent.value = target

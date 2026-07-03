@@ -166,6 +166,7 @@
           <div class="row-actions">
             <ToggleSwitch
               :model-value="playlist.enabled !== false"
+              :aria-label="`${playlist.playlistId || '未设置歌单'}启用状态`"
               :title="playlist.enabled === false ? '已禁用' : '已启用'"
               @update:model-value="update(index, { enabled: $event })"
             />
