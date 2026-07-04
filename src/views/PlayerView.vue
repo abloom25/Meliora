@@ -103,7 +103,7 @@
     useThemeAccent()
 
   // Fullscreen composable
-  const { fullscreenActive, toggleFullscreenMode } = useFullscreen({
+  const { fullscreenActive, fullscreenSupported, toggleFullscreenMode } = useFullscreen({
     onShowNotice: showNotice,
   })
 
@@ -146,6 +146,9 @@
   const mobileView = ref<'cover' | 'lyrics'>('cover')
   const lyricsEnabled = ref(true)
   const lyricAvailability = ref<LyricAvailability>('unavailable')
+  const lyricsSnapshot = ref<LyricsSnapshot | null>(null)
+  const lyricSeekPreviewTime = ref<number | null>(null)
+  const lyricSeekPreviewActive = ref(false)
   const notice = ref('')
   const sourceWarning = ref('')
   // 封面 CORS 回退:crossorigin="anonymous" 首次加载失败(CDN 不返回 CORS 头)时,
@@ -468,6 +471,11 @@
   function handleLyricAvailability(availability: LyricAvailability) {
     lyricAvailability.value = availability
     if (availability === 'unavailable') mobileView.value = 'cover'
+    if (availability === 'unavailable') {
+      lyricsSnapshot.value = null
+      lyricSeekPreviewTime.value = null
+      lyricSeekPreviewActive.value = false
+    }
   }
 
   async function openLyricsWindow() {
@@ -494,8 +502,19 @@
   }
 
   function handleLyricsSnapshot(snapshot: LyricsSnapshot) {
+    lyricsSnapshot.value = snapshot
     setLyricsWindowSnapshot(snapshot)
   }
+
+  function handleSeekPreview(time: number | null, active: boolean) {
+    lyricSeekPreviewTime.value = time
+    lyricSeekPreviewActive.value = active
+  }
+
+  watch(currentTrackId, () => {
+    lyricSeekPreviewTime.value = null
+    lyricSeekPreviewActive.value = false
+  })
 
   async function handleMainCoverLoaded(trackId: string, event: Event) {
     const image = event.currentTarget as HTMLImageElement
@@ -731,6 +750,8 @@
           class="lyrics-column"
           :class="{ 'mobile-hidden': mobileView !== 'lyrics', 'lyrics-disabled': !lyricsVisible }"
           :active="lyricsPanelActive"
+          :preview-time="lyricSeekPreviewTime"
+          :preview-active="lyricSeekPreviewActive"
           @seek="seek"
           @availability="handleLyricAvailability"
           @snapshot="handleLyricsSnapshot"
@@ -744,6 +765,9 @@
           :on-previous="previousWithHaptic"
           :on-next="nextWithHaptic"
           :on-seek="seek"
+          :on-seek-preview="handleSeekPreview"
+          :lyric-preview="lyricsSnapshot"
+          :preview-enabled="!chromeHidden"
         />
         <div class="mobile-control-actions">
           <button :aria-label="playModeText" :title="playModeText" @click="cyclePlayModeWithHaptic">
@@ -777,6 +801,9 @@
           :on-previous="previousWithHaptic"
           :on-next="nextWithHaptic"
           :on-seek="seek"
+          :on-seek-preview="handleSeekPreview"
+          :lyric-preview="lyricsSnapshot"
+          :preview-enabled="!chromeHidden"
         />
       </div>
       <div class="bottom-progress">
@@ -786,6 +813,9 @@
           :on-previous="previousWithHaptic"
           :on-next="nextWithHaptic"
           :on-seek="seek"
+          :on-seek-preview="handleSeekPreview"
+          :lyric-preview="lyricsSnapshot"
+          :preview-enabled="!chromeHidden"
         />
       </div>
       <div class="dock-actions">
@@ -927,6 +957,7 @@
           :format-sleep-timer-remaining="formatSleepTimerRemaining"
           :portable-device="portableDevice"
           :fullscreen-active="fullscreenActive"
+          :fullscreen-supported="fullscreenSupported"
           :lyrics-window-supported="lyricsWindowSupported"
           :lyrics-window-open="lyricsWindowOpen"
           :has-current-track="Boolean(currentTrack)"

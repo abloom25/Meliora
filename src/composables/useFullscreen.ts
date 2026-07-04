@@ -9,6 +9,7 @@ export function useFullscreen(options: UseFullscreenOptions) {
   const { onShowNotice } = options
 
   const fullscreenActive = ref(false)
+  const fullscreenSupported = ref(false)
 
   function isBrowserFullscreen() {
     const width = Math.max(window.screen.width, window.screen.availWidth)
@@ -19,6 +20,11 @@ export function useFullscreen(options: UseFullscreenOptions) {
   function syncFullscreenState() {
     const api = getFullscreenAPI()
     fullscreenActive.value = api.isFullscreen() || isBrowserFullscreen()
+  }
+
+  function syncFullscreenSupport() {
+    const api = getFullscreenAPI()
+    fullscreenSupported.value = api.supported && !isFullscreenUnsupportedByPlatform()
   }
 
   async function toggleFullscreenMode() {
@@ -59,6 +65,7 @@ export function useFullscreen(options: UseFullscreenOptions) {
 
   onMounted(() => {
     const api = getFullscreenAPI()
+    syncFullscreenSupport()
     document.addEventListener(api.eventName, handleFullscreenChange)
     // 标准事件也监听一遍,兼容部分浏览器同时支持两套事件的情况
     if (api.eventName !== 'fullscreenchange') {
@@ -81,6 +88,7 @@ export function useFullscreen(options: UseFullscreenOptions) {
 
   return {
     fullscreenActive,
+    fullscreenSupported,
     isBrowserFullscreen,
     syncFullscreenState,
     toggleFullscreenMode,

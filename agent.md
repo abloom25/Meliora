@@ -175,7 +175,7 @@ PWA       public/sw.js, public/manifest.webmanifest
 | -------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ConfirmModal` | 确认弹窗 | 内部 `<Teleport to="body">` + `<Transition>`;props: `visible`/`title`/`cancelText`/`confirmText`/`danger`/`loading`/`width`;slots: `default`(正文)/`header`                                                                 |
 | `ToggleSwitch` | 开关     | `v-model`;内部渲染自身 `<label>`,调用方外层**必须**用 `<div>` 而非 `<label>`(HTML 不允许 label 嵌套)                                                                                                                        |
-| `SettingRange` | 设置滑块 | `v-model`(number);内部自动计算 `--setting-progress`,调用方**无需**传 `:style` 进度变量                                                                                                                                      |
+| `SettingRange` | 设置滑块 | `v-model`(number);自绘 `role="slider"`,**禁止**用原生 `<input type="range">`;内部自动计算 `--setting-progress`,调用方**无需**传 `:style` 进度变量;拖动时填充宽度不做动画,填充条右侧保持直角;需要提交语义时监听 `@change`    |
 | `Toast`        | 通知     | `<Teleport to="body">`;props: `message`/`type`/`position`;emit: `dismiss`                                                                                                                                                   |
 | `Dropdown`     | 下拉菜单 | 封装 outside-click + open/close;scoped slots: `#trigger({ toggle })` / `default({ close })`                                                                                                                                 |
 | `Collapse`     | 折叠展开 | `v-model:expanded`;`grid-template-rows: 0fr→1fr` 动画内聚;`#trigger({ toggle })` + 默认 slot;箭头统一用单 `ChevronDown` + `:class="{ collapsed }"` + `rotate(-90deg)`,**禁止**用 `ChevronUp`/`ChevronDown` 动态切换         |
@@ -188,6 +188,8 @@ PWA       public/sw.js, public/manifest.webmanifest
 - 接入共享组件后,**必须**同步删除业务文件中废弃的 scoped 样式块(如 `.modal-backdrop`、`.toggle-row input + i`、`.row-input`、`.analytics-collapse` 等),避免留下死样式。
 - 共享组件根元素样式用 `scoped`;当调用方需要穿透到组件内部元素(如 `BaseInput` 的 `.invalid` 状态)时,用 `:deep(.base-input.invalid)` 规则。
 - `max-width` 例外:组合容器(如带按钮的输入组 `.token-field`、`.icon-input-group`)需要输入框填满剩余空间时,用 `:deep(.base-input) { max-width: none }` 覆盖。
+- 所有设置类滑块(播放器设置、管理后台设置、均衡器、定时关闭等)必须复用 `SettingRange`;若业务需要特殊布局,只能通过外层 class 调整尺寸/间距,不得在业务组件中重新实现 range 轨道、thumb 或浏览器伪元素样式。
+- 触控屏上的滑块命中区域必须大于视觉轨道:使用 `@media (pointer: coarse)` 扩大外层 slider 高度/点击区域,但保持内部轨道视觉高度不变。不要为了触控可用性直接加粗视觉轨道。
 
 ### 3.4 Composable
 

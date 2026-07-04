@@ -33,6 +33,25 @@ describe('parseLyrics', () => {
     ])
   })
 
+  it('removes enhanced LRC inline word timestamps from rendered text', () => {
+    expect(parseLyrics('[00:01.00]<00:01.10>Hello <00:01.50>world')).toEqual([
+      { time: 1, text: 'Hello world' },
+    ])
+  })
+
+  it('merges same-timestamp bilingual lines into translation', () => {
+    expect(parseLyrics('[00:10.00]Hello\n[00:10.00]你好')).toEqual([
+      { time: 10, text: 'Hello', translation: '你好' },
+    ])
+  })
+
+  it('keeps extra same-timestamp lines when a translation is already present', () => {
+    expect(parseLyrics('[00:10.00]Hello (你好)\n[00:10.00]Bonjour')).toEqual([
+      { time: 10, text: 'Hello', translation: '你好' },
+      { time: 10, text: 'Bonjour' },
+    ])
+  })
+
   it('removes empty brackets, punctuation-only lines, and empty translations', () => {
     expect(
       parseLyrics(
@@ -65,6 +84,10 @@ describe('parseLyrics', () => {
       translation: 'xxx(xx)',
     })
     expect(splitLyricTranslation('Hold me close (紧紧拥我入怀)')).toEqual({
+      text: 'Hold me close',
+      translation: '紧紧拥我入怀',
+    })
+    expect(splitLyricTranslation('Hold me close（紧紧拥我入怀）')).toEqual({
       text: 'Hold me close',
       translation: '紧紧拥我入怀',
     })

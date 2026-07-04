@@ -3,13 +3,14 @@ import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import LyricsPanel from '../components/LyricsPanel.vue'
-import { loadTrackLyrics } from '../services/lyrics'
+import { hasCachedTrackLyrics, hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
 import { usePlayerStore } from '../stores/player'
 import { supportsWebAnimations } from '../utils/browser'
 import type { LyricLine, LyricsSnapshot, Track } from '../types/music'
 
 vi.mock('../services/lyrics', () => ({
   hasCachedTrackLyrics: vi.fn(() => false),
+  hasTrackLyricsSource: vi.fn(() => true),
   loadTrackLyrics: vi.fn(),
   transferTrackLyricsProvider: vi.fn(),
 }))
@@ -19,6 +20,8 @@ vi.mock('../utils/browser', () => ({
 }))
 
 const mockedLoadTrackLyrics = vi.mocked(loadTrackLyrics)
+const mockedHasCachedTrackLyrics = vi.mocked(hasCachedTrackLyrics)
+const mockedHasTrackLyricsSource = vi.mocked(hasTrackLyricsSource)
 const mockedSupportsWebAnimations = vi.mocked(supportsWebAnimations)
 
 const lyricsLines: LyricLine[] = [
@@ -219,6 +222,10 @@ async function moveTo(store: ReturnType<typeof usePlayerStore>, wrapper: VueWrap
 describe('LyricsPanel scrolling alignment', () => {
   beforeEach(() => {
     vi.useFakeTimers()
+    mockedHasCachedTrackLyrics.mockReset()
+    mockedHasCachedTrackLyrics.mockReturnValue(false)
+    mockedHasTrackLyricsSource.mockReset()
+    mockedHasTrackLyricsSource.mockReturnValue(true)
     mockedLoadTrackLyrics.mockReset()
     mockedLoadTrackLyrics.mockResolvedValue(lyricsLines)
     rafCallbacks = []
@@ -249,6 +256,54 @@ describe('LyricsPanel scrolling alignment', () => {
     expect(wrapper.get<HTMLElement>('.lyrics-scroll').element.scrollTop).toBe(100)
   })
 
+  it('keeps lyrics available while an uncached provider is still loading', async () => {
+    const deferred = makeDeferred<LyricLine[]>()
+    mockedLoadTrackLyrics.mockReturnValueOnce(deferred.promise)
+    const { wrapper } = await mountLyricsPanel({ currentTime: 12 })
+    await flushVueUpdates()
+
+    const availabilityEvents = wrapper.emitted('availability')?.map((event) => event[0])
+    expect(availabilityEvents).toContain('loading')
+    expect(availabilityEvents).not.toContain('unavailable')
+    const loadingSnapshot = wrapper.emitted('snapshot')?.at(-1)?.[0] as LyricsSnapshot | undefined
+    expect(loadingSnapshot?.status).toBe('loading')
+
+    await resolveDeferredLyrics(wrapper, deferred)
+    const readySnapshot = wrapper.emitted('snapshot')?.at(-1)?.[0] as LyricsSnapshot | undefined
+    expect(readySnapshot?.status).toBe('ready')
+  })
+
+  it('renders untimed plain lyrics without forcing an active line', async () => {
+    const plainLines: LyricLine[] = [
+      { time: null, text: 'Plain line one' },
+      { time: null, text: 'Plain line two' },
+    ]
+    mockedLoadTrackLyrics.mockResolvedValueOnce(plainLines)
+    const { wrapper } = await mountLyricsPanel({ currentTime: 30 })
+    await flushVueUpdates()
+
+    expect(wrapper.findAll('.lyric-line')).toHaveLength(2)
+    expect(wrapper.findAll('.lyric-line.active')).toHaveLength(0)
+    expect(wrapper.findAll<HTMLButtonElement>('.lyric-line')[0]?.element.disabled).toBe(true)
+    const snapshot = wrapper.emitted('snapshot')?.at(-1)?.[0] as LyricsSnapshot | undefined
+    expect(snapshot).toMatchObject({
+      status: 'ready',
+      activeIndex: -1,
+      lines: plainLines,
+    })
+  })
+
+  it('marks lyrics unavailable without requesting when the track has no provider', async () => {
+    mockedHasTrackLyricsSource.mockReturnValueOnce(false)
+    const { wrapper } = await mountLyricsPanel()
+    await flushVueUpdates()
+
+    expect(mockedLoadTrackLyrics).not.toHaveBeenCalled()
+    expect(wrapper.emitted('availability')?.at(-1)?.[0]).toBe('unavailable')
+    const snapshot = wrapper.emitted('snapshot')?.at(-1)?.[0] as LyricsSnapshot | undefined
+    expect(snapshot?.status).toBe('empty')
+  })
+
   it('scrolls when currentTime moves to another lyric line', async () => {
     const { wrapper, store } = await mountLyricsPanel()
     await flushVueUpdates()
@@ -258,6 +313,43 @@ describe('LyricsPanel scrolling alignment', () => {
 
     expect(wrapper.findAll('.lyric-line')[3]?.classes()).toContain('active')
     expect(wrapper.get<HTMLElement>('.lyrics-scroll').element.scrollTop).toBe(190)
+  })
+
+  it('does not schedule another realign while playback stays on the same lyric line', async () => {
+    const { wrapper, store } = await mountLyricsPanel()
+    await flushVueUpdates()
+    setPanelLayout(wrapper)
+    await moveTo(store, wrapper, 10)
+    const scroller = wrapper.get<HTMLElement>('.lyrics-scroll').element
+    expect(scroller.scrollTop).toBe(100)
+    clearAnimationFrames()
+
+    store.currentTime = 11
+    await flushVueUpdates()
+
+    expect(rafCallbacks).toHaveLength(0)
+    expect(scroller.scrollTop).toBe(100)
+  })
+
+  it('uses the previous active line when animating a large seek jump', async () => {
+    mockedSupportsWebAnimations.mockReturnValue(true)
+    const animateSpy = installElementAnimateMock()
+    const manyLines: LyricLine[] = Array.from({ length: 12 }, (_, index) => ({
+      time: index * 5,
+      text: `Line ${index}`,
+    }))
+    mockedLoadTrackLyrics.mockResolvedValueOnce(manyLines)
+    const { wrapper, store } = await mountLyricsPanel()
+    await flushVueUpdates()
+    setPanelLayout(wrapper)
+
+    await moveTo(store, wrapper, 10)
+    clearAnimationFrames()
+    animateSpy.mockClear()
+    await moveTo(store, wrapper, 40)
+
+    expect(wrapper.findAll('.lyric-line')[8]?.classes()).toContain('active')
+    expect(animateSpy).toHaveBeenCalledTimes(12)
   })
 
   it('realigns the same active line when lyricFontSize changes', async () => {
@@ -355,7 +447,7 @@ describe('LyricsPanel scrolling alignment', () => {
     expect(wrapper.findAll('.lyric-line')[3]?.classes()).toContain('active')
     expect(scroller.scrollTop).toBe(45)
 
-    vi.advanceTimersByTime(1999)
+    vi.advanceTimersByTime(3199)
     expect(scroller.scrollTop).toBe(45)
 
     vi.advanceTimersByTime(1)

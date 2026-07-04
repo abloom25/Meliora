@@ -75,13 +75,13 @@ export function useSleepTimer(options: UseSleepTimerOptions) {
     )
   }
 
-  function handleSleepTimerInput(event: Event) {
+  function handleSleepTimerInput(value: number) {
     sleepTimerDragging.value = true
-    sleepTimerDraftMinutes.value = Number((event.target as HTMLInputElement).value)
+    sleepTimerDraftMinutes.value = value
   }
 
-  function handleSleepTimerChange(event: Event) {
-    setSleepTimer(snapSleepTimerMinutes(Number((event.target as HTMLInputElement).value)))
+  function handleSleepTimerChange(value: number) {
+    setSleepTimer(snapSleepTimerMinutes(value))
   }
 
   onBeforeUnmount(clearSleepTimer)

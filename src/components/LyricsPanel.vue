@@ -2,10 +2,16 @@
   import { computed, nextTick, onBeforeUnmount, onBeforeUpdate, onMounted, ref, watch } from 'vue'
   import { storeToRefs } from 'pinia'
   import { usePlayerStore } from '../stores/player'
-  import { hasCachedTrackLyrics, loadTrackLyrics } from '../services/lyrics'
+  import { hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
   import { findActiveLyricIndex } from '../utils/lyrics'
   import { supportsWebAnimations } from '../utils/browser'
-  import type { LyricAvailability, LyricLine, LyricsSnapshot, Track } from '../types/music'
+  import type {
+    LyricAvailability,
+    LyricLine,
+    LyricStatus,
+    LyricsSnapshot,
+    Track,
+  } from '../types/music'
 
   const emit = defineEmits<{
     seek: [time: number]
@@ -15,9 +21,13 @@
   const props = withDefaults(
     defineProps<{
       active?: boolean
+      previewTime?: number | null
+      previewActive?: boolean
     }>(),
     {
       active: true,
+      previewTime: null,
+      previewActive: false,
     },
   )
   const LYRIC_MOTION_LEAD = 0.42
@@ -26,7 +36,7 @@
   const lines = ref<LyricLine[]>([])
   const activeIndex = ref(-1)
   const targetIndex = ref(-1)
-  const status = ref<'idle' | 'ready' | 'empty' | 'error'>('idle')
+  const status = ref<LyricStatus>('idle')
   const panel = ref<HTMLElement>()
   const scroller = ref<HTMLElement>()
   const lyricsContent = ref<HTMLElement>()
@@ -40,6 +50,7 @@
   let scrollTimer = 0
   let scrollRaf = 0
   let realignRaf = 0
+  let resizeRealignTimer = 0
   let realignRequestId = 0
   let programmaticScrollTimer = 0
   let requestId = 0
@@ -47,6 +58,9 @@
   let resizeObserver: ResizeObserver | null = null
   const lineAnimations = new Set<Animation>()
   let highlightTimer = 0
+  const lyricClockTime = computed(() =>
+    props.previewActive && props.previewTime !== null ? props.previewTime : currentTime.value,
+  )
 
   const reducedMotionQuery =
     typeof window !== 'undefined' && typeof window.matchMedia === 'function'
@@ -78,9 +92,10 @@
     if (lyricsContent.value) resizeObserver.observe(lyricsContent.value)
   }
 
-  function updateStatus(nextStatus: typeof status.value) {
+  function updateStatus(nextStatus: LyricStatus) {
     status.value = nextStatus
-    const availability: LyricAvailability = nextStatus === 'ready' ? 'available' : 'unavailable'
+    const availability: LyricAvailability =
+      nextStatus === 'ready' ? 'available' : nextStatus === 'loading' ? 'loading' : 'unavailable'
     emit('availability', availability)
     emitSnapshot()
   }
@@ -105,7 +120,11 @@
       updateStatus('empty')
       return
     }
-    if (!hasCachedTrackLyrics(track)) updateStatus('empty')
+    if (!hasTrackLyricsSource(track)) {
+      updateStatus('empty')
+      return
+    }
+    updateStatus('loading')
     lyricsController = new AbortController()
     try {
       const parsedLines = await loadTrackLyrics(track, lyricsController.signal)
@@ -153,7 +172,7 @@
 
   function handleScroll() {
     if (isProgrammaticScroll) return
-    markUserScrolling({ resetRestoreTimer: false })
+    markUserScrolling({ resetRestoreTimer: true })
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -162,7 +181,13 @@
   }
 
   function handleViewportResize() {
+    userScrolling.value = false
+    window.clearTimeout(scrollTimer)
+    window.clearTimeout(resizeRealignTimer)
     scheduleRealign({ animate: false })
+    resizeRealignTimer = window.setTimeout(() => {
+      scheduleRealign({ animate: false })
+    }, 180)
   }
 
   function cancelLineAnimations() {
@@ -172,6 +197,7 @@
 
   interface ScheduleRealignOptions {
     animate?: boolean
+    previousIndex?: number
   }
 
   function scheduleRealign(options: ScheduleRealignOptions = {}) {
@@ -182,7 +208,10 @@
       if (!isPanelMounted || id !== realignRequestId) return
       realignRaf = window.requestAnimationFrame(() => {
         if (!isPanelMounted || id !== realignRequestId) return
-        scrollToIndex(targetIndex.value, undefined, { animate: options.animate })
+        scrollToIndex(targetIndex.value, undefined, {
+          animate: options.animate,
+          previousIndex: options.previousIndex,
+        })
       })
     })
   }
@@ -190,14 +219,19 @@
   interface SyncActiveLyricOptions {
     realign?: boolean
     animate?: boolean
+    forceRealign?: boolean
   }
 
   function syncActiveLyric(options: SyncActiveLyricOptions = {}) {
+    const syncTime = !props.previewActive
+      ? lyricClockTime.value + LYRIC_MOTION_LEAD
+      : lyricClockTime.value
     const nextIndex =
       status.value === 'ready' || lines.value.length > 0
-        ? findActiveLyricIndex(lines.value, currentTime.value + LYRIC_MOTION_LEAD)
+        ? findActiveLyricIndex(lines.value, syncTime)
         : -1
-    const changed = nextIndex !== targetIndex.value || nextIndex !== activeIndex.value
+    const previousIndex = activeIndex.value
+    const changed = nextIndex !== targetIndex.value || nextIndex !== previousIndex
 
     targetIndex.value = nextIndex
     activeIndex.value = nextIndex
@@ -206,11 +240,15 @@
       window.clearTimeout(highlightTimer)
       emitSnapshot()
     }
-    if (options.realign ?? true) scheduleRealign({ animate: options.animate })
+    const shouldRealign = options.realign ?? true
+    if (shouldRealign && (changed || options.forceRealign)) {
+      scheduleRealign({ animate: options.animate, previousIndex })
+    }
   }
 
   interface ScrollToIndexOptions {
     animate?: boolean
+    previousIndex?: number
   }
 
   function scrollToIndex(
@@ -264,7 +302,12 @@
 
     const elements = lineElements.value
     const totalLines = elements.length
-    const previousIndex = activeIndex.value >= 0 ? activeIndex.value : index
+    const previousIndex =
+      options.previousIndex !== undefined && options.previousIndex >= 0
+        ? options.previousIndex
+        : activeIndex.value >= 0
+          ? activeIndex.value
+          : index
     const animationStart = Math.max(0, Math.min(previousIndex, index) - 5)
     const animationEnd = Math.min(totalLines - 1, Math.max(previousIndex, index) + 7)
 
@@ -360,8 +403,8 @@
     () => void loadLyrics(currentTrack.value),
     { immediate: true },
   )
-  watch(currentTime, () => {
-    syncActiveLyric()
+  watch(lyricClockTime, () => {
+    syncActiveLyric({ animate: true })
   })
   watch(
     () => settings.value.lyricFontSize,
@@ -386,7 +429,7 @@
     () => props.active,
     (active) => {
       if (!active) return
-      syncActiveLyric({ animate: false })
+      syncActiveLyric({ animate: false, forceRealign: true })
     },
   )
   watch(lyricsContent, () => {
@@ -400,6 +443,7 @@
   onBeforeUnmount(() => {
     isPanelMounted = false
     window.clearTimeout(scrollTimer)
+    window.clearTimeout(resizeRealignTimer)
     window.cancelAnimationFrame(scrollRaf)
     window.cancelAnimationFrame(realignRaf)
     window.clearTimeout(programmaticScrollTimer)
@@ -431,7 +475,9 @@
     >
       <Transition name="lyric-state-change" mode="out-in">
         <div
-          v-if="status === 'empty' || status === 'idle' || status === 'error'"
+          v-if="
+            status === 'empty' || status === 'idle' || status === 'loading' || status === 'error'
+          "
           key="empty"
           class="lyric-stage"
         />

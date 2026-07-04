@@ -209,6 +209,39 @@ describe('useAudioPlayer', () => {
     }
   })
 
+  it('replays the current track after ended in single play mode even if the browser paused first', async () => {
+    const createdAudios: HTMLAudioElement[] = []
+    const originalAudio = globalThis.Audio
+    vi.stubGlobal(
+      'Audio',
+      vi.fn(function AudioMock() {
+        const audio = document.createElement('audio')
+        createdAudios.push(audio)
+        return audio
+      }),
+    )
+    const restore = stubAudioPlay()
+    try {
+      const { player, store } = mountPlayer()
+      store.settings.playMode = 'single'
+      store.selectTrack(tracks[0]!, tracks)
+      await player.play()
+
+      player.seek(12)
+      store.isPlaying = false
+      createdAudios[0]?.dispatchEvent(new Event('ended'))
+      await Promise.resolve()
+
+      expect(store.currentTrackId).toBe('1')
+      expect(store.currentTime).toBe(0)
+      expect(store.isPlaying).toBe(true)
+      expect(HTMLAudioElement.prototype.play).toHaveBeenCalledTimes(2)
+    } finally {
+      restore()
+      vi.stubGlobal('Audio', originalAudio)
+    }
+  })
+
   it('continues playing the next track when initial play fails and skipOnError is enabled', async () => {
     vi.useFakeTimers()
     const originalPlay = HTMLAudioElement.prototype.play

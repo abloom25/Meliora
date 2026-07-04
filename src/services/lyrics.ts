@@ -8,7 +8,17 @@ interface LyricsCacheEntry {
   ready: boolean
 }
 
+interface TrackLyricsCacheEntry {
+  cacheKey: string
+  promise: Promise<LyricLine[]>
+  ready: boolean
+  settled: boolean
+  controller: AbortController
+  subscribers: number
+}
+
 const lyricsCache = new LruCache<string, LyricsCacheEntry>(64)
+const trackLyricsCache = new LruCache<string, TrackLyricsCacheEntry>(64)
 const trackLyricsProviders = new WeakMap<Track, TrackLyricsProvider>()
 
 // 歌词请求的默认超时时间（毫秒）
@@ -71,11 +81,19 @@ function withAbortSignal(
   signal: AbortSignal | undefined,
   alreadyReady: boolean,
 ): Promise<string> {
+  return withAbortSignalGeneric(promise, signal, alreadyReady)
+}
+
+function withAbortSignalGeneric<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+  alreadyReady: boolean,
+): Promise<T> {
   if (!signal) return promise
   if (signal.aborted) return Promise.reject(createAbortReason(signal))
   if (alreadyReady) return promise
 
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<T>((resolve, reject) => {
     const onAbort = () => {
       cleanup()
       reject(createAbortReason(signal))
@@ -97,6 +115,53 @@ function withAbortSignal(
 
 function createAbortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException('Aborted', 'AbortError')
+}
+
+function attachTrackLyricsSubscriber(
+  entry: TrackLyricsCacheEntry,
+  signal: AbortSignal | undefined,
+): Promise<LyricLine[]> {
+  if (signal?.aborted) return Promise.reject(createAbortReason(signal))
+  if (entry.ready) return entry.promise
+
+  entry.subscribers += 1
+  let active = true
+
+  const release = () => {
+    if (!active) return
+    active = false
+    entry.subscribers = Math.max(0, entry.subscribers - 1)
+    if (entry.subscribers === 0 && !entry.ready && !entry.settled) {
+      trackLyricsCache.delete(entry.cacheKey)
+      entry.controller.abort()
+    }
+  }
+
+  if (!signal) {
+    return entry.promise.finally(release)
+  }
+
+  return new Promise<LyricLine[]>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup()
+      release()
+      reject(createAbortReason(signal))
+    }
+    const cleanup = () => signal.removeEventListener('abort', onAbort)
+    signal.addEventListener('abort', onAbort, { once: true })
+    entry.promise.then(
+      (lines) => {
+        cleanup()
+        release()
+        resolve(lines)
+      },
+      (error) => {
+        cleanup()
+        release()
+        reject(error)
+      },
+    )
+  })
 }
 
 export function hasCachedLyrics(url: string): boolean {
@@ -135,7 +200,35 @@ export function mergeTrackLyricsProvider(source: Track, target: Track) {
 
 export function loadTrackLyrics(track: Track, signal?: AbortSignal): Promise<LyricLine[]> {
   const provider = trackLyricsProviders.get(trackLyricsKey(track))
-  if (provider) return provider.load(signal)
+  if (provider) {
+    const existing = trackLyricsCache.get(provider.cacheKey)
+    if (existing) return attachTrackLyricsSubscriber(existing, signal)
+    if (signal?.aborted) return Promise.reject(createAbortReason(signal))
+
+    const controller = new AbortController()
+    const entry: TrackLyricsCacheEntry = {
+      cacheKey: provider.cacheKey,
+      ready: false,
+      settled: false,
+      controller,
+      subscribers: 0,
+      promise: Promise.resolve([]),
+    }
+    entry.promise = provider
+      .load(controller.signal)
+      .then((lines) => {
+        entry.ready = true
+        entry.settled = true
+        return lines
+      })
+      .catch((error) => {
+        entry.settled = true
+        trackLyricsCache.delete(provider.cacheKey)
+        throw error
+      })
+    trackLyricsCache.set(provider.cacheKey, entry)
+    return attachTrackLyricsSubscriber(entry, signal)
+  }
   return Promise.resolve([])
 }
 
@@ -145,6 +238,7 @@ export function hasTrackLyricsSource(track: Track | null | undefined): boolean {
 
 export function hasCachedTrackLyrics(track: Track): boolean {
   const provider = trackLyricsProviders.get(trackLyricsKey(track))
+  if (provider && (trackLyricsCache.get(provider.cacheKey)?.ready ?? false)) return true
   if (provider?.isCached) return provider.isCached()
   return false
 }

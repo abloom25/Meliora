@@ -430,6 +430,19 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     else void play()
   }
 
+  function replayCurrentTrack() {
+    if (!currentTrack.value) return
+    automaticCrossfadeStarted = false
+    pendingSeekTime.value = null
+    try {
+      activeAudio.currentTime = 0
+    } catch {
+      // Some browsers can reject seeking right after ended; play() will still attempt recovery.
+    }
+    currentTime.value = 0
+    void play()
+  }
+
   function seek(time: number) {
     if (!Number.isFinite(time)) return
     const safeTime = Math.max(0, time)
@@ -803,7 +816,12 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       }
     }
     const onEnded: EventListener = () => {
-      if (audio === activeAudio && playerState.value === 'idle') void next(false)
+      if (audio !== activeAudio || playerState.value !== 'idle') return
+      if (settings.value.playMode === 'single') {
+        replayCurrentTrack()
+        return
+      }
+      void next(false)
     }
     const onError: EventListener = () => {
       if (audio !== activeAudio) return

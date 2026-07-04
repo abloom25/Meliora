@@ -63,7 +63,120 @@ describe('track lyrics service', () => {
         translation: 'Adapter translation',
       },
     ])
-    expect(load).toHaveBeenCalledWith(controller.signal)
+    expect(load).toHaveBeenCalledWith(expect.any(AbortSignal))
+  })
+
+  it('caches provider lyrics by cacheKey and deduplicates in-flight loads', async () => {
+    const lyrics: LyricLine[] = [{ time: 6, text: 'Cached provider line' }]
+    const load = vi.fn().mockResolvedValue(lyrics)
+    const track: Track = {
+      id: 'custom:provider-cache',
+      title: 'Provider Cache Song',
+      artist: 'Custom Artist',
+      audioUrl: '/provider-cache.mp3',
+      kind: 'remote',
+    }
+    registerTrackLyrics(track, {
+      cacheKey: 'custom:lyrics:provider-cache',
+      load,
+    })
+
+    await expect(Promise.all([loadTrackLyrics(track), loadTrackLyrics(track)])).resolves.toEqual([
+      lyrics,
+      lyrics,
+    ])
+    await expect(loadTrackLyrics(track)).resolves.toEqual(lyrics)
+    expect(load).toHaveBeenCalledTimes(1)
+  })
+
+  it('lets one aborted provider-cache caller reject without cancelling the shared load', async () => {
+    const lyrics: LyricLine[] = [{ time: 7, text: 'Shared provider line' }]
+    let resolveLoad!: (lines: LyricLine[]) => void
+    const load = vi.fn(
+      () =>
+        new Promise<LyricLine[]>((resolve) => {
+          resolveLoad = resolve
+        }),
+    )
+    const track: Track = {
+      id: 'custom:provider-abort',
+      title: 'Provider Abort Song',
+      artist: 'Custom Artist',
+      audioUrl: '/provider-abort.mp3',
+      kind: 'remote',
+    }
+    registerTrackLyrics(track, {
+      cacheKey: 'custom:lyrics:provider-abort',
+      load,
+    })
+
+    const controller = new AbortController()
+    const first = loadTrackLyrics(track, controller.signal)
+    const second = loadTrackLyrics(track)
+    first.catch(() => {})
+    controller.abort(new DOMException('Caller aborted', 'AbortError'))
+
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' })
+    resolveLoad(lyrics)
+    await expect(second).resolves.toEqual(lyrics)
+    expect(load).toHaveBeenCalledTimes(1)
+  })
+
+  it('aborts the shared provider load when every active caller has aborted', async () => {
+    let providerSignal: AbortSignal | undefined
+    const load = vi.fn(
+      (signal?: AbortSignal) =>
+        new Promise<LyricLine[]>((_resolve, reject) => {
+          providerSignal = signal
+          signal?.addEventListener('abort', () => {
+            reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+          })
+        }),
+    )
+    const track: Track = {
+      id: 'custom:provider-all-abort',
+      title: 'Provider All Abort Song',
+      artist: 'Custom Artist',
+      audioUrl: '/provider-all-abort.mp3',
+      kind: 'remote',
+    }
+    registerTrackLyrics(track, {
+      cacheKey: 'custom:lyrics:provider-all-abort',
+      load,
+    })
+
+    const controller = new AbortController()
+    const request = loadTrackLyrics(track, controller.signal)
+    request.catch(() => {})
+    controller.abort(new DOMException('Caller aborted', 'AbortError'))
+
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' })
+    expect(providerSignal?.aborted).toBe(true)
+    expect(load).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears provider cache after a failed load', async () => {
+    const load = vi
+      .fn<() => Promise<LyricLine[]>>()
+      .mockRejectedValueOnce(new Error('temporary lyrics failure'))
+      .mockResolvedValueOnce([{ time: 8, text: 'Recovered provider line' }])
+    const track: Track = {
+      id: 'custom:provider-retry',
+      title: 'Provider Retry Song',
+      artist: 'Custom Artist',
+      audioUrl: '/provider-retry.mp3',
+      kind: 'remote',
+    }
+    registerTrackLyrics(track, {
+      cacheKey: 'custom:lyrics:provider-retry',
+      load,
+    })
+
+    await expect(loadTrackLyrics(track)).rejects.toThrow('temporary lyrics failure')
+    await expect(loadTrackLyrics(track)).resolves.toEqual([
+      { time: 8, text: 'Recovered provider line' },
+    ])
+    expect(load).toHaveBeenCalledTimes(2)
   })
 
   it('resolves adapter-provided lyrics through Vue reactive track proxies', async () => {

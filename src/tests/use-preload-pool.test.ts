@@ -25,6 +25,7 @@ const defaultSettings: PlayerSettings = {
   lyricFontSize: 20,
   lyricAnimation: true,
   lyricTranslation: true,
+  progressLyricPreview: false,
   skipOnError: true,
   autoHideChrome: true,
   equalizer: { enabled: false, preset: 'flat', bands: [0, 0, 0, 0, 0] },

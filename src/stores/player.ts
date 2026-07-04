@@ -22,6 +22,7 @@ const defaultSettings: PlayerSettings = {
   lyricFontSize: 20,
   lyricAnimation: true,
   lyricTranslation: true,
+  progressLyricPreview: false,
   skipOnError: true,
   autoHideChrome: true,
   equalizer: createDefaultEqualizer(),
@@ -47,6 +48,10 @@ export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings 
     lyricFontSize: sanitizeNumber(input.lyricFontSize, defaultSettings.lyricFontSize, 15, 30),
     lyricAnimation: sanitizeBoolean(input.lyricAnimation, defaultSettings.lyricAnimation),
     lyricTranslation: sanitizeBoolean(input.lyricTranslation, defaultSettings.lyricTranslation),
+    progressLyricPreview: sanitizeBoolean(
+      input.progressLyricPreview,
+      defaultSettings.progressLyricPreview,
+    ),
     skipOnError: sanitizeBoolean(input.skipOnError, defaultSettings.skipOnError),
     autoHideChrome: sanitizeBoolean(input.autoHideChrome, defaultSettings.autoHideChrome),
     equalizer: sanitizeEqualizer(input.equalizer),

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-rc5] - 2026-07-04
+
+### Added
+
+- **进度条歌词预览**:新增 `progressLyricPreview` 播放器设置项(默认关闭),设置面板新增「进度条歌词预览」开关;桌面进度条悬停/拖拽时可在浮层中显示对应时间点的歌词原文与翻译,并通过 `LyricsPanel` 的 `previewTime` / `previewActive` 临时驱动主歌词面板预览目标行;预览采样根据指针移动速度自适应节流,触摸输入默认不显示浮层也不驱动主歌词预览,避免移动端拖拽时遮挡
+- **自定义滑杆控件**:`SettingRange` 从原生 range 输入升级为自定义 `role="slider"` 控件,统一支持 pointer 拖拽、window pointerup fallback、键盘方向键/PageUp/PageDown/Home/End、`aria-valuetext` 和粗指针触控高度;`SleepTimerControl`、`EqualizerPanel`、设置面板的音量/歌词字号/背景/节奏亮度滑杆均复用该控件
+- **歌词小窗加载状态**:`LyricStatus` 新增 `loading`,歌词小窗和歌词面板同步显示「正在载入歌词」状态,不再把加载中和空歌词混在一起;`useLyricsWindow` 增强 Safari/弹窗关闭检测,使用固定窗口名复用歌词小窗,并在窗口关闭、切换、卸载时清理轮询、ready 检测和事件监听
+- **歌词解析增强**:`parseLyrics` 支持清除逐字歌词 `<mm:ss.xx>` 增强时间戳;`splitLyricTranslation` 支持全角中文括号;相同时间点的双行歌词会合并为原文 + 翻译,减少重复行展示
+
+### Changed
+
+- **播放器进度条改为自定义 slider**:`PlayerControls` 的播放进度从 `<input type="range">` 改为自定义 slider,补齐 `aria-valuemin` / `aria-valuemax` / `aria-valuenow` / `aria-valuetext`,支持键盘 seek 和全局 pointerup 提交,并保持页面版、底部 dock 进度条和移动共享控制区布局一致
+- **歌词 Provider 缓存升级**:`loadTrackLyrics` 现在按 provider `cacheKey` 对曲目级歌词做 LRU 缓存并去重 in-flight 请求;共享请求保留多消费者语义,单个调用方 abort 只取消自身等待,当所有活跃调用方都 abort 时才中止底层 provider 请求,避免快速切歌时旧歌词请求无意义跑到超时
+- **单曲循环播放行为**:`useAudioPlayer` 在 `playMode === 'single'` 且音频结束时直接重播当前曲目,重置 `automaticCrossfadeStarted` 和 pending seek 状态,不再走下一首预测流程
+- **设置与全屏可用性**:`SettingsPanel` 仅在当前平台支持全屏且非便携设备时展示「全屏模式」开关;`useFullscreen` 补充 resize/visualViewport/fullscreenchange 状态同步,让退出全屏或浏览器 UI 尺寸变化后的状态更可靠
+- **歌词面板预览和动画细节**:`LyricsPanel` 的活跃歌词时间可在预览模式下切换到进度条 hover 时间;歌词状态快照改为携带 `LyricStatus`;翻译开关、字号变化、面板激活状态和预览时间变化都会触发更精确的 snapshot 与重对齐
+
+### Fixed
+
+- **多指拖拽误提交**:`SettingRange` 和 `PlayerControls` 进度条现在校验当前 `pointerId`;拖拽期间来自其他手指/鼠标指针的 `pointermove`、`pointerup`、`pointercancel` 会被忽略,避免触屏场景中音量、均衡器、定时关闭或播放进度跳到错误坐标
+- **自定义 slider 可访问值不一致**:`SettingRange` 的视觉进度和 `aria-valuenow` 统一使用归一化后的步进值,外部恢复出越界值或非法小数时不会出现视觉/读屏值不一致
+- **歌词预览状态泄漏**:切歌、关闭 chrome、关闭歌词预览开关、取消拖拽、组件卸载时都会清理进度条歌词浮层和主歌词预览 driver,避免旧预览时间残留到下一首歌
+- **播放器测试覆盖缺口**:新增 `player-controls-lyric-preview.test.ts` 与 `use-lyrics-window.test.ts`,并扩展 `settings-controls-a11y`、`track-lyrics-service`、`lyrics-panel`、`lyrics`、`use-audio-player` 等测试,覆盖歌词预览、provider 缓存、单曲循环、滑杆键盘/触摸行为和歌词小窗状态同步
+
 ## [0.2.0-rc4] - 2026-07-03
 
 ### Added
@@ -112,6 +136,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`SettingsPanel.vue` 15 处 props 直接修改**:组件改为使用 Pinia store 后彻底消除 `vue/no-mutating-props` 违规
 - **5 处 Prettier 格式化违规**:`useFocusTrap.ts` import 语句、`PlayerView.vue` 缩进/解构/多行属性、`TrackList.vue` v-model 换行均由 `eslint --fix` 自动修复
 
+[0.2.0-rc5]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc5
 [0.2.0-rc4]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc4
 [0.2.0-rc3]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc3
 

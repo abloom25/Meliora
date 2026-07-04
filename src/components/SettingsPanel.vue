@@ -22,6 +22,7 @@
     formatSleepTimerRemaining: (value: number) => string
     portableDevice: boolean
     fullscreenActive: boolean
+    fullscreenSupported: boolean
     lyricsWindowSupported: boolean
     lyricsWindowOpen: boolean
     hasCurrentTrack: boolean
@@ -34,8 +35,8 @@
 
   const emit = defineEmits<{
     cyclePlayMode: []
-    sleepTimerInput: [event: Event]
-    sleepTimerChange: [event: Event]
+    sleepTimerInput: [value: number]
+    sleepTimerChange: [value: number]
     toggleFullscreenMode: []
     openLyricsWindow: []
     installPwa: []
@@ -52,7 +53,14 @@
           ><span><SlidersHorizontal :size="17" /><strong>音量</strong></span
           ><strong>{{ Math.round(settings.volume * 100) }}%</strong></label
         >
-        <SettingRange v-model="settings.volume" aria-label="音量" :min="0" :max="1" :step="0.01" />
+        <SettingRange
+          v-model="settings.volume"
+          aria-label="音量"
+          :aria-value-text="`${Math.round(settings.volume * 100)}%`"
+          :min="0"
+          :max="1"
+          :step="0.01"
+        />
       </div>
       <div class="setting-row">
         <span
@@ -101,7 +109,7 @@
         <span><strong>自动隐藏上下控件</strong><small>鼠标闲置 30 秒后只保留歌曲内容</small></span>
         <ToggleSwitch v-model="settings.autoHideChrome" aria-label="自动隐藏上下控件" />
       </div>
-      <div v-if="!portableDevice" class="setting-row toggle-row">
+      <div v-if="!portableDevice && fullscreenSupported" class="setting-row toggle-row">
         <span
           ><strong>全屏模式</strong
           ><small>{{ fullscreenActive ? '已进入全屏' : '让播放器占满整个屏幕' }}</small></span
@@ -120,6 +128,7 @@
         <SettingRange
           v-model="settings.lyricFontSize"
           aria-label="歌词字号"
+          :aria-value-text="`${settings.lyricFontSize}px`"
           :min="15"
           :max="30"
           :step="1"
@@ -132,6 +141,10 @@
       <div class="setting-row toggle-row">
         <span><strong>歌词翻译</strong><small>显示歌词中解析出的翻译文本</small></span>
         <ToggleSwitch v-model="settings.lyricTranslation" aria-label="歌词翻译" />
+      </div>
+      <div class="setting-row toggle-row">
+        <span><strong>进度条歌词预览</strong><small>悬停进度条时显示对应时间的歌词</small></span>
+        <ToggleSwitch v-model="settings.progressLyricPreview" aria-label="进度条歌词预览" />
       </div>
       <button
         v-if="lyricsWindowSupported"
@@ -184,6 +197,7 @@
         <SettingRange
           v-model="settings.backgroundBlur"
           aria-label="背景模糊"
+          :aria-value-text="`${settings.backgroundBlur}px`"
           :min="45"
           :max="130"
           :step="1"
@@ -197,6 +211,7 @@
         <SettingRange
           v-model="settings.backgroundSaturation"
           aria-label="背景饱和度"
+          :aria-value-text="`${Math.round(settings.backgroundSaturation * 100)}%`"
           :min="0.7"
           :max="1.8"
           :step="0.05"
@@ -210,6 +225,7 @@
         <SettingRange
           v-model="settings.beatBrightness"
           aria-label="节奏亮度"
+          :aria-value-text="`${Math.round(settings.beatBrightness * 100)}%`"
           :min="0"
           :max="0.65"
           :step="0.05"

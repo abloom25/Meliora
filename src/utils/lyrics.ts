@@ -1,6 +1,7 @@
 import type { LyricLine } from '../types/music'
 
 const timestampPattern = /\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?(?:-\d+)?\]/g
+const enhancedTimestampPattern = /<\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?>/g
 const metadataPattern = /^\[(ar|al|ti|by|offset|re|ve):/i
 const creditPattern =
   /^(?:作词|填词|词|作曲|曲|编曲|制作人|制作|监制|混音|母带|录音|人声|演唱|和声|吉他|贝斯|鼓|弦乐|键盘|钢琴|笛子|二胡|发行|出品|版权|op|sp|lyrics?|lyricist|composer|composed\s+by|arranger|arranged\s+by|producer|produced\s+by|mix(?:ed)?\s+by|master(?:ed)?\s+by|record(?:ed)?\s+by|vocal(?:s)?|written\s+by)\s*[:：]/i
@@ -19,16 +20,18 @@ export function splitLyricTranslation(value: string): {
   translation?: string
 } {
   const text = value.trim()
-  if (!text.endsWith(')')) return { text }
+  const close = text.endsWith(')') ? ')' : text.endsWith('）') ? '）' : ''
+  if (!close) return { text }
+  const open = close === ')' ? '(' : '（'
 
   let depth = 0
   for (let index = text.length - 1; index >= 0; index -= 1) {
     const character = text[index]
-    if (character === ')') {
+    if (character === close) {
       depth += 1
       continue
     }
-    if (character !== '(') continue
+    if (character !== open) continue
     depth -= 1
     if (depth < 0) return { text }
     if (depth !== 0) continue
@@ -39,6 +42,29 @@ export function splitLyricTranslation(value: string): {
     return { text: mainText, translation }
   }
   return { text }
+}
+
+function mergeTimedLines(lines: LyricLine[]): LyricLine[] {
+  const sorted = lines.sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
+  const merged: LyricLine[] = []
+
+  for (const line of sorted) {
+    const previous = merged.at(-1)
+    const sameTime =
+      previous?.time !== null &&
+      previous?.time !== undefined &&
+      line.time !== null &&
+      Math.abs(previous.time - line.time) < 0.001
+
+    if (sameTime && !previous.translation && !line.translation) {
+      previous.translation = line.text
+      continue
+    }
+
+    merged.push(line)
+  }
+
+  return merged
 }
 
 function cleanLyricPart(value: string): string {
@@ -73,7 +99,7 @@ export function parseLyrics(source: string): LyricLine[] {
     if (!line || metadataPattern.test(line)) continue
 
     const timestamps = [...line.matchAll(timestampPattern)]
-    const rawText = line.replace(timestampPattern, '').trim()
+    const rawText = line.replace(timestampPattern, '').replace(enhancedTimestampPattern, '').trim()
 
     if (timestamps.length) {
       if (!rawText) continue
@@ -93,7 +119,7 @@ export function parseLyrics(source: string): LyricLine[] {
     }
   }
 
-  if (timed.length) return timed.sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
+  if (timed.length) return mergeTimedLines(timed)
   return plain
 }
 

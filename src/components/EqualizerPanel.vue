@@ -8,6 +8,7 @@
   } from '../utils/equalizer'
   import type { EqPresetId } from '../types/music'
   import { useHaptic } from '../composables/useHaptic'
+  import SettingRange from './SettingRange.vue'
   import ToggleSwitch from './ToggleSwitch.vue'
 
   interface Props {
@@ -76,18 +77,16 @@
     <div class="setting-group eq-bands">
       <label v-for="(label, index) in EQ_BAND_LABELS" :key="label" class="eq-band-row">
         <span class="eq-band-label">{{ label }}</span>
-        <input
-          class="setting-range eq-band-range"
-          type="range"
-          min="-12"
-          max="12"
-          step="1"
-          :value="bands[index]"
+        <SettingRange
+          class="eq-band-range"
+          :model-value="bands[index] ?? 0"
+          :min="-12"
+          :max="12"
+          :step="1"
           :disabled="!enabled"
-          :style="{
-            '--setting-progress': `${((bands[index] + 12) / 24) * 100}%`,
-          }"
-          @input="updateBand(index, Number(($event.target as HTMLInputElement).value))"
+          :aria-label="`${label} 增益`"
+          :aria-value-text="`${(bands[index] ?? 0) > 0 ? '+' : ''}${bands[index] ?? 0}dB`"
+          @update:model-value="updateBand(index, $event)"
         />
         <strong class="eq-band-value">
           {{ bands[index] > 0 ? '+' : '' }}{{ bands[index] }}dB
@@ -151,58 +150,6 @@
   .setting-row small {
     color: var(--text-subtle);
     font-size: 0.66rem;
-  }
-  .setting-range {
-    display: block;
-    width: 100%;
-    height: 28px;
-    margin-top: 12px;
-    padding: 0;
-    appearance: none;
-    border-radius: 99px;
-    background: transparent;
-    cursor: pointer;
-    touch-action: none;
-    -webkit-tap-highlight-color: transparent;
-  }
-  .setting-range::-webkit-slider-runnable-track {
-    height: 7px;
-    border-radius: 99px;
-    background: linear-gradient(
-      to right,
-      rgba(255, 255, 255, 0.88) 0 var(--setting-progress),
-      rgba(255, 255, 255, 0.18) var(--setting-progress) 100%
-    );
-  }
-  .setting-range::-moz-range-track {
-    height: 7px;
-    border-radius: 99px;
-    background: linear-gradient(
-      to right,
-      rgba(255, 255, 255, 0.88) 0 var(--setting-progress),
-      rgba(255, 255, 255, 0.18) var(--setting-progress) 100%
-    );
-  }
-  .setting-range::-webkit-slider-thumb {
-    width: 24px;
-    height: 24px;
-    appearance: none;
-    border: 0;
-    border-radius: 50%;
-    background: transparent;
-    margin-top: -8.5px;
-    cursor: pointer;
-  }
-  .setting-range::-moz-range-thumb {
-    width: 24px;
-    height: 24px;
-    border: 0;
-    border-radius: 50%;
-    background: transparent;
-    cursor: pointer;
-  }
-  .setting-range:disabled {
-    opacity: 0.4;
   }
   .eq-preset-group {
     display: flex;
@@ -279,9 +226,6 @@
   .eq-band-range {
     flex: 1 1 auto;
     margin-top: 0;
-  }
-  .eq-band-range:disabled {
-    opacity: 0.4;
   }
   .eq-band-value {
     flex: 0 0 auto;
