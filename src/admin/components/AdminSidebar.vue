@@ -72,6 +72,13 @@
     return height > 0 ? height : window.innerHeight
   }
 
+  function getSheetHalfOffset(el: HTMLElement | null): number {
+    if (!el) return window.innerHeight * 0.5
+    const rect = el.getBoundingClientRect()
+    const visibleHeight = window.innerHeight - rect.top
+    return (visibleHeight > 0 ? visibleHeight : window.innerHeight) * 0.5
+  }
+
   function isMobileViewport() {
     return window.matchMedia('(max-width: 760px)').matches
   }
@@ -89,6 +96,7 @@
       menuOpen.value = false
     },
     sheetHeight: () => getSheetHeight(mobileNavPanelRef.value),
+    halfOffset: () => getSheetHalfOffset(mobileNavPanelRef.value),
     enabled: isMobileViewport,
   })
 
@@ -196,7 +204,6 @@
           @click="closeMobileNavAnimated"
         />
       </Transition>
-
       <Transition name="mobile-nav-sheet">
         <aside
           v-if="menuOpen"
@@ -614,7 +621,7 @@
     .mobile-nav-backdrop {
       position: fixed;
       inset: var(--admin-mobile-nav-top, calc(58px + env(safe-area-inset-top))) 0 0;
-      z-index: 70;
+      z-index: 88;
       display: block;
       background: rgba(0, 0, 0, 0.08);
       transition:
@@ -630,20 +637,23 @@
     }
 
     .mobile-nav-panel {
+      --admin-mobile-nav-extension: calc(240px + env(safe-area-inset-bottom));
       position: fixed;
       top: calc(var(--admin-mobile-nav-top, calc(58px + env(safe-area-inset-top))) + 8px);
       right: 0;
-      bottom: 0;
+      bottom: calc(-1 * var(--admin-mobile-nav-extension));
       left: 0;
-      z-index: 72;
+      z-index: 90;
       display: flex;
+      box-sizing: border-box;
       width: 100vw;
       height: auto;
       max-height: none;
       flex-direction: column;
       gap: 12px;
-      overflow: hidden;
-      padding: 27px 15px max(15px, env(safe-area-inset-bottom));
+      overflow: visible;
+      padding: 27px 30px
+        calc(max(15px, env(safe-area-inset-bottom)) + var(--admin-mobile-nav-extension));
       border: 1px solid rgba(255, 255, 255, 0.12);
       border-bottom: 0;
       border-radius: clamp(26px, 7.5vw, 34px) clamp(26px, 7.5vw, 34px) 0 0;
@@ -713,7 +723,7 @@
     .mobile-nav-panel .sidebar-nav {
       display: grid;
       min-height: 0;
-      flex: 1;
+      flex: 1 1 auto;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       align-content: start;
       gap: 8px;
@@ -788,7 +798,8 @@
     }
 
     .mobile-nav-panel {
-      padding: 27px 12px max(12px, env(safe-area-inset-bottom));
+      padding: 27px 24px
+        calc(max(12px, env(safe-area-inset-bottom)) + var(--admin-mobile-nav-extension));
     }
 
     .mobile-nav-panel .sidebar-tab {

@@ -147,8 +147,6 @@
   const lyricsEnabled = ref(true)
   const lyricAvailability = ref<LyricAvailability>('unavailable')
   const lyricsSnapshot = ref<LyricsSnapshot | null>(null)
-  const lyricSeekPreviewTime = ref<number | null>(null)
-  const lyricSeekPreviewActive = ref(false)
   const notice = ref('')
   const sourceWarning = ref('')
   // 封面 CORS 回退:crossorigin="anonymous" 首次加载失败(CDN 不返回 CORS 头)时,
@@ -180,6 +178,12 @@
     const h = el.getBoundingClientRect().height
     return h > 0 ? h : window.innerHeight
   }
+  function getSheetHalfOffset(el: HTMLElement | null): number {
+    if (!el) return window.innerHeight * 0.5
+    const rect = el.getBoundingClientRect()
+    const visibleHeight = window.innerHeight - rect.top
+    return (visibleHeight > 0 ? visibleHeight : window.innerHeight) * 0.5
+  }
   const {
     detent: libraryDetent,
     dragging: libraryDragging,
@@ -190,8 +194,9 @@
     containerRef: libraryDrawerRef,
     handleRef: libraryHandleRef,
     active: listOpen,
-    onDismiss: closePanels,
+    onDismiss: closeLibraryPanel,
     sheetHeight: () => getSheetHeight(libraryDrawerRef.value),
+    halfOffset: () => getSheetHalfOffset(libraryDrawerRef.value),
     enabled: usesSheetDrawer,
   })
   const {
@@ -204,8 +209,9 @@
     containerRef: settingsDrawerRef,
     handleRef: settingsHandleRef,
     active: settingsOpen,
-    onDismiss: closePanels,
+    onDismiss: closeSettingsPanel,
     sheetHeight: () => getSheetHeight(settingsDrawerRef.value),
+    halfOffset: () => getSheetHalfOffset(settingsDrawerRef.value),
     enabled: usesSheetDrawer,
   })
   const libraryDrawerStyle = computed(() => {
@@ -366,6 +372,14 @@
     settingsOpen.value = false
   }
 
+  function closeLibraryPanel() {
+    listOpen.value = false
+  }
+
+  function closeSettingsPanel() {
+    settingsOpen.value = false
+  }
+
   function closePanelsAnimated() {
     if (!usesSheetDrawer()) {
       closePanels()
@@ -431,9 +445,7 @@
       return
     }
 
-    panelsSoftenedTimer = window.setTimeout(() => {
-      panelsSoftened.value = false
-    }, 320)
+    panelsSoftened.value = false
   })
   watch(settingsAvailable, (available) => {
     if (!available && settingsOpen.value) {
@@ -473,8 +485,6 @@
     if (availability === 'unavailable') mobileView.value = 'cover'
     if (availability === 'unavailable') {
       lyricsSnapshot.value = null
-      lyricSeekPreviewTime.value = null
-      lyricSeekPreviewActive.value = false
     }
   }
 
@@ -505,16 +515,6 @@
     lyricsSnapshot.value = snapshot
     setLyricsWindowSnapshot(snapshot)
   }
-
-  function handleSeekPreview(time: number | null, active: boolean) {
-    lyricSeekPreviewTime.value = time
-    lyricSeekPreviewActive.value = active
-  }
-
-  watch(currentTrackId, () => {
-    lyricSeekPreviewTime.value = null
-    lyricSeekPreviewActive.value = false
-  })
 
   async function handleMainCoverLoaded(trackId: string, event: Event) {
     const image = event.currentTarget as HTMLImageElement
@@ -580,18 +580,26 @@
     window.removeEventListener('online', showOnlineNotice)
   })
 
-  watch(currentTrackId, () => {
-    // 切歌时立即重置主封面"已就绪"状态，让新封面重新走 fade-in transition；
-    // 列表里的小封面缓存（loadedCovers）保留，避免抽屉滚动时小图重复闪现。
-    resetMainCover()
-    // 清空 CORS 回退标记:新封面需要重新尝试 crossorigin 加载以支持取色。
-    coverCorsRetry.value = new Set()
-    lyricAvailability.value = 'unavailable'
-    if (!hasTrackLyricsSource(currentTrack.value)) mobileView.value = 'cover'
-    if (!currentTrack.value?.cover) {
-      resetTheme()
-    }
-  })
+  watch(
+    currentTrackId,
+    () => {
+      // 切歌时立即重置主封面"已就绪"状态，让新封面重新走 fade-in transition；
+      // 列表里的小封面缓存（loadedCovers）保留，避免抽屉滚动时小图重复闪现。
+      resetMainCover()
+      // 清空 CORS 回退标记:新封面需要重新尝试 crossorigin 加载以支持取色。
+      coverCorsRetry.value = new Set()
+      const nextTrackHasLyrics = hasTrackLyricsSource(currentTrack.value)
+      lyricAvailability.value = nextTrackHasLyrics ? 'loading' : 'unavailable'
+      lyricsSnapshot.value = null
+      if (!nextTrackHasLyrics) {
+        mobileView.value = 'cover'
+      }
+      if (!currentTrack.value?.cover) {
+        resetTheme()
+      }
+    },
+    { flush: 'sync' },
+  )
   watch(preloadMessage, (message) => {
     if (message) showNotice(message)
   })
@@ -746,12 +754,9 @@
 
       <Transition name="lyrics-panel-swap" mode="out-in">
         <LyricsPanel
-          :key="currentTrackId || 'empty-lyrics'"
           class="lyrics-column"
           :class="{ 'mobile-hidden': mobileView !== 'lyrics', 'lyrics-disabled': !lyricsVisible }"
           :active="lyricsPanelActive"
-          :preview-time="lyricSeekPreviewTime"
-          :preview-active="lyricSeekPreviewActive"
           @seek="seek"
           @availability="handleLyricAvailability"
           @snapshot="handleLyricsSnapshot"
@@ -765,9 +770,8 @@
           :on-previous="previousWithHaptic"
           :on-next="nextWithHaptic"
           :on-seek="seek"
-          :on-seek-preview="handleSeekPreview"
           :lyric-preview="lyricsSnapshot"
-          :preview-enabled="!chromeHidden"
+          :preview-enabled="false"
         />
         <div class="mobile-control-actions">
           <button :aria-label="playModeText" :title="playModeText" @click="cyclePlayModeWithHaptic">
@@ -801,7 +805,6 @@
           :on-previous="previousWithHaptic"
           :on-next="nextWithHaptic"
           :on-seek="seek"
-          :on-seek-preview="handleSeekPreview"
           :lyric-preview="lyricsSnapshot"
           :preview-enabled="!chromeHidden"
         />
@@ -813,7 +816,6 @@
           :on-previous="previousWithHaptic"
           :on-next="nextWithHaptic"
           :on-seek="seek"
-          :on-seek-preview="handleSeekPreview"
           :lyric-preview="lyricsSnapshot"
           :preview-enabled="!chromeHidden"
         />
@@ -856,7 +858,6 @@
         @click="closePanelsAnimated"
       />
     </Transition>
-
     <Transition name="library-sheet">
       <aside
         v-if="listOpen"
@@ -1086,7 +1087,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 0 28px;
-    background: linear-gradient(rgba(18, 18, 20, 0.42), transparent);
+    background: transparent;
     transition:
       opacity 0.48s cubic-bezier(0.22, 1, 0.36, 1),
       transform 0.48s cubic-bezier(0.22, 1, 0.36, 1);
@@ -1747,7 +1748,7 @@
     .topbar {
       height: 58px;
       padding: max(6px, env(safe-area-inset-top)) 14px 0;
-      background: linear-gradient(180deg, rgba(10, 10, 12, 0.44), transparent);
+      background: transparent;
     }
     .brand {
       gap: 7px;
@@ -1864,24 +1865,7 @@
         backdrop-filter 320ms ease;
     }
     .mobile-shared-controls::before {
-      position: absolute;
-      inset: 0 calc(-1 * max(20px, env(safe-area-inset-right)))
-        calc(-1 * max(14px, env(safe-area-inset-bottom)))
-        calc(-1 * max(20px, env(safe-area-inset-left)));
-      z-index: -1;
-      border-radius: 0;
-      background: linear-gradient(
-        180deg,
-        transparent,
-        rgba(12, 12, 14, 0.2) 34%,
-        rgba(12, 12, 14, 0.46)
-      );
-      content: '';
-      pointer-events: none;
-      transition:
-        background 320ms ease,
-        box-shadow 320ms ease,
-        backdrop-filter 320ms ease;
+      display: none;
     }
     .chrome-hidden .mobile-shared-controls {
       opacity: 0;
@@ -1900,16 +1884,6 @@
       width: 42px;
       height: 38px;
     }
-    .mobile-shared-controls.lyrics-mode {
-      backdrop-filter: blur(30px) saturate(160%);
-    }
-    .mobile-shared-controls.lyrics-mode::before {
-      background: rgba(28, 28, 32, 0.48);
-      box-shadow:
-        0 14px 44px rgba(0, 0, 0, 0.24),
-        inset 0 1px rgba(255, 255, 255, 0.08);
-      backdrop-filter: blur(30px) saturate(160%);
-    }
     .artwork-column.mobile-hidden,
     .lyrics-column.mobile-hidden {
       visibility: hidden;
@@ -1927,11 +1901,15 @@
       display: none;
     }
     .side-drawer {
+      --mobile-drawer-extension: calc(240px + env(safe-area-inset-bottom));
       top: calc(62px + env(safe-area-inset-top));
       right: 0;
-      bottom: 0;
+      bottom: calc(-1 * var(--mobile-drawer-extension));
       left: 0;
+      z-index: 64;
+      box-sizing: border-box;
       width: 100vw;
+      overflow: visible;
       border-radius: clamp(26px, 7.5vw, 34px) clamp(26px, 7.5vw, 34px) 0 0;
       background: linear-gradient(145deg, rgba(58, 57, 64, 0.68), rgba(22, 22, 26, 0.58));
       box-shadow: 0 -18px 64px rgba(0, 0, 0, 0.34);
@@ -1975,26 +1953,26 @@
     .drawer-backdrop {
       display: block;
       inset: calc(62px + env(safe-area-inset-top)) 0 0;
-      z-index: 38;
-      background: rgba(0, 0, 0, 0.08);
-      transition:
-        inset 280ms cubic-bezier(0.16, 1, 0.3, 1),
-        background 280ms ease;
+      z-index: 58;
+      background: transparent;
+      transition: inset 280ms cubic-bezier(0.16, 1, 0.3, 1);
     }
     .drawer-backdrop.is-half {
       inset: 0;
-      background: rgba(0, 0, 0, 0.32);
+      background: transparent;
     }
     .library-drawer {
       top: calc(62px + env(safe-area-inset-top));
       right: 0;
-      bottom: 0;
+      bottom: calc(-1 * var(--mobile-drawer-extension));
       left: 0;
+      z-index: 64;
       width: 100vw;
       height: auto;
+      overflow: visible;
       border-radius: clamp(26px, 7.5vw, 34px) clamp(26px, 7.5vw, 34px) 0 0;
       transform-origin: bottom center;
-      padding-bottom: 0;
+      padding-bottom: var(--mobile-drawer-extension);
     }
     .library-drawer :deep(.track-header) {
       padding-right: 0;
@@ -2009,10 +1987,13 @@
     }
     .settings-drawer {
       top: calc(62px + env(safe-area-inset-top));
-      bottom: 0;
+      bottom: calc(-1 * var(--mobile-drawer-extension));
+      z-index: 64;
       width: 100vw;
       max-height: none;
-      padding: 19px 15px max(18px, env(safe-area-inset-bottom));
+      overflow: visible;
+      padding: 19px 30px
+        calc(max(18px, env(safe-area-inset-bottom)) + var(--mobile-drawer-extension));
     }
     .settings-drop-enter-from,
     .settings-drop-leave-to {
@@ -2084,9 +2065,6 @@
       left: 16px;
       padding-top: 10px;
     }
-    .mobile-shared-controls::before {
-      inset: 0 -16px calc(-1 * max(8px, env(safe-area-inset-bottom)));
-    }
     .side-drawer,
     .library-drawer,
     .settings-drawer {
@@ -2096,7 +2074,8 @@
       inset: calc(58px + env(safe-area-inset-top)) 0 0;
     }
     .settings-drawer {
-      padding: 15px 12px max(14px, env(safe-area-inset-bottom));
+      padding: 15px 24px
+        calc(max(14px, env(safe-area-inset-bottom)) + var(--mobile-drawer-extension));
     }
     .settings-drawer header {
       margin-bottom: 8px;

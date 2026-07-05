@@ -40,6 +40,14 @@ const track: Track = {
   kind: 'local',
 }
 
+const secondTrack: Track = {
+  id: 'track-2',
+  title: 'Second Track',
+  artist: 'Meliora',
+  audioUrl: '/music/second.mp3',
+  kind: 'local',
+}
+
 type ResizeObserverCallback = ConstructorParameters<typeof ResizeObserver>[0]
 
 class MockResizeObserver {
@@ -350,6 +358,57 @@ describe('LyricsPanel scrolling alignment', () => {
 
     expect(wrapper.findAll('.lyric-line')[8]?.classes()).toContain('active')
     expect(animateSpy).toHaveBeenCalledTimes(12)
+  })
+
+  it('defers the next one-line realign until the current lyric animation finishes', async () => {
+    mockedSupportsWebAnimations.mockReturnValue(true)
+    const animateSpy = installElementAnimateMock()
+    const { wrapper, store } = await mountLyricsPanel()
+    await flushVueUpdates()
+    setPanelLayout(wrapper)
+
+    await moveTo(store, wrapper, 10)
+    clearAnimationFrames()
+    animateSpy.mockClear()
+
+    store.currentTime = 16
+    await flushVueUpdates()
+    setPanelLayout(wrapper)
+    await flushRealignFrame()
+
+    expect(wrapper.findAll('.lyric-line')[3]?.classes()).toContain('active')
+    expect(animateSpy).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(1300)
+    await flushRealignFrame()
+
+    expect(animateSpy).toHaveBeenCalled()
+  })
+
+  it('clears transient lyric visuals and cancels row animations when the track changes', async () => {
+    mockedSupportsWebAnimations.mockReturnValue(true)
+    const animateSpy = installElementAnimateMock()
+    const { wrapper, store } = await mountLyricsPanel()
+    await flushVueUpdates()
+    const scroller = setPanelLayout(wrapper)
+
+    await moveTo(store, wrapper, 16)
+
+    expect(wrapper.findAll('.lyric-line')).toHaveLength(lyricsLines.length)
+    expect(animateSpy).toHaveBeenCalled()
+
+    const animation = animateSpy.mock.results[0]?.value as Animation | undefined
+    const cancelSpy = animation?.cancel ? vi.mocked(animation.cancel) : null
+
+    const nextLyrics = makeDeferred<LyricLine[]>()
+    mockedLoadTrackLyrics.mockReturnValueOnce(nextLyrics.promise)
+    store.setTracks([track, secondTrack])
+    store.selectTrack(secondTrack, store.tracks)
+    await flushVueUpdates()
+
+    expect(wrapper.findAll('.lyric-line')).toHaveLength(0)
+    expect(scroller.scrollTop).toBe(0)
+    expect(cancelSpy).toHaveBeenCalled()
   })
 
   it('realigns the same active line when lyricFontSize changes', async () => {

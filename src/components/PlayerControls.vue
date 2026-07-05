@@ -13,22 +13,15 @@
       onPrevious: () => void
       onNext: () => void
       onSeek: (time: number) => void
-      onSeekPreview?: (time: number | null, active: boolean) => void
       lyricPreview?: LyricsSnapshot | null
       previewEnabled?: boolean
     }>(),
     {
       variant: 'bar',
-      onSeekPreview: undefined,
       lyricPreview: null,
       previewEnabled: true,
     },
   )
-
-  const SEEK_PREVIEW_MIN_SAMPLE_MS = 140
-  const SEEK_PREVIEW_MAX_SAMPLE_MS = 360
-  const SEEK_PREVIEW_SLOW_SPEED = 0.12
-  const SEEK_PREVIEW_FAST_SPEED = 1.2
 
   const store = usePlayerStore()
   const { isPlaying, currentTime, duration, settings } = storeToRefs(store)
@@ -39,6 +32,7 @@
   const previewWidth = ref<number | null>(null)
   const previewHeight = ref<number | null>(null)
   const previewVisible = ref(false)
+  const previewScrollDirection = ref<'forward' | 'backward' | 'idle'>('idle')
   const previewBubble = ref<HTMLElement | null>(null)
   const previewContent = ref<HTMLElement | null>(null)
   const previewTextElement = ref<HTMLElement | null>(null)
@@ -70,11 +64,9 @@
   })
   const previewText = computed(() => previewLine.value?.text ?? '')
   const previewTranslation = computed(() => previewLine.value?.translation ?? '')
-  let lastSeekPreviewSyncAt = 0
-  let lastSeekPreviewPointerX: number | null = null
-  let lastSeekPreviewPointerAt = 0
   let progressDragTarget: HTMLElement | null = null
   let progressDragPointerId: number | null = null
+  let lastPreviewTime: number | null = null
 
   function formatTime(value: number) {
     if (!Number.isFinite(value)) return '0:00'
@@ -101,57 +93,6 @@
     return ratio * duration.value
   }
 
-  function getAdaptiveSeekPreviewSampleMs(pointerSpeed = 0) {
-    const speedRatio = Math.min(
-      1,
-      Math.max(
-        0,
-        (pointerSpeed - SEEK_PREVIEW_SLOW_SPEED) /
-          (SEEK_PREVIEW_FAST_SPEED - SEEK_PREVIEW_SLOW_SPEED),
-      ),
-    )
-    return (
-      SEEK_PREVIEW_MIN_SAMPLE_MS +
-      (SEEK_PREVIEW_MAX_SAMPLE_MS - SEEK_PREVIEW_MIN_SAMPLE_MS) * speedRatio
-    )
-  }
-
-  function measureSeekPreviewPointerSpeed(clientX: number) {
-    const now = performance.now()
-    if (lastSeekPreviewPointerX === null || lastSeekPreviewPointerAt <= 0) {
-      lastSeekPreviewPointerX = clientX
-      lastSeekPreviewPointerAt = now
-      return 0
-    }
-    const elapsed = Math.max(1, now - lastSeekPreviewPointerAt)
-    const distance = Math.abs(clientX - lastSeekPreviewPointerX)
-    lastSeekPreviewPointerX = clientX
-    lastSeekPreviewPointerAt = now
-    return distance / elapsed
-  }
-
-  function resetSeekPreviewPointerSpeed(clientX?: number) {
-    lastSeekPreviewPointerX = typeof clientX === 'number' ? clientX : null
-    lastSeekPreviewPointerAt = typeof clientX === 'number' ? performance.now() : 0
-  }
-
-  function syncSeekPreview(
-    time: number | null,
-    options: { force?: boolean; pointerSpeed?: number } = {},
-  ) {
-    if (time === null) {
-      lastSeekPreviewSyncAt = 0
-      resetSeekPreviewPointerSpeed()
-      props.onSeekPreview?.(null, false)
-      return
-    }
-    const now = performance.now()
-    const sampleMs = getAdaptiveSeekPreviewSampleMs(options.pointerSpeed)
-    if (!options.force && now - lastSeekPreviewSyncAt < sampleMs) return
-    lastSeekPreviewSyncAt = now
-    props.onSeekPreview?.(time, true)
-  }
-
   function releaseProgressPointerCapture() {
     if (progressDragTarget && progressDragPointerId !== null) {
       progressDragTarget.releasePointerCapture?.(progressDragPointerId)
@@ -176,12 +117,7 @@
     draftTime.value = null
     releaseProgressPointerCapture()
     removeGlobalProgressListeners()
-    syncSeekPreview(null)
     if (options.seek) props.onSeek(committedTime)
-  }
-
-  function cancelSeekPreviewDriver() {
-    syncSeekPreview(null)
   }
 
   function handleWindowProgressPointerUp(event: PointerEvent) {
@@ -202,13 +138,10 @@
   function beginProgressDrag(event: PointerEvent) {
     if (draftTime.value !== null && !isActiveProgressPointer(event)) return
     if (event.pointerType === 'touch') hideLyricPreview()
-    const canPreviewSeek = event.pointerType !== 'touch'
     const track = event.currentTarget as HTMLElement
     const nextTime = getProgressTime(track, event.clientX)
     if (nextTime === null) return
     draftTime.value = nextTime
-    resetSeekPreviewPointerSpeed(event.clientX)
-    if (canPreviewSeek) syncSeekPreview(nextTime, { force: true })
     progressDragTarget = track
     progressDragPointerId = event.pointerId
     track.setPointerCapture?.(event.pointerId)
@@ -225,11 +158,6 @@
       const nextTime = getProgressTime(track, event.clientX)
       if (nextTime !== null) {
         draftTime.value = nextTime
-        if (event.pointerType !== 'touch') {
-          syncSeekPreview(nextTime, {
-            pointerSpeed: measureSeekPreviewPointerSpeed(event.clientX),
-          })
-        }
       }
     }
     updateLyricPreview(event)
@@ -364,6 +292,7 @@
       hideLyricPreview()
       return
     }
+    updatePreviewScrollDirection(nextTime)
     previewTime.value = nextTime
     previewVisible.value = true
     updatePreviewPosition(event.clientX, event.clientY, track)
@@ -378,6 +307,8 @@
     previewTime.value = null
     previewWidth.value = null
     previewHeight.value = null
+    previewScrollDirection.value = 'idle'
+    lastPreviewTime = null
   }
 
   function clearLyricPreviewHover() {
@@ -397,6 +328,7 @@
     }
     const nextTime = getProgressTime(hover.track, hover.clientX)
     if (nextTime === null) return
+    updatePreviewScrollDirection(nextTime)
     previewTime.value = nextTime
     if (!previewLine.value) return
     previewVisible.value = true
@@ -416,7 +348,6 @@
       restoreLyricPreviewFromHover()
       if (!previewLine.value) {
         hideLyricPreview()
-        cancelSeekPreviewDriver()
       }
     },
   )
@@ -425,7 +356,6 @@
     (enabled) => {
       if (!enabled) {
         clearLyricPreviewHover()
-        cancelSeekPreviewDriver()
       } else {
         restoreLyricPreviewFromHover()
       }
@@ -436,7 +366,6 @@
     (enabled) => {
       if (!enabled) {
         clearLyricPreviewHover()
-        cancelSeekPreviewDriver()
       }
     },
   )
@@ -444,9 +373,22 @@
     if (!previewVisible.value || !previewLine.value) return
     void nextTick(updatePreviewSize)
   })
+
+  function updatePreviewScrollDirection(nextTime: number) {
+    if (lastPreviewTime === null) {
+      lastPreviewTime = nextTime
+      previewScrollDirection.value = 'idle'
+      return
+    }
+
+    const delta = nextTime - lastPreviewTime
+    lastPreviewTime = nextTime
+    if (Math.abs(delta) < 0.05) return
+    previewScrollDirection.value = delta > 0 ? 'forward' : 'backward'
+  }
+
   onBeforeUnmount(() => {
     finishProgressDrag(null, { seek: false })
-    syncSeekPreview(null)
     removeGlobalProgressListeners()
   })
 </script>
@@ -492,7 +434,9 @@
           @touchstart.stop
           @touchmove.stop
         >
-          <span class="progress-fill" aria-hidden="true" />
+          <span class="range-track" aria-hidden="true">
+            <span class="progress-fill" />
+          </span>
         </div>
         <span v-if="variant === 'progress'" class="time remaining">{{ formatRemaining() }}</span>
         <div v-else class="time-row">
@@ -521,6 +465,7 @@
           v-if="previewVisible && previewLine"
           ref="previewBubble"
           class="lyric-preview-bubble"
+          :class="`scroll-${previewScrollDirection}`"
           :style="previewStyle"
           role="status"
           aria-live="polite"
@@ -691,28 +636,28 @@
     touch-action: none;
     -webkit-tap-highlight-color: transparent;
 
-    &::before,
-    .progress-fill {
+    .range-track {
       position: absolute;
       top: 50%;
+      right: 0;
       left: 0;
       height: var(--track-height);
+      overflow: hidden;
       border-radius: 99px;
+      background: rgba(255, 255, 255, 0.19);
       transform: translateY(-50%);
       transition:
         height 160ms ease,
         background 160ms ease;
     }
 
-    &::before {
-      content: '';
-      right: 0;
-      background: rgba(255, 255, 255, 0.19);
-    }
-
     .progress-fill {
+      position: absolute;
+      top: -1px;
+      bottom: -1px;
+      left: 0;
       width: var(--range-progress);
-      border-radius: 99px 0 0 99px;
+      border-radius: 0;
       background: rgba(255, 255, 255, 0.56);
     }
   }
@@ -941,6 +886,26 @@
     transform: translateY(-42%);
   }
 
+  .lyric-preview-bubble.scroll-forward {
+    .lyric-preview-content-enter-from {
+      transform: translateY(42%);
+    }
+
+    .lyric-preview-content-leave-to {
+      transform: translateY(-42%);
+    }
+  }
+
+  .lyric-preview-bubble.scroll-backward {
+    .lyric-preview-content-enter-from {
+      transform: translateY(-42%);
+    }
+
+    .lyric-preview-content-leave-to {
+      transform: translateY(42%);
+    }
+  }
+
   @media (max-width: 720px) {
     .is-page .transport {
       gap: clamp(16px, 2.8svh, 24px);
@@ -969,7 +934,7 @@
       --track-height: 14px;
     }
 
-    .is-page .range::before {
+    .is-page .range .range-track {
       background: rgba(255, 255, 255, 0.22);
       box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.16);
     }

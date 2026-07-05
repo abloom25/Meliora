@@ -10,6 +10,11 @@ const router = createRouter({
       name: 'admin',
       component: () => import('../admin/AdminApp.vue'),
     },
+    {
+      path: '/:pathMatch(.*)*',
+      name: 'not-found',
+      component: () => import('../views/NotFoundView.vue'),
+    },
   ],
 })
 

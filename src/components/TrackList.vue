@@ -638,7 +638,7 @@
 
   @media (max-width: 720px) {
     .track-panel {
-      padding: 18px 13px max(16px, env(safe-area-inset-bottom));
+      padding: 18px 30px max(16px, env(safe-area-inset-bottom));
     }
 
     .track-header {
@@ -680,12 +680,12 @@
     .track-list {
       --track-focus-offset: 24px;
       padding-top: 8px;
-      padding-bottom: max(18px, env(safe-area-inset-bottom));
+      padding-bottom: max(56px, calc(18px + env(safe-area-inset-bottom)));
       mask-image: linear-gradient(
         180deg,
         transparent 0,
         #000 18px,
-        #000 calc(100% - 24px),
+        #000 calc(100% - 72px),
         transparent 100%
       );
     }
@@ -715,7 +715,7 @@
 
   @media (max-width: 360px), (max-height: 700px) and (max-width: 720px) {
     .track-panel {
-      padding: 14px 10px max(12px, env(safe-area-inset-bottom));
+      padding: 14px 24px max(12px, env(safe-area-inset-bottom));
     }
 
     .track-header {

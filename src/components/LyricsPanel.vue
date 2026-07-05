@@ -21,13 +21,9 @@
   const props = withDefaults(
     defineProps<{
       active?: boolean
-      previewTime?: number | null
-      previewActive?: boolean
     }>(),
     {
       active: true,
-      previewTime: null,
-      previewActive: false,
     },
   )
   const LYRIC_MOTION_LEAD = 0.42
@@ -57,11 +53,10 @@
   let lyricsController: AbortController | null = null
   let resizeObserver: ResizeObserver | null = null
   const lineAnimations = new Set<Animation>()
-  let highlightTimer = 0
-  const lyricClockTime = computed(() =>
-    props.previewActive && props.previewTime !== null ? props.previewTime : currentTime.value,
-  )
-
+  let realignAnimationTimer = 0
+  let realignAnimating = false
+  let realignAnimatingTargetIndex: number | null = null
+  let pendingAnimatedRealign: ScheduleRealignOptions | null = null
   const reducedMotionQuery =
     typeof window !== 'undefined' && typeof window.matchMedia === 'function'
       ? window.matchMedia('(prefers-reduced-motion: reduce)')
@@ -110,12 +105,7 @@
 
   async function loadLyrics(track: Track | null) {
     const id = ++requestId
-    lines.value = []
-    lineElements.value = []
-    activeIndex.value = -1
-    targetIndex.value = -1
-    window.clearTimeout(highlightTimer)
-    lyricsController?.abort()
+    resetTransientLyrics()
     if (!track) {
       updateStatus('empty')
       return
@@ -193,6 +183,31 @@
   function cancelLineAnimations() {
     lineAnimations.forEach((animation) => animation.cancel())
     lineAnimations.clear()
+    window.clearTimeout(realignAnimationTimer)
+    realignAnimating = false
+    realignAnimatingTargetIndex = null
+    pendingAnimatedRealign = null
+  }
+
+  function resetTransientLyrics() {
+    lyricsController?.abort()
+    lyricsController = null
+    window.clearTimeout(scrollTimer)
+    window.clearTimeout(resizeRealignTimer)
+    window.clearTimeout(programmaticScrollTimer)
+    window.cancelAnimationFrame(scrollRaf)
+    window.cancelAnimationFrame(realignRaf)
+    scrollRaf = 0
+    realignRaf = 0
+    userScrolling.value = false
+    isProgrammaticScroll = false
+    cancelLineAnimations()
+    lines.value = []
+    lineElements.value = []
+    activeIndex.value = -1
+    targetIndex.value = -1
+    status.value = 'idle'
+    if (scroller.value) scroller.value.scrollTop = 0
   }
 
   interface ScheduleRealignOptions {
@@ -202,6 +217,27 @@
 
   function scheduleRealign(options: ScheduleRealignOptions = {}) {
     if (!props.active || userScrolling.value || targetIndex.value < 0) return
+    if (realignAnimating && options.animate !== false) {
+      const targetDistance =
+        realignAnimatingTargetIndex === null
+          ? 0
+          : Math.abs(targetIndex.value - realignAnimatingTargetIndex)
+      if (targetDistance > 1) {
+        cancelLineAnimations()
+      } else {
+        pendingAnimatedRealign = {
+          animate: options.animate,
+          previousIndex: options.previousIndex,
+        }
+        return
+      }
+    }
+    if (options.animate === false) {
+      window.clearTimeout(realignAnimationTimer)
+      realignAnimating = false
+      realignAnimatingTargetIndex = null
+      pendingAnimatedRealign = null
+    }
     const id = ++realignRequestId
     window.cancelAnimationFrame(realignRaf)
     void nextTick(() => {
@@ -223,9 +259,7 @@
   }
 
   function syncActiveLyric(options: SyncActiveLyricOptions = {}) {
-    const syncTime = !props.previewActive
-      ? lyricClockTime.value + LYRIC_MOTION_LEAD
-      : lyricClockTime.value
+    const syncTime = currentTime.value + LYRIC_MOTION_LEAD
     const nextIndex =
       status.value === 'ready' || lines.value.length > 0
         ? findActiveLyricIndex(lines.value, syncTime)
@@ -237,7 +271,6 @@
     activeIndex.value = nextIndex
 
     if (changed) {
-      window.clearTimeout(highlightTimer)
       emitSnapshot()
     }
     const shouldRealign = options.realign ?? true
@@ -371,7 +404,22 @@
     })
 
     const longestDelay = Math.max(visibleLines.length - 1, 0) * 48
-    highlightTimer = window.setTimeout(() => onComplete?.(), 540 + longestDelay * 0.5)
+    realignAnimating = true
+    realignAnimatingTargetIndex = index
+    window.clearTimeout(realignAnimationTimer)
+    realignAnimationTimer = window.setTimeout(
+      () => {
+        realignAnimating = false
+        realignAnimatingTargetIndex = null
+        const pending = pendingAnimatedRealign
+        pendingAnimatedRealign = null
+        onComplete?.()
+        if (pending && props.active && !userScrolling.value && targetIndex.value >= 0) {
+          scheduleRealign(pending)
+        }
+      },
+      980 + longestDelay + 40,
+    )
   }
 
   function seekLine(line: LyricLine) {
@@ -403,7 +451,7 @@
     () => void loadLyrics(currentTrack.value),
     { immediate: true },
   )
-  watch(lyricClockTime, () => {
+  watch(currentTime, () => {
     syncActiveLyric({ animate: true })
   })
   watch(
@@ -447,7 +495,7 @@
     window.cancelAnimationFrame(scrollRaf)
     window.cancelAnimationFrame(realignRaf)
     window.clearTimeout(programmaticScrollTimer)
-    window.clearTimeout(highlightTimer)
+    window.clearTimeout(realignAnimationTimer)
     lyricsController?.abort()
     resizeObserver?.disconnect()
     window.removeEventListener('resize', handleViewportResize)

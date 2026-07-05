@@ -127,6 +127,44 @@ describe('PlayerControls lyric preview', () => {
     wrapper.unmount()
   })
 
+  it('changes lyric preview scroll direction with pointer movement direction', async () => {
+    const store = usePlayerStore()
+    store.duration = 100
+    store.currentTime = 0
+    store.settings.progressLyricPreview = true
+
+    const wrapper = mountProgressControls()
+
+    const range = wrapper.get<HTMLElement>('.range')
+    mockProgressRect(range.element)
+
+    dispatchPointerEvent(range.element, 'pointermove', {
+      clientX: 50,
+      clientY: 120,
+    })
+    await nextTick()
+
+    dispatchPointerEvent(range.element, 'pointermove', {
+      clientX: 90,
+      clientY: 120,
+    })
+    await nextTick()
+
+    const forwardPreview = document.body.querySelector('.lyric-preview-bubble')
+    expect(forwardPreview?.classList.contains('scroll-forward')).toBe(true)
+
+    dispatchPointerEvent(range.element, 'pointermove', {
+      clientX: 20,
+      clientY: 120,
+    })
+    await nextTick()
+
+    const backwardPreview = document.body.querySelector('.lyric-preview-bubble')
+    expect(backwardPreview?.classList.contains('scroll-backward')).toBe(true)
+
+    wrapper.unmount()
+  })
+
   it('hides the lyric preview when preview is disabled externally', async () => {
     const store = usePlayerStore()
     store.duration = 100
@@ -149,31 +187,6 @@ describe('PlayerControls lyric preview', () => {
     await nextTick()
 
     expect(document.body.querySelector('.lyric-preview-bubble')).toBeNull()
-    wrapper.unmount()
-  })
-
-  it('clears the main lyric preview driver when preview is disabled externally', async () => {
-    const store = usePlayerStore()
-    store.duration = 100
-    store.currentTime = 0
-    store.settings.progressLyricPreview = true
-    const onSeekPreview = vi.fn()
-
-    const wrapper = mountProgressControls({ onSeekPreview })
-
-    const range = wrapper.get<HTMLElement>('.range')
-    mockProgressRect(range.element)
-
-    dispatchPointerEvent(range.element, 'pointerdown', {
-      clientX: 50,
-      clientY: 120,
-    })
-    expect(onSeekPreview).toHaveBeenLastCalledWith(25, true)
-
-    await wrapper.setProps({ previewEnabled: false })
-    await nextTick()
-
-    expect(onSeekPreview).toHaveBeenLastCalledWith(null, false)
     wrapper.unmount()
   })
 
@@ -203,14 +216,13 @@ describe('PlayerControls lyric preview', () => {
     wrapper.unmount()
   })
 
-  it('does not drive the main lyric preview while dragging with touch input', async () => {
+  it('keeps lyric preview bubbles hidden while dragging with touch input', async () => {
     const store = usePlayerStore()
     store.duration = 100
     store.currentTime = 0
     store.settings.progressLyricPreview = true
-    const onSeekPreview = vi.fn()
 
-    const wrapper = mountProgressControls({ onSeekPreview })
+    const wrapper = mountProgressControls()
 
     const range = wrapper.get<HTMLElement>('.range')
     mockProgressRect(range.element)
@@ -227,7 +239,6 @@ describe('PlayerControls lyric preview', () => {
     })
     await nextTick()
 
-    expect(onSeekPreview).not.toHaveBeenCalled()
     expect(document.body.querySelector('.lyric-preview-bubble')).toBeNull()
 
     dispatchPointerEvent(range.element, 'pointercancel', {
@@ -242,9 +253,8 @@ describe('PlayerControls lyric preview', () => {
     store.currentTime = 0
     store.settings.progressLyricPreview = true
     const onSeek = vi.fn()
-    const onSeekPreview = vi.fn()
 
-    const wrapper = mountProgressControls({ onSeek, onSeekPreview })
+    const wrapper = mountProgressControls({ onSeek })
 
     const range = wrapper.get<HTMLElement>('.range')
     mockProgressRect(range.element)
@@ -259,7 +269,6 @@ describe('PlayerControls lyric preview', () => {
     })
 
     expect(onSeek).toHaveBeenLastCalledWith(80)
-    expect(onSeekPreview).toHaveBeenLastCalledWith(null, false)
     wrapper.unmount()
   })
 
@@ -307,9 +316,8 @@ describe('PlayerControls lyric preview', () => {
     store.duration = 100
     store.currentTime = 0
     store.settings.progressLyricPreview = true
-    const onSeekPreview = vi.fn()
 
-    const wrapper = mountProgressControls({ onSeekPreview })
+    const wrapper = mountProgressControls()
 
     const range = wrapper.get<HTMLElement>('.range')
     mockProgressRect(range.element)
@@ -329,7 +337,6 @@ describe('PlayerControls lyric preview', () => {
     await nextTick()
 
     expect(document.body.querySelector('.lyric-preview-bubble')).toBeNull()
-    expect(onSeekPreview).toHaveBeenLastCalledWith(null, false)
     wrapper.unmount()
   })
 

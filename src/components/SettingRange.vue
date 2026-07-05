@@ -186,7 +186,9 @@
     @pointercancel="cancelDrag"
     @keydown="handleKeydown"
   >
-    <span class="setting-range-fill" aria-hidden="true" />
+    <span class="setting-range-track" aria-hidden="true">
+      <span class="setting-range-fill" />
+    </span>
   </div>
 </template>
 
@@ -205,25 +207,25 @@
     -webkit-tap-highlight-color: transparent;
   }
 
-  .setting-range::before,
-  .setting-range-fill {
+  .setting-range-track {
     position: absolute;
     top: 50%;
+    right: 0;
     left: 0;
     height: 7px;
+    overflow: hidden;
     border-radius: 99px;
+    background: rgba(255, 255, 255, 0.18);
     transform: translateY(-50%);
   }
 
-  .setting-range::before {
-    content: '';
-    right: 0;
-    background: rgba(255, 255, 255, 0.18);
-  }
-
   .setting-range-fill {
+    position: absolute;
+    top: -1px;
+    bottom: -1px;
+    left: 0;
     width: var(--setting-progress);
-    border-radius: 99px 0 0 99px;
+    border-radius: 0;
     background: rgba(255, 255, 255, 0.88);
   }
 

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-rc6] - 2026-07-05
+
+### Added
+
+- **404 页面兜底**:新增 `NotFoundView` 与全局 `/:pathMatch(.*)*` 路由,未知路径会展示当前缺失路径并提供「返回播放器」入口;新增 `router.test.ts` 覆盖播放器、管理后台和未知路径解析
+
+### Changed
+
+- **歌词切歌动画稳定性**:`LyricsPanel` 移除进度条 hover 对主歌词面板的临时驱动,改为只跟随真实播放时间;切歌加载新歌词前统一取消旧歌词请求、滚动 RAF、行级 Web Animations 和用户滚动状态,避免快速切歌时旧歌词行带着位移动画叠到封面区域
+- **歌词重对齐节流**:歌词行 FLIP 滚动动画运行期间会延后相邻行的下一次重对齐请求,大跨度跳转则立即取消旧动画并切到新目标,减少快速 seek/切歌时的抖动和卡顿
+- **进度条歌词预览职责收窄**:`PlayerControls` 不再通过 `onSeekPreview` 驱动主歌词面板,只保留进度条浮层预览;浮层内容切换根据指针移动方向使用 forward/backward 动画,触摸拖拽仍保持隐藏
+- **移动端抽屉空间优化**:播放器曲库/设置抽屉和管理后台移动导航增加半屏偏移计算、底部延展区与 safe-area padding,提高小屏幕下拖拽、滚动和底部内容可达性;曲库、设置面板和管理导航同步加大移动端横向内边距与底部渐隐空间
+- **滑杆轨道结构统一**:`SettingRange` 和播放进度条改为显式 track + fill 结构,让填充层裁切更稳定,避免圆角轨道在不同浏览器中出现视觉溢出
+- **移动端预览入口调整**:便携设备上隐藏「进度条歌词预览」设置项,移动共享控制区不再启用歌词预览浮层,避免触屏拖拽时遮挡主操作区
+
+### Fixed
+
+- **有歌词歌曲快速切换重叠**:修复歌词已加载后快速切歌时,旧歌词动画未及时取消导致歌词短暂重叠到封面上再消失的问题
+- **切歌加载态闪烁**:当前歌曲变更时若新歌存在歌词来源,歌词可用状态先进入 `loading` 而不是短暂 `unavailable`,避免歌词视图在有歌词歌曲之间切换时错误回到封面视图
+- **移动抽屉关闭误伤**:播放器曲库抽屉和设置抽屉的 dismiss 回调拆分为各自关闭当前面板,避免拖拽关闭一个抽屉时顺带关闭其他面板状态
+
 ## [0.2.0-rc5] - 2026-07-04
 
 ### Added
@@ -136,6 +157,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`SettingsPanel.vue` 15 处 props 直接修改**:组件改为使用 Pinia store 后彻底消除 `vue/no-mutating-props` 违规
 - **5 处 Prettier 格式化违规**:`useFocusTrap.ts` import 语句、`PlayerView.vue` 缩进/解构/多行属性、`TrackList.vue` v-model 换行均由 `eslint --fix` 自动修复
 
+[0.2.0-rc6]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc6
 [0.2.0-rc5]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc5
 [0.2.0-rc4]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc4
 [0.2.0-rc3]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc3

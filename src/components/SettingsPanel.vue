@@ -142,7 +142,7 @@
         <span><strong>歌词翻译</strong><small>显示歌词中解析出的翻译文本</small></span>
         <ToggleSwitch v-model="settings.lyricTranslation" aria-label="歌词翻译" />
       </div>
-      <div class="setting-row toggle-row">
+      <div v-if="!portableDevice" class="setting-row toggle-row">
         <span><strong>进度条歌词预览</strong><small>悬停进度条时显示对应时间的歌词</small></span>
         <ToggleSwitch v-model="settings.progressLyricPreview" aria-label="进度条歌词预览" />
       </div>
@@ -425,13 +425,13 @@
 
   @media (max-width: 720px) {
     .settings-scroll {
-      margin: 0 -3px;
-      padding: 0 3px max(18px, env(safe-area-inset-bottom));
+      margin: 0 -2px;
+      padding: 0 2px max(56px, calc(18px + env(safe-area-inset-bottom)));
       mask-image: linear-gradient(
         180deg,
         transparent 0,
         #000 18px,
-        #000 calc(100% - 26px),
+        #000 calc(100% - 72px),
         transparent 100%
       );
     }
