@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createCookieHeader, signToken } from '../core/auth'
 import { handleRequest } from '../core/router'
 import type { Env } from '../core/types'
+import { generateCsrfToken } from '../core/csrf'
+import { getSigningSecret } from '../core/auth'
 
 const ENV: Env = {
   GH_TOKEN: 'placeholder',
@@ -62,6 +64,7 @@ describe('router security gates', () => {
           body: JSON.stringify({ password: 'wrong-password' }),
         }),
         ENV,
+        { clientIp: '203.0.113.42' },
       )
     }
 
@@ -121,6 +124,30 @@ describe('router security gates', () => {
 
     expect(response.status).toBe(401)
     expect(data.error).toBe('未授权')
+  })
+
+  it('accepts an authenticated same-origin write with a valid CSRF token', async () => {
+    const csrfToken = await generateCsrfToken(await getSigningSecret(ENV))
+    const response = await handleRequest(
+      new Request('https://example.com/api/config', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://example.com',
+          Cookie: await authCookie(),
+          'X-CSRF-Token': csrfToken,
+        },
+        body: JSON.stringify({
+          siteName: 'Meliora',
+          apiEndpoint: '',
+          playlists: [],
+          localTracks: [],
+        }),
+      }),
+      ENV,
+    )
+
+    expect(response.status).toBe(200)
   })
 
   it('allows local Vite-to-Wrangler proxy write requests in development mode', async () => {

@@ -89,6 +89,49 @@ describe('AboutView update polling', () => {
       expect.any(AbortSignal),
     )
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 9000)
+    expect(wrapper.find('.update-message').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('renders update failures in a single status card', async () => {
+    adminApiMock.checkUpdate.mockResolvedValue({
+      ok: true,
+      data: {
+        hasUpdate: true,
+        currentVersion: '0.1.0',
+        latestVersion: '0.2.0',
+        targetTag: 'v0.2.0',
+        releaseNotes: 'notes',
+        releaseUrl: 'https://example.com/release',
+        publishedAt: '2026-07-01T00:00:00.000Z',
+      },
+    })
+    adminApiMock.triggerUpdate.mockResolvedValue({
+      ok: true,
+      message: 'triggered',
+      triggeredAt: '2026-07-02T00:00:00.000Z',
+      triggerId: 'trigger-1',
+    })
+    adminApiMock.fetchUpdateStatus.mockResolvedValue({
+      ok: false,
+      error: 'GitHub workflow runs failed: 403: Resource not accessible',
+    })
+
+    const wrapper = mount(AboutView, {
+      props: { config: { siteName: 'Meliora', apiEndpoint: '', playlists: [], localTracks: [] } },
+    })
+    await flushPromises()
+
+    await (wrapper.vm as unknown as { handleUpdate: () => Promise<void> }).handleUpdate()
+    await flushPromises()
+    await (wrapper.vm as unknown as { pollUpdateStatus: () => Promise<void> }).pollUpdateStatus()
+    await flushPromises()
+    await (wrapper.vm as unknown as { pollUpdateStatus: () => Promise<void> }).pollUpdateStatus()
+    await flushPromises()
+
+    expect(wrapper.find('.update-message').exists()).toBe(false)
+    expect(wrapper.findAll('.update-status')).toHaveLength(1)
+    expect(wrapper.text()).toContain('GitHub workflow runs failed: 403: Resource not accessible')
     wrapper.unmount()
   })
 

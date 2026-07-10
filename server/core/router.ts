@@ -1,5 +1,11 @@
-import type { ConfigPayload, Env } from './types'
-import { signToken, createCookieHeader, createClearCookieHeader, verifyAuth } from './auth'
+import type { Env } from './types'
+import {
+  signToken,
+  verifyAuth,
+  createLoginHeaders,
+  createLogoutHeaders,
+  getSigningSecret,
+} from './auth'
 import { getConfig, putConfig } from './config-handler'
 import { uploadFile, deleteTrackFiles } from './upload-handler'
 import {
@@ -11,8 +17,18 @@ import {
 import { isDevelopmentMode, validateEnv } from './types'
 import { checkUpdate, getUpdateStatus, triggerUpdate } from './update-handler'
 import { testMusicApi } from './music-api-tester'
-import { consumeRateLimit, resetRateLimit } from './rate-limit'
+import { consumeRateLimit, resetRateLimit, tryAcquireWorkSlot } from './rate-limit'
 import { renderEnvNotReadyPage, renderDisabledPage } from './status-pages'
+import { validateCsrfRequest, requiresCsrfProtection } from './csrf'
+import { createErrorResponse, logSanitizedError } from './error-handler'
+import { isLoopbackOrigin } from '../../shared/utils/url-validation'
+import { UPLOAD_LIMITS } from '../../shared/constants'
+import { jsonResponse } from './http'
+
+export interface RequestContext {
+  /** 仅允许由部署适配器从平台保证可信的请求元数据中填充。 */
+  clientIp?: string
+}
 
 const LOGIN_RATE_LIMIT = {
   key: 'login',
@@ -65,21 +81,16 @@ const TEST_MUSIC_API_RATE_LIMIT = {
   blockMs: 5 * 60 * 1000,
 }
 
-function jsonResponse(
-  body: unknown,
-  status: number,
-  extraHeaders: Record<string, string> = {},
-): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json', ...extraHeaders },
-  })
-}
+const PASSWORD_WORK_CONCURRENCY = 2
 
 function rateLimitResponse(retryAfterSeconds: number): Response {
   return jsonResponse({ error: '请求过于频繁,请稍后再试' }, 429, {
     'Retry-After': String(retryAfterSeconds),
   })
+}
+
+function busyResponse(): Response {
+  return jsonResponse({ error: '服务器正忙,请稍后再试' }, 503, { 'Retry-After': '2' })
 }
 
 // 归一化判断 ADMIN_DISABLED 是否为真值。
@@ -101,18 +112,6 @@ function isApiWriteRequest(path: string, method: string): boolean {
 function headerMatchesRequestOrigin(headerValue: string, requestOrigin: string): boolean {
   try {
     return new URL(headerValue).origin === requestOrigin
-  } catch {
-    return false
-  }
-}
-
-function isLoopbackOrigin(origin: string): boolean {
-  try {
-    const { hostname, protocol } = new URL(origin)
-    return (
-      protocol === 'http:' &&
-      (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]')
-    )
   } catch {
     return false
   }
@@ -143,7 +142,19 @@ function isJsonRequest(request: Request): boolean {
   return contentType.split(';', 1)[0].trim().toLowerCase() === 'application/json'
 }
 
-export async function handleRequest(request: Request, env: Env): Promise<Response> {
+async function csrfErrorResponse(request: Request, env: Env): Promise<Response | null> {
+  if (!requiresCsrfProtection(request)) return null
+  const secret = await getSigningSecret(env)
+  const isValidCsrf = await validateCsrfRequest(request, secret)
+  if (isValidCsrf) return null
+  return jsonResponse({ error: 'CSRF 令牌无效或已过期' }, 403)
+}
+
+export async function handleRequest(
+  request: Request,
+  env: Env,
+  context: RequestContext = {},
+): Promise<Response> {
   if (request.method === 'OPTIONS') {
     // 管理后台 API 为同域调用(SameSite=Lax Cookie 鉴权),不需要跨域 CORS 支持。
     // 之前版本反射任意 Origin 并允许 Credentials 是危险的半成品:一旦补上响应 CORS 头,
@@ -174,7 +185,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
   try {
     if (path === '/api/login' && request.method === 'POST') {
-      const rateLimit = consumeRateLimit(request, LOGIN_RATE_LIMIT)
+      const rateLimit = consumeRateLimit(LOGIN_RATE_LIMIT, context.clientIp)
       if (!rateLimit.allowed) {
         return rateLimitResponse(rateLimit.retryAfterSeconds)
       }
@@ -183,17 +194,24 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       if (!body.password) {
         return jsonResponse({ error: '密码错误' }, 401)
       }
-      const valid = await verifyAdminPassword(body.password, env)
-      if (!valid) {
-        return jsonResponse({ error: '密码错误' }, 401)
+      const releaseWork = tryAcquireWorkSlot('password', PASSWORD_WORK_CONCURRENCY)
+      if (!releaseWork) return busyResponse()
+      try {
+        const valid = await verifyAdminPassword(body.password, env)
+        if (!valid) {
+          return jsonResponse({ error: '密码错误' }, 401)
+        }
+        const token = await signToken(env)
+        resetRateLimit(LOGIN_RATE_LIMIT.key, context.clientIp)
+        const headers = await createLoginHeaders(token, env)
+        return jsonResponse({ success: true }, 200, headers)
+      } finally {
+        releaseWork()
       }
-      const token = await signToken(env)
-      resetRateLimit(request, LOGIN_RATE_LIMIT.key)
-      return jsonResponse({ success: true }, 200, { 'Set-Cookie': createCookieHeader(token) })
     }
 
     if (path === '/api/logout' && request.method === 'POST') {
-      return jsonResponse({ success: true }, 200, { 'Set-Cookie': createClearCookieHeader() })
+      return jsonResponse({ success: true }, 200, createLogoutHeaders())
     }
 
     if (path === '/api/auth' && request.method === 'GET') {
@@ -207,7 +225,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     }
 
     if (path === '/api/setup' && request.method === 'POST') {
-      const rateLimit = consumeRateLimit(request, SETUP_RATE_LIMIT)
+      const rateLimit = consumeRateLimit(SETUP_RATE_LIMIT, context.clientIp)
       if (!rateLimit.allowed) {
         return rateLimitResponse(rateLimit.retryAfterSeconds)
       }
@@ -220,13 +238,20 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       if (!body.password) {
         return jsonResponse({ error: '请输入密码' }, 400)
       }
-      const result = await setupPassword(body.password, env)
-      if (!result.ok) {
-        return jsonResponse({ error: result.error || '初始化失败' }, 400)
+      const releaseWork = tryAcquireWorkSlot('password', PASSWORD_WORK_CONCURRENCY)
+      if (!releaseWork) return busyResponse()
+      try {
+        const result = await setupPassword(body.password, env)
+        if (!result.ok) {
+          return jsonResponse({ error: result.error || '初始化失败' }, 400)
+        }
+        const token = await signToken(env)
+        resetRateLimit(SETUP_RATE_LIMIT.key, context.clientIp)
+        const headers = await createLoginHeaders(token, env)
+        return jsonResponse({ success: true }, 200, headers)
+      } finally {
+        releaseWork()
       }
-      const token = await signToken(env)
-      resetRateLimit(request, SETUP_RATE_LIMIT.key)
-      return jsonResponse({ success: true }, 200, { 'Set-Cookie': createCookieHeader(token) })
     }
 
     if (path === '/api/check-update' && request.method === 'POST') {
@@ -236,7 +261,9 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       if (!isJsonRequest(request)) {
         return jsonResponse({ error: 'Content-Type 必须为 application/json' }, 415)
       }
-      const rateLimit = consumeRateLimit(request, CHECK_UPDATE_RATE_LIMIT)
+      const csrfError = await csrfErrorResponse(request, env)
+      if (csrfError) return csrfError
+      const rateLimit = consumeRateLimit(CHECK_UPDATE_RATE_LIMIT, context.clientIp)
       if (!rateLimit.allowed) {
         return rateLimitResponse(rateLimit.retryAfterSeconds)
       }
@@ -257,7 +284,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       if (!(await verifyAuth(request, env))) {
         return jsonResponse({ error: '未授权' }, 401)
       }
-      const rateLimit = consumeRateLimit(request, UPDATE_STATUS_RATE_LIMIT)
+      const rateLimit = consumeRateLimit(UPDATE_STATUS_RATE_LIMIT, context.clientIp)
       if (!rateLimit.allowed) {
         return rateLimitResponse(rateLimit.retryAfterSeconds)
       }
@@ -277,7 +304,9 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       if (!isJsonRequest(request)) {
         return jsonResponse({ error: 'Content-Type 必须为 application/json' }, 415)
       }
-      const rateLimit = consumeRateLimit(request, UPDATE_RATE_LIMIT)
+      const csrfError = await csrfErrorResponse(request, env)
+      if (csrfError) return csrfError
+      const rateLimit = consumeRateLimit(UPDATE_RATE_LIMIT, context.clientIp)
       if (!rateLimit.allowed) {
         return rateLimitResponse(rateLimit.retryAfterSeconds)
       }
@@ -298,7 +327,9 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       if (!(await verifyAuth(request, env))) {
         return jsonResponse({ error: '未授权' }, 401)
       }
-      const rateLimit = consumeRateLimit(request, CHANGE_PASSWORD_RATE_LIMIT)
+      const csrfError = await csrfErrorResponse(request, env)
+      if (csrfError) return csrfError
+      const rateLimit = consumeRateLimit(CHANGE_PASSWORD_RATE_LIMIT, context.clientIp)
       if (!rateLimit.allowed) {
         return rateLimitResponse(rateLimit.retryAfterSeconds)
       }
@@ -309,18 +340,26 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       if (!body.current || !body.next) {
         return jsonResponse({ error: '缺少当前密码或新密码' }, 400)
       }
-      const result = await changePassword(body.current, body.next, env)
-      if (!result.ok) {
-        return jsonResponse({ error: result.error || '修改失败' }, 400)
+      const releaseWork = tryAcquireWorkSlot('password', PASSWORD_WORK_CONCURRENCY)
+      if (!releaseWork) return busyResponse()
+      try {
+        const result = await changePassword(body.current, body.next, env)
+        if (!result.ok) {
+          return jsonResponse({ error: result.error || '修改失败' }, 400)
+        }
+        return jsonResponse({ success: true }, 200)
+      } finally {
+        releaseWork()
       }
-      return jsonResponse({ success: true }, 200)
     }
 
     if (path === '/api/test-music-api' && request.method === 'POST') {
       if (!(await verifyAuth(request, env))) {
         return jsonResponse({ error: '未授权' }, 401)
       }
-      const rateLimit = consumeRateLimit(request, TEST_MUSIC_API_RATE_LIMIT)
+      const csrfError = await csrfErrorResponse(request, env)
+      if (csrfError) return csrfError
+      const rateLimit = consumeRateLimit(TEST_MUSIC_API_RATE_LIMIT, context.clientIp)
       if (!rateLimit.allowed) {
         return rateLimitResponse(rateLimit.retryAfterSeconds)
       }
@@ -328,7 +367,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       if (!body || typeof body !== 'object') {
         return jsonResponse({ error: '配置无效' }, 400)
       }
-      return testMusicApi(body as ConfigPayload)
+      return testMusicApi(body)
     }
 
     if (path === '/api/config' && request.method === 'GET') {
@@ -342,6 +381,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       if (!(await verifyAuth(request, env))) {
         return jsonResponse({ error: '未授权' }, 401)
       }
+      const csrfError = await csrfErrorResponse(request, env)
+      if (csrfError) return csrfError
       const body = await request.json().catch(() => null)
       return putConfig(body, env)
     }
@@ -350,6 +391,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       if (!(await verifyAuth(request, env))) {
         return jsonResponse({ error: '未授权' }, 401)
       }
+      const csrfError = await csrfErrorResponse(request, env)
+      if (csrfError) return csrfError
       const body = (await request.json().catch(() => null)) as {
         path?: string
         content?: string
@@ -359,10 +402,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       }
       // 限制单次上传体积,防止超大 base64 撑爆 Edge 实例内存。
       // content 为 base64 字符串,按 ceil(bytes / 3) * 4 精确匹配 25MiB 文件边界。
-      const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
-      const MAX_UPLOAD_BASE64_LENGTH = Math.ceil(MAX_UPLOAD_BYTES / 3) * 4
-      if (body.content.length > MAX_UPLOAD_BASE64_LENGTH) {
-        return jsonResponse({ error: '文件过大,最大 25MB' }, 413)
+      if (body.content.length > UPLOAD_LIMITS.MAX_BASE64_LENGTH) {
+        return jsonResponse({ error: `文件过大,最大 ${UPLOAD_LIMITS.MAX_SIZE_LABEL}` }, 413)
       }
       return uploadFile({ path: body.path, content: body.content }, env)
     }
@@ -371,6 +412,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       if (!(await verifyAuth(request, env))) {
         return jsonResponse({ error: '未授权' }, 401)
       }
+      const csrfError = await csrfErrorResponse(request, env)
+      if (csrfError) return csrfError
       const body = (await request.json().catch(() => null)) as { paths?: string[] } | null
       if (!body || !Array.isArray(body.paths)) {
         return jsonResponse({ error: '缺少 paths' }, 400)
@@ -384,8 +427,9 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
 
     return jsonResponse({ error: '未找到' }, 404)
   } catch (error) {
-    // 记录未捕获异常,便于运维排查。Edge 环境调试困难,不能静默吞错。
-    console.error('handleRequest unhandled error:', error)
-    return jsonResponse({ error: '服务器内部错误' }, 500)
+    // 使用统一的错误处理，避免敏感信息泄露
+    logSanitizedError('handleRequest', error)
+    const errorResponse = createErrorResponse(error, 500)
+    return jsonResponse({ error: errorResponse.error }, 500)
   }
 }

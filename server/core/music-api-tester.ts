@@ -1,4 +1,7 @@
-import { isPublicHttpUrl, type ConfigPayload } from './types'
+import type { ConfigPayload } from './types'
+import { validateMusicConfig } from '../../shared/config-schema'
+import { CONFIG_LIMITS } from '../../shared/constants'
+import { jsonResponse } from './http'
 
 interface PlaylistApiCheck {
   server: string
@@ -20,12 +23,7 @@ interface MusicApiTestResult {
 const TEST_TIMEOUT_MS = 8000
 const PLAYLIST_CONCURRENCY = 3
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  })
-}
+class ResponseTooLargeError extends Error {}
 
 async function fetchWithTimeout(url: string): Promise<Response> {
   const controller = new AbortController()
@@ -35,6 +33,47 @@ async function fetchWithTimeout(url: string): Promise<Response> {
   } finally {
     clearTimeout(timer)
   }
+}
+
+async function readJsonWithLimit(response: Response, maxBytes: number): Promise<unknown> {
+  const contentLength = Number(response.headers.get('Content-Length'))
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new ResponseTooLargeError('response body exceeds limit')
+  }
+
+  if (!response.body) {
+    const text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > maxBytes) {
+      throw new ResponseTooLargeError('response body exceeds limit')
+    }
+    return JSON.parse(text)
+  }
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let receivedBytes = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      receivedBytes += value.byteLength
+      if (receivedBytes > maxBytes) {
+        await reader.cancel('response body exceeds limit')
+        throw new ResponseTooLargeError('response body exceeds limit')
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const bytes = new Uint8Array(receivedBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return JSON.parse(new TextDecoder().decode(bytes))
 }
 
 async function runLimited<T, R>(
@@ -91,7 +130,7 @@ async function testPlaylistApi(
       }
     }
 
-    const payload: unknown = await response.json()
+    const payload = await readJsonWithLimit(response, CONFIG_LIMITS.MAX_TEST_RESPONSE_BYTES)
     if (!Array.isArray(payload)) {
       return {
         server: playlist.server,
@@ -116,22 +155,27 @@ async function testPlaylistApi(
       playlistId: playlist.playlistId,
       ok: false,
       trackCount: 0,
-      error: error instanceof DOMException && error.name === 'AbortError' ? '请求超时' : '请求失败',
+      error:
+        error instanceof DOMException && error.name === 'AbortError'
+          ? '请求超时'
+          : error instanceof ResponseTooLargeError
+            ? '响应数据过大'
+            : '请求失败',
     }
   }
 }
 
-export async function testMusicApi(config: ConfigPayload): Promise<Response> {
-  if (!config.apiEndpoint?.trim()) {
-    return jsonResponse({ error: '请先填写 API 端点' }, 400)
+export async function testMusicApi(input: unknown): Promise<Response> {
+  const validation = validateMusicConfig(input, {
+    maxPlaylists: CONFIG_LIMITS.MAX_TEST_PLAYLISTS,
+    maxLocalTracks: CONFIG_LIMITS.MAX_LOCAL_TRACKS,
+  })
+  if (!validation.valid || !validation.config) {
+    return jsonResponse({ error: '配置校验失败', details: validation.errors }, 400)
   }
-  // testMusicApi 接收的是前端传入的临时配置,不一定经 putConfig 校验,
-  // 此处独立校验 apiEndpoint 为公网 http(s) URL,防止 SSRF 探测内网/元数据端点。
-  if (!isPublicHttpUrl(config.apiEndpoint)) {
-    return jsonResponse({ error: 'API 端点必须是公网 http(s) URL,不允许内网或本地地址' }, 400)
-  }
+  const config = validation.config
 
-  const playlists = config.playlists.filter(
+  const playlists: ConfigPayload['playlists'] = config.playlists.filter(
     (playlist) => playlist.enabled !== false && playlist.playlistId.trim(),
   )
   if (!playlists.length) {

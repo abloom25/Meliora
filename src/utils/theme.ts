@@ -5,6 +5,7 @@ export type { ThemeColor } from './theme-core'
 export { createThemeColor } from './theme-core'
 
 const themeCache = new LruCache<string, ThemeColor | null>(64)
+const themeInFlight = new Map<string, Promise<ThemeColor | null>>()
 const SAMPLE_SIZE = 72
 const WORKER_TIMEOUT_MS = 1500
 
@@ -115,12 +116,33 @@ function extractOnMainThread(image: HTMLImageElement): ThemeColor | null {
  * 返回 Promise 是因为新增了异步路径；上层 await 即可。
  */
 export async function extractThemeColor(image: HTMLImageElement): Promise<ThemeColor | null> {
-  if (supportsWorker()) {
-    const theme = await extractViaWorker(image)
-    if (theme) return theme
-    // Worker 路径失败 / 超时 → 主线程兜底
+  const cacheKey = image.currentSrc || image.src
+  if (cacheKey) {
+    const cached = themeCache.get(cacheKey)
+    if (cached !== undefined) return cached
+    const pending = themeInFlight.get(cacheKey)
+    if (pending) return pending
   }
-  return extractOnMainThread(image)
+
+  const pending = (async () => {
+    if (supportsWorker()) {
+      const theme = await extractViaWorker(image)
+      if (theme) return theme
+      // Worker 路径失败 / 超时 → 主线程兜底
+    }
+    return extractOnMainThread(image)
+  })()
+
+  if (!cacheKey) return pending
+
+  themeInFlight.set(cacheKey, pending)
+  try {
+    const theme = await pending
+    themeCache.set(cacheKey, theme)
+    return theme
+  } finally {
+    themeInFlight.delete(cacheKey)
+  }
 }
 
 export function loadThemeColor(url: string): Promise<ThemeColor | null> {

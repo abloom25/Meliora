@@ -3,6 +3,7 @@ import { GitHubWriteError, readFile, writeFile, utf8ToBase64, type GitHubFile } 
 import { encryptString, decryptString, looksEncrypted } from './crypto'
 import { validateMusicConfig } from '../../shared/config-schema'
 import { defaultMusicConfig } from '../../shared/default-config'
+import { logSanitizedError } from './error-handler'
 
 const CONFIG_PATH = 'public/config.json'
 
@@ -28,7 +29,7 @@ export async function getConfig(env: Env): Promise<Response> {
   try {
     file = await readFile(CONFIG_PATH, env)
   } catch (error) {
-    console.error('getConfig readFile failed:', error)
+    logSanitizedError('getConfig readFile', error)
     return new Response(JSON.stringify({ error: '读取配置失败,请检查 GitHub 凭据或稍后重试' }), {
       status: 502,
       headers: CONFIG_HEADERS,
@@ -55,7 +56,7 @@ export async function getConfig(env: Env): Promise<Response> {
       headers: CONFIG_HEADERS,
     })
   } catch (error) {
-    console.error('config.json decryption failed:', error)
+    logSanitizedError('config.json decryption', error)
     return new Response(
       JSON.stringify({ error: '配置文件解密失败,请检查 CONFIG_ENCRYPTION_KEY' }),
       {
@@ -67,7 +68,7 @@ export async function getConfig(env: Env): Promise<Response> {
 }
 
 export async function putConfig(body: unknown, env: Env): Promise<Response> {
-  const result = validateMusicConfig(body)
+  const result = validateMusicConfig(body, { allowPrivateUrls: isDevelopmentMode(env) })
   if (!result.valid) {
     return new Response(JSON.stringify({ error: '配置校验失败', details: result.errors }), {
       status: 400,

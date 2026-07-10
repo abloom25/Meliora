@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-rc7] - 2026-07-10
+
+### Added
+
+- **管理 API 安全链路**:新增 HMAC CSRF 请求头校验、同源写入检查、可信平台客户端 IP 传递、实例级高成本密码工作并发保护及统一安全错误响应
+- **部署与资源回归测试**:新增 CSRF、限流、部署路由、音乐 API 载荷/响应上限、错误脱敏、媒体查询与管理消息定时器测试,全量测试提升至 406 项
+- **播放器组件拆分**:从播放器控制区提取 `ProgressControl` 与 `TransportButtons`,补充共享媒体查询工具和管理认证卡片组件
+
+### Changed
+
+- **配置校验策略统一**:生产配置默认要求公网 HTTPS,仅显式开发模式允许私有地址;歌单、本地歌曲和外部测试响应增加数量与体积上限
+- **管理后台结构收口**:管理 API 请求、认证卡片、限时消息、上传限制与密码规则改为共享实现,登录页可展示真实后端错误并完善表单可访问性
+- **播放器状态与性能**:优化音频切换清理、预加载失败回退、歌词小窗生命周期、主题取色、封面缓存、歌曲索引和曲库交互逻辑
+- **更新工作流**:临时更新分支仅保留在本地验证,全部测试通过后再合并并推送目标分支
+
+### Fixed
+
+- **CSRF 合法令牌被拒绝**:修复使用仅具备 `verify` 权限的 Web Crypto 密钥调用 `sign` 导致所有受保护写请求失败的问题,并移除不安全的 Cookie 令牌回退
+- **播放器 ID 冲突**:拒绝重复歌单和重复本地歌曲 ID,避免队列与当前歌曲索引指向不同项目
+- **错误与反馈一致性**:5xx 响应不再暴露内部异常文本;修复旧 Toast 定时器提前清除新消息以及限流/服务繁忙被误报为密码错误的问题
+- **PWA 与部署路由**:动态 API、稳定上传资源及音视频 Range 请求不再被 Service Worker 错误缓存,Netlify API 重写优先于 SPA 回退
+
 ## [0.2.0-rc6] - 2026-07-05
 
 ### Added
@@ -157,6 +179,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`SettingsPanel.vue` 15 处 props 直接修改**:组件改为使用 Pinia store 后彻底消除 `vue/no-mutating-props` 违规
 - **5 处 Prettier 格式化违规**:`useFocusTrap.ts` import 语句、`PlayerView.vue` 缩进/解构/多行属性、`TrackList.vue` v-model 换行均由 `eslint --fix` 自动修复
 
+[0.2.0-rc7]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc7
 [0.2.0-rc6]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc6
 [0.2.0-rc5]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc5
 [0.2.0-rc4]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc4

@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import { clearCsrfOnLogout, fetchWithCsrf } from '../utils/csrf'
 
 const authenticated = ref(false)
 const checking = ref(true)
@@ -7,6 +8,7 @@ const setupChecking = ref(true)
 const apiUnavailable = ref(false)
 const adminStatus = ref<'idle' | 'disabled' | 'env-not-ready'>('idle')
 const adminStatusDetail = ref('')
+const authError = ref('')
 
 export function markAdminUnauthenticated(): void {
   authenticated.value = false
@@ -75,20 +77,25 @@ export function useAdminAuth() {
   }
 
   async function login(password: string): Promise<boolean> {
+    authError.value = ''
     try {
-      const response = await fetch('/api/login', {
+      const response = await fetchWithCsrf('/api/login', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password }),
       })
       if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string }
+        authError.value =
+          data.error || (response.status === 429 ? '请求过于频繁,请稍后再试' : '登录失败')
         markAdminUnauthenticated()
         return false
       }
       authenticated.value = true
       return true
     } catch {
+      authError.value = '网络错误,请检查连接后重试'
       markAdminUnauthenticated()
       return false
     }
@@ -96,7 +103,7 @@ export function useAdminAuth() {
 
   async function setup(password: string): Promise<{ ok: boolean; error?: string }> {
     try {
-      const response = await fetch('/api/setup', {
+      const response = await fetchWithCsrf('/api/setup', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -116,13 +123,14 @@ export function useAdminAuth() {
 
   async function logout(): Promise<void> {
     try {
-      await fetch('/api/logout', {
+      await fetchWithCsrf('/api/logout', {
         method: 'POST',
         credentials: 'include',
       })
     } catch {
       // 即使请求失败也清除本地状态
     } finally {
+      clearCsrfOnLogout()
       markAdminUnauthenticated()
     }
   }
@@ -135,6 +143,7 @@ export function useAdminAuth() {
     apiUnavailable,
     adminStatus,
     adminStatusDetail,
+    authError,
     checkSetupStatus,
     checkAuth,
     login,

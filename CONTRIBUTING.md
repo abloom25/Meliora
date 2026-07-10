@@ -113,8 +113,8 @@ git push origin feature/你的功能名
 
 ### 必要工具
 
-- Node.js 20+
-- pnpm 8+
+- Node.js 22+
+- pnpm 11.5.3+
 - Git
 
 ### 常用命令

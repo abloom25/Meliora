@@ -78,11 +78,7 @@ export function shouldOfferUpdate(
   options: { includePrerelease?: boolean } = {},
 ): boolean {
   if (!isSemver(latestVersion) || !isSemver(currentVersion)) return false
-  if (
-    !options.includePrerelease &&
-    !isPrereleaseVersion(currentVersion) &&
-    isPrereleaseVersion(latestVersion)
-  ) {
+  if (!options.includePrerelease && isPrereleaseVersion(latestVersion)) {
     return false
   }
   return compareSemver(latestVersion, currentVersion) > 0

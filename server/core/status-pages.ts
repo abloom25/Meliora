@@ -1,11 +1,5 @@
 import type { EnvValidation } from './types'
-
-function jsonResponse(body: unknown, status: number): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  })
-}
+import { jsonResponse } from './http'
 
 export function renderEnvNotReadyPage(envCheck: EnvValidation): Response {
   const detail = envCheck.errors.length

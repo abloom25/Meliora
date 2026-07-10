@@ -2,8 +2,9 @@
   import { ref } from 'vue'
   import { Lock } from '@lucide/vue'
   import { useAdminAuth } from '../composables/useAdminAuth'
+  import AdminAuthCard from '../components/AdminAuthCard.vue'
 
-  const { login } = useAdminAuth()
+  const { login, authError } = useAdminAuth()
   const password = ref('')
   const loading = ref(false)
   const errorMessage = ref('')
@@ -15,77 +16,39 @@
     const success = await login(password.value)
     loading.value = false
     if (!success) {
-      errorMessage.value = '密码错误,请重试'
+      errorMessage.value = authError.value || '登录失败,请重试'
       password.value = ''
     }
   }
 </script>
 
 <template>
-  <form class="login-card" @submit.prevent="submit">
-    <div class="login-icon">
-      <Lock :size="28" />
-    </div>
-    <h2>登录管理后台</h2>
-    <p>请输入管理员密码以继续</p>
-
+  <AdminAuthCard
+    title="登录管理后台"
+    description="请输入管理员密码以继续"
+    :loading="loading"
+    :submit-disabled="loading || !password"
+    submit-label="登录"
+    submitting-label="登录中..."
+    :error="errorMessage"
+    @submit="submit"
+  >
+    <template #icon><Lock :size="28" /></template>
+    <label class="sr-only" for="admin-password">管理员密码</label>
     <input
+      id="admin-password"
       v-model="password"
       type="password"
       class="login-input"
       placeholder="密码"
+      autocomplete="current-password"
       :disabled="loading"
       autofocus
     />
-
-    <button type="submit" class="login-button" :disabled="loading || !password">
-      {{ loading ? '登录中...' : '登录' }}
-    </button>
-
-    <p v-if="errorMessage" class="login-error">{{ errorMessage }}</p>
-  </form>
+  </AdminAuthCard>
 </template>
 
 <style scoped lang="scss">
-  .login-card {
-    width: 100%;
-    max-width: 360px;
-    margin: auto;
-    padding: 36px 32px;
-    background: rgba(255, 255, 255, 0.075);
-    border: 1px solid rgba(255, 255, 255, 0.11);
-    border-radius: 22px;
-    backdrop-filter: blur(22px);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 14px;
-  }
-
-  .login-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 56px;
-    height: 56px;
-    border-radius: 50%;
-    background: color-mix(in srgb, var(--accent), transparent 84%);
-    color: var(--accent);
-  }
-
-  h2 {
-    margin: 4px 0 0;
-    color: #fff;
-    font-size: 1.05rem;
-    font-weight: 680;
-  }
-
-  p {
-    margin: 0 0 6px;
-    color: var(--text-subtle);
-    font-size: 0.78rem;
-  }
-
   .login-input {
     width: 100%;
     padding: 12px 14px;
@@ -104,33 +67,5 @@
     &:disabled {
       opacity: 0.5;
     }
-  }
-
-  .login-button {
-    width: 100%;
-    padding: 12px 14px;
-    border: none;
-    border-radius: 14px;
-    background: var(--accent);
-    color: #0e0d12;
-    font-size: 0.88rem;
-    font-weight: 680;
-    cursor: pointer;
-    transition: filter 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-
-    &:hover:not(:disabled) {
-      filter: brightness(1.1);
-    }
-
-    &:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-  }
-
-  .login-error {
-    margin: 0;
-    color: #ff8b8b;
-    font-size: 0.76rem;
   }
 </style>

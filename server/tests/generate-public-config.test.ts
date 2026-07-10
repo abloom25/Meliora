@@ -199,9 +199,9 @@ describe('generate-public-config', () => {
       const source = await readFile(result.adminEnvTargetPath, 'utf8')
 
       expect(source).toContain("status: 'env-not-ready'")
+      expect(source).toContain('GH_TOKEN')
       expect(source).toContain('GH_REPO 格式无效')
       expect(source).toContain('CONFIG_ENCRYPTION_KEY')
-      expect(source).not.toContain('GH_TOKEN')
     })
   })
 
@@ -222,6 +222,7 @@ describe('generate-public-config', () => {
       const source = await readFile(result.adminEnvTargetPath, 'utf8')
 
       expect(source).toContain("status: 'env-not-ready'")
+      expect(source).toContain('GH_TOKEN')
       expect(source).toContain('CONFIG_ENCRYPTION_KEY')
     })
   })
@@ -272,8 +273,12 @@ describe('generate-public-config', () => {
   it('lets process.env override file-based build env values', async () => {
     await withTempCwd(async (dir) => {
       process.env.GH_REPO = 'owner/repo'
+      process.env.GH_TOKEN = 'ghp_testtokenvalue1234567890abcdef'
       process.env.CONFIG_ENCRYPTION_KEY = STRONG_KEY
-      await writeFile(join(dir, '.env'), 'GH_REPO=invalid\nCONFIG_ENCRYPTION_KEY=\n')
+      await writeFile(
+        join(dir, '.env'),
+        'GH_REPO=invalid\nGH_TOKEN=placeholder\nCONFIG_ENCRYPTION_KEY=\n',
+      )
       const result = await generatePublicConfig({
         configPath: join(dir, 'missing-config.json'),
         targetPath: join(dir, 'public-config.ts'),

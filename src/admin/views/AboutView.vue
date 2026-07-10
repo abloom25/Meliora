@@ -237,10 +237,6 @@
         </div>
 
         <Transition name="fade">
-          <div v-if="updateMessage" class="update-message">{{ updateMessage }}</div>
-        </Transition>
-
-        <Transition name="fade">
           <div v-if="updateRunState !== 'idle'" class="update-status" :class="updateRunState">
             <div class="status-main">
               <Loader2
@@ -440,19 +436,9 @@
     }
   }
 
-  .update-message {
-    margin-top: 18px;
-    padding: 10px 14px;
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--accent), transparent 88%);
-    border: 1px solid color-mix(in srgb, var(--accent), transparent 75%);
-    color: var(--accent);
-    font-size: 0.8rem;
-  }
-
   .update-status {
     width: min(520px, 100%);
-    margin-top: 14px;
+    margin-top: 18px;
     padding: 12px 14px;
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 14px;

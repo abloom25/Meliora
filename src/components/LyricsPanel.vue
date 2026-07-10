@@ -5,6 +5,7 @@
   import { hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
   import { findActiveLyricIndex } from '../utils/lyrics'
   import { supportsWebAnimations } from '../utils/browser'
+  import { listenMediaQuery } from '../utils/media-query'
   import type {
     LyricAvailability,
     LyricLine,
@@ -57,17 +58,20 @@
   let realignAnimating = false
   let realignAnimatingTargetIndex: number | null = null
   let pendingAnimatedRealign: ScheduleRealignOptions | null = null
+  let stopReducedMotionListener: (() => void) | null = null
   const reducedMotionQuery =
     typeof window !== 'undefined' && typeof window.matchMedia === 'function'
       ? window.matchMedia('(prefers-reduced-motion: reduce)')
       : null
   let prefersReducedMotion = reducedMotionQuery?.matches ?? false
-  function handleReducedMotionChange(event: MediaQueryListEvent) {
+  function handleReducedMotionChange(event: MediaQueryListEvent | MediaQueryList) {
     prefersReducedMotion = event.matches
   }
   onMounted(() => {
     isPanelMounted = true
-    reducedMotionQuery?.addEventListener('change', handleReducedMotionChange)
+    if (reducedMotionQuery) {
+      stopReducedMotionListener = listenMediaQuery(reducedMotionQuery, handleReducedMotionChange)
+    }
     window.addEventListener('resize', handleViewportResize, { passive: true })
     window.visualViewport?.addEventListener('resize', handleViewportResize, { passive: true })
     if (typeof ResizeObserver !== 'undefined') {
@@ -440,7 +444,6 @@
       }
     })
   })
-
   function lineDistanceClass(index: number): string {
     const distance = activeIndex.value < 0 ? 0 : Math.min(Math.abs(index - activeIndex.value), 5)
     return `distance-${distance}`
@@ -501,7 +504,8 @@
     window.removeEventListener('resize', handleViewportResize)
     window.visualViewport?.removeEventListener('resize', handleViewportResize)
     cancelLineAnimations()
-    reducedMotionQuery?.removeEventListener('change', handleReducedMotionChange)
+    stopReducedMotionListener?.()
+    stopReducedMotionListener = null
   })
 </script>
 

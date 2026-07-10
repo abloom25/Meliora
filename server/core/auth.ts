@@ -1,8 +1,20 @@
 import { isDevelopmentMode, type Env } from './types'
 import { getTokenVersion } from './admin-auth-store'
+import { generateCsrfToken, createCsrfHeaders } from './csrf'
+import { AUTH_CONSTANTS } from '../../shared/constants'
 
-const TOKEN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+const ADMIN_TOKEN_MAX_AGE_MS = AUTH_CONSTANTS.ADMIN_TOKEN_MAX_AGE
+const VIEWER_TOKEN_MAX_AGE_MS = AUTH_CONSTANTS.VIEWER_TOKEN_MAX_AGE
 const COOKIE_NAME = 'meliora_admin'
+
+/**
+ * 根据用户角色获取 token 超时时间
+ * @param role 用户角色
+ * @returns 超时时间（毫秒）
+ */
+function getTokenMaxAgeByRole(role: 'admin' | 'viewer' = 'admin'): number {
+  return role === 'admin' ? ADMIN_TOKEN_MAX_AGE_MS : VIEWER_TOKEN_MAX_AGE_MS
+}
 
 export async function getSigningSecret(env: Env): Promise<string> {
   if (isDevelopmentMode(env)) {
@@ -65,11 +77,16 @@ async function hmacKey(secret: string): Promise<CryptoKey> {
 }
 
 // token payload 携带 ver( tokenVersion),changePassword 后 ver 不匹配的旧 token 被拒绝,
-// 实现改密码即吊销所有已签发 token。
-export async function signToken(env: Env, maxAgeMs: number = TOKEN_MAX_AGE_MS): Promise<string> {
+// 实现改密码即吊销所有已签发 token。包含角色信息用于会话超时控制。
+export async function signToken(
+  env: Env,
+  maxAgeMs?: number,
+  role: 'admin' | 'viewer' = 'admin',
+): Promise<string> {
   const secret = await getSigningSecret(env)
   const ver = await getTokenVersion(env)
-  const payload = { exp: Date.now() + maxAgeMs, ver }
+  const tokenMaxAge = maxAgeMs || getTokenMaxAgeByRole(role)
+  const payload = { exp: Date.now() + tokenMaxAge, ver, role }
   const payloadJson = JSON.stringify(payload)
   const payloadB64 = bytesToBase64url(new TextEncoder().encode(payloadJson))
 
@@ -144,4 +161,31 @@ export function timingSafeEqual(a: string, b: string): boolean {
     result |= aBytes[i] ^ bBytes[i]
   }
   return result === 0
+}
+
+/**
+ * 创建包含 CSRF token 的登录成功响应头
+ * @param token 认证 token
+ * @param env 环境变量，用于获取签名密钥
+ * @returns 响应头对象
+ */
+export async function createLoginHeaders(token: string, env: Env): Promise<Record<string, string>> {
+  const secret = await getSigningSecret(env)
+  const csrfToken = await generateCsrfToken(secret)
+  const cookieHeader = createCookieHeader(token)
+  const csrfHeaders = createCsrfHeaders(csrfToken, {
+    'Set-Cookie': cookieHeader,
+  })
+
+  return csrfHeaders
+}
+
+/**
+ * 创建登出响应头，清除认证和 CSRF cookie
+ * @returns 响应头对象
+ */
+export function createLogoutHeaders(): Record<string, string> {
+  return {
+    'Set-Cookie': createClearCookieHeader(),
+  }
 }

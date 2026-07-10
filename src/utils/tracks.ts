@@ -4,6 +4,25 @@ import { splitDisplayTitle } from './title'
 const normalize = (value: string) => value.trim().toLocaleLowerCase().replace(/\s+/g, ' ')
 
 type TrackIdentityInput = Pick<Track, 'title' | 'artist' | 'titleVersions'>
+type TrackSearchInput = Pick<Track, 'title' | 'artist' | 'titleVersions'>
+
+const searchTextCache = new WeakMap<TrackSearchInput, { signature: string; text: string }>()
+
+function searchSignature(track: TrackSearchInput): string {
+  return [track.title, track.artist, ...(track.titleVersions ?? [])].join('\u0000')
+}
+
+export function createTrackSearchText(track: TrackSearchInput): string {
+  const signature = searchSignature(track)
+  const cached = searchTextCache.get(track)
+  if (cached?.signature === signature) return cached.text
+  const text = [track.title, track.artist, ...(track.titleVersions ?? [])]
+    .map(normalize)
+    .filter(Boolean)
+    .join(' ')
+  searchTextCache.set(track, { signature, text })
+  return text
+}
 
 function normalizedTitleParts(track: TrackIdentityInput): string {
   return [track.title, ...(track.titleVersions ?? [])].map(normalize).filter(Boolean).join('::')
@@ -64,12 +83,7 @@ export function deduplicateTracks(
 export function filterTracks(tracks: Track[], query: string): Track[] {
   const keyword = normalize(query)
   if (!keyword) return tracks
-  return tracks.filter(
-    (track) =>
-      normalize(track.title).includes(keyword) ||
-      normalize(track.artist).includes(keyword) ||
-      (track.titleVersions ?? []).some((version) => normalize(version).includes(keyword)),
-  )
+  return tracks.filter((track) => createTrackSearchText(track).includes(keyword))
 }
 
 export function mapMetingTrack(track: MetingTrack, sourceKey: string, index: number): Track | null {

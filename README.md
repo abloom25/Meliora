@@ -155,7 +155,7 @@ pnpm dev:full     # 前端 + 后端模拟(5175 + 8788)
 | `GH_REPO`               | ✅   | 仓库标识,`owner/repo` 格式                                                                                                                                                                      |
 | `CONFIG_ENCRYPTION_KEY` | ✅   | 配置加密密钥,32 位以上随机字符串。配置加密、Cookie 签名与构建期公开配置生成都依赖它,GH_TOKEN 可独立轮换而不影响已加密配置                                                                       |
 | `GH_BRANCH`             | ❌   | 目标分支,默认 `main`                                                                                                                                                                            |
-| `GITHUB_PROXY`          | ❌   | GitHub 代理,用于检查更新和 workflow 内拉取上游代码;触发 workflow 与查询 Actions 状态仍需部署环境可访问 `api.github.com`                                                                         |
+| `GITHUB_PROXY`          | ❌   | GitHub 代理,必须是公网 HTTPS URL。用于检查更新和 workflow 内拉取上游代码;触发 workflow 与查询 Actions 状态仍需部署环境可访问 `api.github.com`                                                   |
 | `ADMIN_DISABLED`        | ❌   | 设为 `true`/`1`/`yes`/`on`(大小写不敏感)时禁用管理后台,`/admin` 显示“已禁用”,除状态探针外所有 `/api/*` 返回 403                                                                                 |
 | `DEVELOPMENT`           | ❌   | 设为 `true`/`1`/`yes`/`on`(大小写不敏感)时进入开发模式:配置与密码不持久化、加密走明文降级                                                                                                       |
 

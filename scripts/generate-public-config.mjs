@@ -17,11 +17,19 @@ const DEFAULT_PUBLIC_CONFIG = {
 
 const schemaSourcePath = join(process.cwd(), 'shared/config-schema.ts')
 const envSchemaSourcePath = join(process.cwd(), 'shared/env-schema.ts')
+const urlValidationSourcePath = join(process.cwd(), 'shared/utils/url-validation.ts')
+const constantsSourcePath = join(process.cwd(), 'shared/constants.ts')
 const schemaBuildPath = join(
   process.cwd(),
   'node_modules/.tmp',
   `meliora-public-config-schema-${process.pid}.mjs`,
 )
+const urlValidationBuildPath = join(
+  process.cwd(),
+  'node_modules/.tmp/shared/utils',
+  'url-validation.mjs',
+)
+const constantsBuildPath = join(process.cwd(), 'node_modules/.tmp', 'constants.mjs')
 const envSchemaBuildPath = join(
   process.cwd(),
   'node_modules/.tmp',
@@ -129,14 +137,24 @@ async function loadValidateMusicConfig() {
   if (!validateMusicConfigPromise) {
     validateMusicConfigPromise = (async () => {
       const ts = await import('typescript')
+      await transpileSharedModule(urlValidationSourcePath, urlValidationBuildPath)
+      await transpileSharedModule(constantsSourcePath, constantsBuildPath)
       const source = await readFile(schemaSourcePath, 'utf8')
-      const transpiled = ts.transpileModule(source, {
-        compilerOptions: {
-          module: ts.ModuleKind.ES2022,
-          target: ts.ScriptTarget.ES2022,
-          verbatimModuleSyntax: false,
-        },
-      }).outputText
+      const transpiled = ts
+        .transpileModule(source, {
+          compilerOptions: {
+            module: ts.ModuleKind.ES2022,
+            target: ts.ScriptTarget.ES2022,
+            verbatimModuleSyntax: false,
+          },
+        })
+        .outputText.replace(
+          "from './utils/url-validation'",
+          "from './shared/utils/url-validation.mjs'",
+        )
+        .replace('from "./utils/url-validation"', 'from "./shared/utils/url-validation.mjs"')
+        .replace("from './constants'", "from './constants.mjs'")
+        .replace('from "./constants"', 'from "./constants.mjs"')
       await mkdir(dirname(schemaBuildPath), { recursive: true })
       await writeFile(schemaBuildPath, transpiled)
       const moduleUrl = `${pathToFileURL(schemaBuildPath).href}?t=${Date.now()}`
@@ -172,10 +190,10 @@ async function loadEnvSchema() {
   return envSchemaPromise
 }
 
-async function toValidatedPublicConfig(config, sourceLabel) {
+async function toValidatedPublicConfig(config, sourceLabel, allowPrivateUrls) {
   const validateMusicConfig = await loadValidateMusicConfig()
   const publicInput = stripPrivateConfig(config)
-  const result = validateMusicConfig(publicInput)
+  const result = validateMusicConfig(publicInput, { allowPrivateUrls })
   if (!result.valid || !result.config) {
     throw new Error(
       `${sourceLabel} validation failed: ${result.errors.length ? result.errors.join('; ') : 'unknown error'}`,
@@ -343,7 +361,11 @@ export async function generatePublicConfig(options = {}) {
   const encryptionKey = options.encryptionKey ?? buildEnv.CONFIG_ENCRYPTION_KEY ?? ''
 
   const config = await loadStoredConfig(configPath, encryptionKey)
-  const publicConfig = await toValidatedPublicConfig(config, configPath)
+  const publicConfig = await toValidatedPublicConfig(
+    config,
+    configPath,
+    truthy(buildEnv.DEVELOPMENT),
+  )
   const moduleSource = await renderPublicConfigModule(publicConfig)
 
   await mkdir(dirname(targetPath), { recursive: true })

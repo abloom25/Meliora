@@ -96,11 +96,16 @@ export const usePlayerStore = defineStore('player', () => {
   const settings = ref<PlayerSettings>(loadSettings())
   const errorMessage = ref('')
 
-  const currentTrack = computed(
-    () => tracks.value.find((track) => track.id === currentTrackId.value) ?? null,
+  const trackById = computed(() => new Map(tracks.value.map((track) => [track.id, track])))
+  const queueIndexById = computed(
+    () => new Map(queue.value.map((track, index) => [track.id, index])),
+  )
+
+  const currentTrack = computed(() =>
+    currentTrackId.value ? (trackById.value.get(currentTrackId.value) ?? null) : null,
   )
   const currentIndex = computed(() =>
-    queue.value.findIndex((track) => track.id === currentTrackId.value),
+    currentTrackId.value ? (queueIndexById.value.get(currentTrackId.value) ?? -1) : -1,
   )
 
   function bumpQueueVersion() {
@@ -112,9 +117,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function setTracks(nextTracks: Track[]) {
-    const activeTrack = currentTrackId.value
-      ? tracks.value.find((track) => track.id === currentTrackId.value)
-      : undefined
+    const activeTrack = currentTrack.value ?? undefined
     const mergedTracks = activeTrack
       ? nextTracks.map((track) => {
           if (track.id !== activeTrack.id) return track
@@ -128,10 +131,10 @@ export const usePlayerStore = defineStore('player', () => {
           return activeTrack
         })
       : nextTracks
-    const trackById = new Map(mergedTracks.map((track) => [track.id, track]))
+    const mergedTrackById = new Map(mergedTracks.map((track) => [track.id, track]))
     const queuedIds = new Set<string>()
     const syncedQueue = queue.value
-      .map((track) => trackById.get(track.id))
+      .map((track) => mergedTrackById.get(track.id))
       .filter((track): track is Track => Boolean(track))
     for (const track of syncedQueue) queuedIds.add(track.id)
     for (const track of mergedTracks) {
@@ -143,7 +146,7 @@ export const usePlayerStore = defineStore('player', () => {
       queue.value = syncedQueue
       bumpQueueVersion()
     }
-    if (currentTrackId.value && !nextTracks.some((track) => track.id === currentTrackId.value)) {
+    if (currentTrackId.value && !mergedTrackById.has(currentTrackId.value)) {
       currentTrackId.value = null
     }
   }
@@ -151,6 +154,10 @@ export const usePlayerStore = defineStore('player', () => {
   function selectTrack(track: Track, sourceQueue: Track[] = tracks.value) {
     queue.value = [...sourceQueue]
     bumpQueueVersion()
+    setCurrentTrack(track)
+  }
+
+  function setCurrentTrack(track: Track) {
     currentTrackId.value = track.id
     currentTime.value = 0
     duration.value = 0
@@ -189,13 +196,13 @@ export const usePlayerStore = defineStore('player', () => {
       return currentTrack.value
     let track: Track | null = null
     if (preferredTrackId) {
-      const preferredIndex = queue.value.findIndex((item) => item.id === preferredTrackId)
+      const preferredIndex = queueIndexById.value.get(preferredTrackId) ?? -1
       if (preferredIndex >= 0 && preferredIndex !== currentIndex.value) {
         track = queue.value[preferredIndex] ?? null
       }
     }
     if (!track) track = peekNext(manual)
-    if (track) selectTrack(track, queue.value)
+    if (track) setCurrentTrack(track)
     return track
   }
 
@@ -203,13 +210,13 @@ export const usePlayerStore = defineStore('player', () => {
     if (!queue.value.length) return null
     let track: Track | null
     if (preferredTrackId) {
-      let preferredIndex = queue.value.findIndex((item) => item.id === preferredTrackId)
+      let preferredIndex = queueIndexById.value.get(preferredTrackId) ?? -1
       if (preferredIndex < 0) preferredIndex = queue.value.length - 1
       track = queue.value[preferredIndex] ?? null
     } else {
       track = peekPrevious()
     }
-    if (track) selectTrack(track, queue.value)
+    if (track) setCurrentTrack(track)
     return track
   }
 

@@ -1,4 +1,5 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { listenMediaQuery } from '../utils/media-query'
 
 export type PlayerViewportMode = 'desktop' | 'mobile-sheet'
 
@@ -9,6 +10,7 @@ export function useDeviceDetection() {
   const lyricsWindowSupported = ref(true)
 
   let compactViewportQuery: MediaQueryList | undefined
+  let stopCompactViewportListener: (() => void) | null = null
 
   function supportsDesktopLyricsWindow() {
     const userAgent = navigator.userAgent.toLowerCase()
@@ -52,12 +54,13 @@ export function useDeviceDetection() {
     lyricsWindowSupported.value = supportsDesktopLyricsWindow()
     updateCompactViewport(compactViewportQuery)
     updateDeviceKind()
-    compactViewportQuery.addEventListener('change', updateCompactViewport)
+    stopCompactViewportListener = listenMediaQuery(compactViewportQuery, updateCompactViewport)
     window.addEventListener('resize', updateDeviceKind)
   })
 
   onBeforeUnmount(() => {
-    compactViewportQuery?.removeEventListener('change', updateCompactViewport)
+    stopCompactViewportListener?.()
+    stopCompactViewportListener = null
     window.removeEventListener('resize', updateDeviceKind)
   })
 

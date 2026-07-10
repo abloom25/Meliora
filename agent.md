@@ -94,9 +94,9 @@
 - 框架:Vue 3 `<script setup lang="ts">` + Composition API,**禁止** Options API。
 - 状态:Pinia,使用 `defineStore` 的 setup 写法(返回 ref/computed/函数)。
 - 语言:TypeScript 严格模式,**不允许** `any`,需要时用 `unknown` + 类型守卫。
-- 构建:Vite,`base: './'` 保持相对路径输出。
+- 构建:Vite,`base: '/'` 保持根路径输出。
 - 包管理:**pnpm**(项目锁文件为 `pnpm-lock.yaml`)。
-- 运行环境:`engines.node >= 20`、`engines.pnpm >= 8`(`package.json` 已声明);`packageManager` 锁定为 `pnpm@11.5.3`,所有部署平台 / CI 同步使用 **Node 22 + pnpm 11**。
+- 运行环境:`engines.node >= 22`、`engines.pnpm >= 11.5.3`(`package.json` 已声明);`packageManager` 锁定为 `pnpm@11.5.3`,所有部署平台 / CI 同步使用 **Node 22 + pnpm 11.5.3+**。
 - 样式:SCSS + 大量 CSS 变量;**禁止**引入 Tailwind、UnoCSS、CSS-in-JS。
 - 图标:统一使用 `@lucide/vue`,不混用其他图标库。
 - 依赖原则:**能用浏览器原生 API 就不引入依赖**;新增依赖必须先与用户确认。
@@ -312,7 +312,7 @@ PWA       public/sw.js, public/manifest.webmanifest
   - 带 `Range` 头的请求:**直接 fallthrough**,不得缓存(否则破坏 206 分段响应、seek 失效)。
   - `destination === 'audio' | 'video'`:**直接 fallthrough**。
   - 导航请求(HTML):network-first,失败回落到缓存的 SPA 入口。
-  - 其他同源 GET:cache-first + 后台更新。
+  - 其他同源 GET:默认 cache-first + 后台更新;后台上传的可变稳定路径资源(如 `/music/`、`/icon.*`)必须直接放行,避免替换文件后仍命中旧缓存。
   - 跨域请求:直接放行。
 - 缓存名称通过 `__SW_CACHE_NAME__` 占位符,由 `scripts/inject-sw-cache-name.mjs` 在 `postbuild` 阶段注入 `xxx-v{version}`,确保版本更新自动驱逐旧缓存。
 - 新增需要离线可用的资源时,加入 `install` 阶段的 precache 列表;无关大资源**禁止**放入 precache。
@@ -372,7 +372,7 @@ PWA       public/sw.js, public/manifest.webmanifest
   - 支持 3 个部署平台:Vercel(`vercel.json`)、Cloudflare Pages(`wrangler.toml`)、Netlify(`netlify.toml`)。
   - 所有平台配置必须统一:构建命令 `pnpm build`、输出目录 `dist`;运行时版本遵循 `package.json` 的 `engines` 与各平台配置。
   - **公开站点配置方向**:播放器前端所需的公开配置(站点名称、站点图标、公开歌单、本地曲库、统计与公开自定义样式/脚本等)必须在构建期生成并硬编译进前端,因为后台保存配置本身会写仓库并触发重新部署;不要为了这些公开配置保留首屏必需的 Worker 配置接口。管理后台保存/上传/鉴权/更新等仍通过后端 API 执行,敏感密钥、`apiToken`、管理员数据、GitHub 代理配置不得进入前端 bundle。远程歌单只硬编译 `apiEndpoint` 与歌单 ID 等配置,歌曲列表仍由播放器运行时请求 Meting API,不得预抓取或硬编码 Meting 返回结果。
-  - **环境变量(3 必填)**:`GH_TOKEN`(GitHub PAT,Contents Read and write)、`GH_REPO`(`owner/repo` 格式)、`CONFIG_ENCRYPTION_KEY`(配置加密、Cookie 签名、构建期公开配置解密的主密钥,至少 32 位,生产模式校验强度——拒绝全相同字符 / 纯顺序字符等弱模式)。环境就绪提示只校验 `GH_REPO` 格式与 `CONFIG_ENCRYPTION_KEY` 强度,不因 `GH_TOKEN` 缺失或占位单独拦截。`GH_BRANCH` 可选(默认 `main`),`GITHUB_PROXY` 可选,`ADMIN_DISABLED` 可选(设为 `true`/`1`/`yes`/`on`,大小写不敏感;禁用管理后台时除状态探针(`GET /api/setup-status`、`GET /api/status-page`,返回 HTML 状态页)外,所有 `/api/*` 返回 403,`/admin` 显示"已禁用")。
+  - **环境变量(3 必填)**:`GH_TOKEN`(GitHub PAT,Contents Read and write)、`GH_REPO`(`owner/repo` 格式)、`CONFIG_ENCRYPTION_KEY`(配置加密、Cookie 签名、构建期公开配置解密的主密钥,至少 32 位,生产模式校验强度——拒绝全相同字符 / 纯顺序字符等弱模式)。环境就绪提示会校验 `GH_TOKEN` 是否可用、`GH_REPO` 格式与 `CONFIG_ENCRYPTION_KEY` 强度;`GH_TOKEN` 缺失或占位会进入 env-not-ready。`GH_BRANCH` 可选(默认 `main`),`GITHUB_PROXY` 可选且必须是公网 HTTPS URL,`ADMIN_DISABLED` 可选(设为 `true`/`1`/`yes`/`on`,大小写不敏感;禁用管理后台时除状态探针(`GET /api/setup-status`、`GET /api/status-page`,返回 HTML 状态页)外,所有 `/api/*` 返回 403,`/admin` 显示"已禁用")。
     - **不再使用** `ADMIN_PASSWORD` 和 `ADMIN_SECRET`——密码通过 `/setup` 页面首次设置(PBKDF2-SHA256 100k 迭代哈希存入 `public/admin.json`);Cookie 签名密钥与配置加密密钥**均从 `CONFIG_ENCRYPTION_KEY` 派生**(`HMAC-SHA256` / `PBKDF2`),与 `GH_TOKEN` 完全解耦,`GH_TOKEN` 可独立轮换而不影响已加密配置与已签发 Cookie。
     - 开发模式:`DEVELOPMENT=true` 时进入内存模式(配置 / 密码不持久化,加密与签名走明文降级)。
   - **安全头一致性**:所有平台的 headers 配置必须保持一致(CSP、X-Content-Type-Options、X-Frame-Options、Referrer-Policy、Permissions-Policy)。

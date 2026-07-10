@@ -50,6 +50,48 @@ describe('server update handler', () => {
     expect(data.latestVersion).toBe('0.2.0')
   })
 
+  it('does not offer newer prerelease tags when prerelease updates are disabled for a prerelease build', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(releaseResponse('v0.2.0'))
+      .mockResolvedValueOnce(tagsResponse(['v0.3.0-rc.1', 'v0.2.0']))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await checkUpdate('0.2.0-rc.5', ENV)
+    const data = (await response.json()) as {
+      hasUpdate: boolean
+      latestVersion: string
+      targetTag: string
+    }
+
+    expect(response.status).toBe(200)
+    expect(data.hasUpdate).toBe(true)
+    expect(data.latestVersion).toBe('0.2.0')
+    expect(data.targetTag).toBe('v0.2.0')
+  })
+
+  it('reports no eligible update when only prerelease tags exist and prerelease updates are disabled', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(tagsResponse(['v0.3.0-rc.2', 'v0.3.0-rc.1']))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await checkUpdate('0.2.0-rc.5', ENV)
+    const data = (await response.json()) as {
+      hasUpdate: boolean
+      latestVersion: string
+      targetTag: string
+      releaseNotes: string
+    }
+
+    expect(response.status).toBe(200)
+    expect(data.hasUpdate).toBe(false)
+    expect(data.latestVersion).toBe('0.2.0-rc.5')
+    expect(data.targetTag).toBe('')
+    expect(data.releaseNotes).toContain('未启用预发布版本更新')
+  })
+
   it('does not attach the GitHub token to proxied update checks', async () => {
     const fetchMock = vi
       .fn()
@@ -211,12 +253,41 @@ describe('server update handler', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const response = await getUpdateStatus(ENV, '2026-06-30T10:00:01.000Z')
+    const response = await getUpdateStatus(
+      { ...ENV, GH_BRANCH: 'status-error-test' },
+      '2026-06-30T10:00:01.000Z',
+    )
     const data = (await response.json()) as { run: null; message: string }
 
     expect(response.status).toBe(200)
     expect(data.run).toBeNull()
     expect(data.message).toContain('等待')
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.github.com/repos/owner/repo/actions/workflows/update-from-upstream.yml/runs?event=workflow_dispatch&per_page=20',
+      expect.any(Object),
+    )
+  })
+
+  it('returns GitHub workflow run response details when status lookup fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ message: 'Resource not accessible by personal access token' }),
+          {
+            status: 403,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        ),
+      ),
+    )
+
+    const response = await getUpdateStatus(ENV, '2026-06-30T10:00:01.000Z')
+    const data = (await response.json()) as { error?: string; detail?: string }
+
+    expect(response.status).toBe(502)
+    expect(data.error).toContain('GH_TOKEN')
+    expect(data.detail).toContain('Resource not accessible')
   })
 
   it('normalizes successful workflow run status', async () => {

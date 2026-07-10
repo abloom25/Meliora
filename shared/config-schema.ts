@@ -6,6 +6,8 @@ import type {
   MusicServer,
   UmamiConfig,
 } from '../src/types/music'
+import { isPublicHttpsUrl, isValidUrl } from './utils/url-validation'
+import { CONFIG_LIMITS } from './constants'
 
 export interface MusicConfigValidationResult {
   valid: boolean
@@ -13,62 +15,25 @@ export interface MusicConfigValidationResult {
   errors: string[]
 }
 
+export interface MusicConfigValidationOptions {
+  /** 仅供显式开发模式使用；默认执行公网 HTTPS 限制。 */
+  allowPrivateUrls?: boolean
+  maxPlaylists?: number
+  maxLocalTracks?: number
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
-function isBlockedIpv6Host(host: string): boolean {
-  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase()
-  if (normalized === '::' || normalized === '::1') return true
-  if (normalized.startsWith('fe80:')) return true
-  if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true
-  // IPv4-mapped IPv6 can hide private IPv4 targets after URL normalization
-  // (for example [::ffff:127.0.0.1] -> [::ffff:7f00:1]).
-  if (normalized.startsWith('::ffff:')) return true
-  return false
-}
-
-// 判断 URL 是否为公网 http(s) 地址,用于防止管理员将 apiEndpoint 指向内网/元数据端点
-// 造成 SSRF(如 169.254.169.254 云元数据、localhost、私有网段)。
-// Edge Runtime 与浏览器均无法做 DNS 反查,此处仅做 hostname 字面量校验,可挡住直接 IP 型 SSRF。
-// 此处为 shared 独立实现,不依赖 server/core/types,避免 server 代码混入前端 bundle。
-export function isPublicHttpUrl(raw: string): boolean {
-  let url: URL
-  try {
-    url = new URL(raw.trim())
-  } catch {
-    return false
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
-
-  const host = url.hostname.toLowerCase()
-  if (host === 'localhost' || host.endsWith('.localhost')) return false
-  if (host.endsWith('.local')) return false
-
-  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(host)) {
-    const parts = host.split('.').map(Number)
-    if (parts.some((p) => p > 255)) return false
-    const [a, b] = parts
-    if (a === 0) return false
-    if (a === 10) return false
-    if (a === 127) return false
-    if (a === 169 && b === 254) return false
-    if (a === 172 && b >= 16 && b <= 31) return false
-    if (a === 192 && b === 168) return false
-    if (a >= 224) return false
-    return true
-  }
-
-  if (host.startsWith('[')) {
-    if (isBlockedIpv6Host(host)) return false
-    return true
-  }
-
-  return true
-}
-
-export function validateMusicConfig(input: unknown): MusicConfigValidationResult {
+export function validateMusicConfig(
+  input: unknown,
+  options: MusicConfigValidationOptions = {},
+): MusicConfigValidationResult {
   const errors: string[] = []
+  const requirePublicHttps = options.allowPrivateUrls !== true
+  const maxPlaylists = options.maxPlaylists ?? CONFIG_LIMITS.MAX_PLAYLISTS
+  const maxLocalTracks = options.maxLocalTracks ?? CONFIG_LIMITS.MAX_LOCAL_TRACKS
 
   if (!isObject(input)) {
     return { valid: false, errors: ['配置必须是一个对象'] }
@@ -91,8 +56,12 @@ export function validateMusicConfig(input: unknown): MusicConfigValidationResult
     errors.push('apiEndpoint 必须是字符串')
   } else if (hasEnabledPlaylist && !config.apiEndpoint.trim()) {
     errors.push('启用远程歌单时 apiEndpoint 必须是非空字符串')
-  } else if (config.apiEndpoint.trim() && !isPublicHttpUrl(config.apiEndpoint)) {
-    errors.push('apiEndpoint 必须是公网 http(s) URL,不允许内网或本地地址')
+  } else if (config.apiEndpoint.trim()) {
+    if (requirePublicHttps && !isPublicHttpsUrl(config.apiEndpoint)) {
+      errors.push('生产环境 apiEndpoint 必须是公网 https URL')
+    } else if (!isValidUrl(config.apiEndpoint)) {
+      errors.push('apiEndpoint 必须是有效的 http(s) URL')
+    }
   }
 
   if (config.apiToken !== undefined && typeof config.apiToken !== 'string') {
@@ -101,16 +70,16 @@ export function validateMusicConfig(input: unknown): MusicConfigValidationResult
 
   if (config.githubProxy !== undefined && typeof config.githubProxy !== 'string') {
     errors.push('githubProxy 必须是字符串')
-  } else if (
-    typeof config.githubProxy === 'string' &&
-    config.githubProxy.trim() &&
-    !isPublicHttpUrl(
-      config.githubProxy.includes('{url}')
-        ? config.githubProxy.replace('{url}', encodeURIComponent('https://api.github.com'))
-        : config.githubProxy,
-    )
-  ) {
-    errors.push('githubProxy 必须是公网 http(s) URL,不允许内网或本地地址')
+  } else if (typeof config.githubProxy === 'string' && config.githubProxy.trim()) {
+    const proxyUrl = config.githubProxy.includes('{url}')
+      ? config.githubProxy.replace('{url}', encodeURIComponent('https://api.github.com'))
+      : config.githubProxy
+
+    if (requirePublicHttps && !isPublicHttpsUrl(proxyUrl)) {
+      errors.push('生产环境 githubProxy 必须是公网 https URL')
+    } else if (!isValidUrl(proxyUrl)) {
+      errors.push('githubProxy 必须是有效的 http(s) URL')
+    }
   }
 
   if (
@@ -130,6 +99,12 @@ export function validateMusicConfig(input: unknown): MusicConfigValidationResult
       }
       if (umami.scriptUrl !== undefined && typeof umami.scriptUrl !== 'string') {
         errors.push('umami.scriptUrl 必须是字符串')
+      } else if (typeof umami.scriptUrl === 'string' && umami.scriptUrl.trim()) {
+        if (requirePublicHttps && !isPublicHttpsUrl(umami.scriptUrl)) {
+          errors.push('生产环境 umami.scriptUrl 必须是公网 https URL')
+        } else if (!isValidUrl(umami.scriptUrl)) {
+          errors.push('umami.scriptUrl 必须是有效的 http(s) URL')
+        }
       }
       if (umami.websiteId !== undefined && typeof umami.websiteId !== 'string') {
         errors.push('umami.websiteId 必须是字符串')
@@ -172,6 +147,10 @@ export function validateMusicConfig(input: unknown): MusicConfigValidationResult
   if (!Array.isArray(config.playlists)) {
     errors.push('playlists 必须是数组')
   } else {
+    const playlistKeys = new Set<string>()
+    if (config.playlists.length > maxPlaylists) {
+      errors.push(`playlists 最多允许 ${maxPlaylists} 项`)
+    }
     config.playlists.forEach((item, index) => {
       if (!isObject(item)) {
         errors.push(`playlists[${index}] 必须是对象`)
@@ -183,6 +162,13 @@ export function validateMusicConfig(input: unknown): MusicConfigValidationResult
       }
       if (typeof playlist.playlistId !== 'string' || !playlist.playlistId.trim()) {
         errors.push(`playlists[${index}].playlistId 必须是非空字符串`)
+      } else if (playlist.server === 'netease' || playlist.server === 'tencent') {
+        const key = `${playlist.server}:${playlist.playlistId.trim()}`
+        if (playlistKeys.has(key)) {
+          errors.push(`playlists[${index}] 与已有歌单重复`)
+        } else {
+          playlistKeys.add(key)
+        }
       }
     })
   }
@@ -190,6 +176,10 @@ export function validateMusicConfig(input: unknown): MusicConfigValidationResult
   if (!Array.isArray(config.localTracks)) {
     errors.push('localTracks 必须是数组')
   } else {
+    const localTrackIds = new Set<string>()
+    if (config.localTracks.length > maxLocalTracks) {
+      errors.push(`localTracks 最多允许 ${maxLocalTracks} 项`)
+    }
     config.localTracks.forEach((item, index) => {
       if (!isObject(item)) {
         errors.push(`localTracks[${index}] 必须是对象`)
@@ -198,6 +188,13 @@ export function validateMusicConfig(input: unknown): MusicConfigValidationResult
       const track = item
       if (typeof track.id !== 'string' || !track.id.trim()) {
         errors.push(`localTracks[${index}].id 必须是非空字符串`)
+      } else {
+        const normalizedId = track.id.trim()
+        if (localTrackIds.has(normalizedId)) {
+          errors.push(`localTracks[${index}].id 与已有歌曲重复`)
+        } else {
+          localTrackIds.add(normalizedId)
+        }
       }
       if (typeof track.title !== 'string' || !track.title.trim()) {
         errors.push(`localTracks[${index}].title 必须是非空字符串`)
@@ -216,22 +213,22 @@ export function validateMusicConfig(input: unknown): MusicConfigValidationResult
   }
 
   const cleaned: MusicConfig = {
-    siteName: config.siteName as string,
-    apiEndpoint: config.apiEndpoint as string,
+    siteName: (config.siteName as string).trim(),
+    apiEndpoint: (config.apiEndpoint as string).trim(),
     playlists: (config.playlists as Record<string, unknown>[]).map((item) => {
       const playlist: MetingPlaylistConfig = {
         server: item.server as MusicServer,
-        playlistId: item.playlistId as string,
+        playlistId: (item.playlistId as string).trim(),
       }
       if (typeof item.enabled === 'boolean') playlist.enabled = item.enabled
       return playlist
     }),
     localTracks: (config.localTracks as Record<string, unknown>[]).map((item) => {
       const track: LocalTrackConfig = {
-        id: item.id as string,
-        title: item.title as string,
-        artist: item.artist as string,
-        audio: item.audio as string,
+        id: (item.id as string).trim(),
+        title: (item.title as string).trim(),
+        artist: (item.artist as string).trim(),
+        audio: (item.audio as string).trim(),
       }
       if (typeof item.album === 'string') track.album = item.album
       if (typeof item.cover === 'string') track.cover = item.cover

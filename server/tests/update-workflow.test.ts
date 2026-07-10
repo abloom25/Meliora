@@ -24,4 +24,11 @@ describe('update workflow safeguards', () => {
     expect(mergeStep).toContain('pnpm build')
     expect(mergeStep).toContain('pnpm test:bundle')
   })
+
+  it('does not push temporary update branches to the remote before merging', async () => {
+    const source = await readFile(workflowPath, 'utf8')
+
+    expect(source).toContain('Temporary branch is kept local until validation passes.')
+    expect(source).not.toContain('git push origin "${TEMP_BRANCH}" --force')
+  })
 })

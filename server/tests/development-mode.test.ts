@@ -76,7 +76,7 @@ describe('truthy', () => {
 })
 
 describe('validateEnv', () => {
-  it('accepts any GH_TOKEN value with a valid repo and strong encryption key in production mode', () => {
+  it('accepts a usable GH_TOKEN with a valid repo and strong encryption key in production mode', () => {
     const env = makeEnv({
       GH_TOKEN: 'ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
       CONFIG_ENCRYPTION_KEY: STRONG_KEY,
@@ -84,6 +84,24 @@ describe('validateEnv', () => {
     })
 
     expect(validateEnv(env).ok).toBe(true)
+  })
+
+  it('rejects missing or placeholder GH_TOKEN in production mode', () => {
+    for (const GH_TOKEN of ['', 'placeholder', 'placeholder-token']) {
+      const result = validateEnv(
+        makeEnv({
+          GH_TOKEN,
+          CONFIG_ENCRYPTION_KEY: STRONG_KEY,
+          DEVELOPMENT: '',
+        }),
+      )
+
+      expect(result.ok, GH_TOKEN || '<empty>').toBe(false)
+      expect(
+        result.errors.some((error) => error.includes('GH_TOKEN')),
+        GH_TOKEN || '<empty>',
+      ).toBe(true)
+    }
   })
 
   it('rejects missing GH_REPO in production mode', () => {

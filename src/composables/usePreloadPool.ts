@@ -2,8 +2,11 @@ import { onBeforeUnmount, ref, type Ref } from 'vue'
 import { loadTrackLyrics } from '../services/lyrics'
 import { usePlayerStore } from '../stores/player'
 import type { PlayerSettings, Track } from '../types/music'
+import { PRELOAD_TIMEOUTS, CACHE_CONSTANTS } from '../../shared/constants'
 
-const PRELOAD_READY_TIMEOUT = 9000
+const PRELOAD_READY_TIMEOUT = PRELOAD_TIMEOUTS.COVER
+const COVER_PRELOAD_CACHE_LIMIT = CACHE_CONSTANTS.COVER_PRELOAD_LIMIT
+const COVER_PRELOAD_CACHE_TTL = CACHE_CONSTANTS.COVER_PRELOAD_TTL
 export type PreloadDirection = 'previous' | 'next'
 
 export interface PreloadSlot {
@@ -14,11 +17,70 @@ export interface PreloadSlot {
   cleanup: (() => void) | null
 }
 
-export function preloadCover(url?: string) {
+const coverPreloadInflight = new Map<string, Promise<void>>()
+const coverPreloadCache = new Map<string, number>()
+
+function rememberPreloadedCover(url: string) {
+  coverPreloadCache.delete(url)
+  coverPreloadCache.set(url, Date.now())
+
+  while (coverPreloadCache.size > COVER_PRELOAD_CACHE_LIMIT) {
+    const oldestUrl = coverPreloadCache.keys().next().value
+    if (!oldestUrl) break
+    coverPreloadCache.delete(oldestUrl)
+  }
+}
+
+function isCoverRecentlyPreloaded(url: string) {
+  const cachedAt = coverPreloadCache.get(url)
+  if (cachedAt === undefined) return false
+
+  if (Date.now() - cachedAt > COVER_PRELOAD_CACHE_TTL) {
+    coverPreloadCache.delete(url)
+    return false
+  }
+
+  rememberPreloadedCover(url)
+  return true
+}
+
+function waitForImageLoad(image: HTMLImageElement): Promise<void> {
+  return new Promise((resolve, reject) => {
+    image.onload = () => resolve()
+    image.onerror = () => reject(new Error('cover preload failed'))
+  })
+}
+
+export function preloadCover(url?: string): Promise<void> {
   if (!url) return Promise.resolve()
+  if (isCoverRecentlyPreloaded(url)) return Promise.resolve()
+
+  const pending = coverPreloadInflight.get(url)
+  if (pending) return pending
+
   const image = new Image()
-  image.src = url
-  return image.decode?.().catch(() => undefined) ?? Promise.resolve()
+  let load: Promise<void>
+  if (typeof image.decode === 'function') {
+    image.src = url
+    try {
+      load = image.decode()
+    } catch (error) {
+      load = Promise.reject(error)
+    }
+  } else {
+    load = waitForImageLoad(image)
+    image.src = url
+  }
+  const ready = load
+    .then(() => {
+      rememberPreloadedCover(url)
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      coverPreloadInflight.delete(url)
+    })
+  coverPreloadInflight.set(url, ready)
+  return ready
 }
 
 export async function preloadLyrics(track: Track) {
@@ -66,6 +128,43 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     return track
   }
 
+  function findSequentialTrack(direction: PreloadDirection, manual: boolean): Track | null {
+    const queue = store.queue
+    if (!queue.length) return null
+    if (store.currentIndex < 0) {
+      return queue.find((track) => !failedTrackIds.has(track.id)) ?? null
+    }
+
+    const step = direction === 'next' ? 1 : -1
+    const wraps = store.settings.playMode !== 'sequence'
+    const shouldRepeatCurrent =
+      direction === 'next' && store.settings.playMode === 'single' && !manual
+    if (shouldRepeatCurrent) {
+      const current = store.currentTrack
+      return current && !failedTrackIds.has(current.id) ? current : null
+    }
+
+    for (let offset = 1; offset <= queue.length; offset += 1) {
+      const rawIndex = store.currentIndex + step * offset
+      if (!wraps && (rawIndex < 0 || rawIndex >= queue.length)) return null
+      const index = ((rawIndex % queue.length) + queue.length) % queue.length
+      const candidate = queue[index]
+      if (candidate && !failedTrackIds.has(candidate.id)) return candidate
+    }
+    return null
+  }
+
+  function findFallbackTrack(direction: PreloadDirection, manual: boolean): Track | null {
+    if (store.settings.playMode === 'shuffle') {
+      return (
+        store.queue.find(
+          (track) => track.id !== store.currentTrack?.id && !failedTrackIds.has(track.id),
+        ) ?? null
+      )
+    }
+    return findSequentialTrack(direction, manual)
+  }
+
   function predictTrack(direction: PreloadDirection, manual = false): Track | null {
     const queue = store.queue
     if (!queue.length) return null
@@ -77,7 +176,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     // 单一真相源：统一走 store.peekNext/peekPrevious，消除 shuffle 双抽样不一致
     const predicted = direction === 'next' ? store.peekNext(manual) : store.peekPrevious()
     if (!predicted) return null
-    if (failedTrackIds.has(predicted.id)) return null
+    if (failedTrackIds.has(predicted.id)) return findFallbackTrack(direction, manual)
     return predicted
   }
 

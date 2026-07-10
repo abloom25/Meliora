@@ -1,5 +1,6 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { canShowIosInstallGuide } from '../utils/browser'
+import { listenMediaQuery } from '../utils/media-query'
 
 interface BeforeInstallPromptEvent extends Event {
   prompt(): Promise<void>
@@ -22,6 +23,7 @@ export function usePwaInstall() {
   const iosInstallAvailable = ref(canShowIosInstallGuide())
   let deferredPrompt: BeforeInstallPromptEvent | null = null
   let mql: MediaQueryList | null = null
+  let stopDisplayModeListener: (() => void) | null = null
 
   function handleInstallPrompt(event: Event) {
     event.preventDefault()
@@ -60,12 +62,13 @@ export function usePwaInstall() {
 
   onMounted(() => {
     mql = window.matchMedia(DISPLAY_MODE_QUERY)
-    mql.addEventListener('change', handleDisplayModeChange)
+    stopDisplayModeListener = listenMediaQuery(mql, handleDisplayModeChange)
     window.addEventListener('beforeinstallprompt', handleInstallPrompt)
     window.addEventListener('appinstalled', handleInstalled)
   })
   onBeforeUnmount(() => {
-    mql?.removeEventListener('change', handleDisplayModeChange)
+    stopDisplayModeListener?.()
+    stopDisplayModeListener = null
     window.removeEventListener('beforeinstallprompt', handleInstallPrompt)
     window.removeEventListener('appinstalled', handleInstalled)
   })

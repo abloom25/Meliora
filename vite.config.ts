@@ -39,7 +39,7 @@ function melioraLocalConfigPlugin(): Plugin {
 
         try {
           const parsed = JSON.parse(await readBody(request))
-          const validation = validateMusicConfig(parsed)
+          const validation = validateMusicConfig(parsed, { allowPrivateUrls: true })
           if (!validation.valid || !validation.config) {
             sendJson(response, 400, {
               error: '配置校验失败',

@@ -112,6 +112,23 @@ describe('track utilities', () => {
     expect(filterTracks([...tracks, variant], 'acoustic').map((track) => track.id)).toEqual(['3'])
   })
 
+  it('refreshes cached search text when a track object is updated in place', () => {
+    const mutableTrack: Track = {
+      id: 'mutable',
+      title: 'Original Title',
+      artist: 'Artist',
+      audioUrl: '/mutable.mp3',
+      kind: 'local',
+    }
+
+    expect(filterTracks([mutableTrack], 'original')).toEqual([mutableTrack])
+
+    mutableTrack.title = 'Updated Title'
+
+    expect(filterTracks([mutableTrack], 'original')).toEqual([])
+    expect(filterTracks([mutableTrack], 'updated')).toEqual([mutableTrack])
+  })
+
   it('rejects incomplete Meting entries', () => {
     expect(mapMetingTrack({ title: 'Missing URL' }, 'source', 0)).toBeNull()
     expect(mapMetingTrack({ title: 'Song', author: '', url: '/audio' }, 'source', 1)).toMatchObject(

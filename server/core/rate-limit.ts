@@ -21,18 +21,11 @@ interface RateLimitResult {
 // 需要严格全局限流应改用 Durable Objects / KV。当前实现用于抬高爆破成本。
 const MAX_ENTRIES = 10_000
 const attempts = new Map<string, RateLimitEntry>()
+const activeWork = new Map<string, number>()
 
-function clientKey(request: Request): string {
-  const headers = request.headers
-  // 优先使用平台设置的可信客户端 IP:CF-Connecting-IP(Cloudflare)、X-Real-IP(Netlify 等),
-  // 最后回退 X-Forwarded-For 首项。注意:不将 User-Agent 纳入限流键 —— UA 完全由客户端控制,
-  // 纳入会主动给攻击者提供一个免费绕过维度(换 UA 即换桶)。
-  const ip =
-    headers.get('CF-Connecting-IP') ||
-    headers.get('X-Real-IP') ||
-    headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
-    'unknown'
-  return ip
+function clientKey(trustedClientIp?: string): string {
+  const normalized = trustedClientIp?.trim()
+  return normalized || 'unknown'
 }
 
 function pruneExpired(now: number): void {
@@ -52,13 +45,13 @@ function pruneExpired(now: number): void {
 }
 
 export function consumeRateLimit(
-  request: Request,
   { key, limit, windowMs, blockMs }: RateLimitOptions,
+  trustedClientIp?: string,
 ): RateLimitResult {
   const now = Date.now()
   pruneExpired(now)
 
-  const id = `${key}:${clientKey(request)}`
+  const id = `${key}:${clientKey(trustedClientIp)}`
   const existing = attempts.get(id)
 
   if (existing && existing.blockedUntil > now) {
@@ -84,6 +77,25 @@ export function consumeRateLimit(
   return { allowed: true, retryAfterSeconds: 0 }
 }
 
-export function resetRateLimit(request: Request, key: string): void {
-  attempts.delete(`${key}:${clientKey(request)}`)
+export function resetRateLimit(key: string, trustedClientIp?: string): void {
+  attempts.delete(`${key}:${clientKey(trustedClientIp)}`)
+}
+
+/**
+ * 限制单个实例内高成本工作的并发数。返回的释放函数可重复调用且只生效一次。
+ * 这不是跨实例限流，但可阻止单个热实例被 PBKDF2 请求完全占满。
+ */
+export function tryAcquireWorkSlot(key: string, limit: number): (() => void) | null {
+  const current = activeWork.get(key) ?? 0
+  if (current >= limit) return null
+  activeWork.set(key, current + 1)
+
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    const remaining = (activeWork.get(key) ?? 1) - 1
+    if (remaining > 0) activeWork.set(key, remaining)
+    else activeWork.delete(key)
+  }
 }

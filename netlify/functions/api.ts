@@ -11,5 +11,7 @@ export default async function handler(request: Request): Promise<Response> {
     DEVELOPMENT: process.env.DEVELOPMENT || '',
     CONFIG_ENCRYPTION_KEY: process.env.CONFIG_ENCRYPTION_KEY || '',
   }
-  return handleRequest(request, env)
+  return handleRequest(request, env, {
+    clientIp: request.headers.get('x-nf-client-connection-ip') || undefined,
+  })
 }

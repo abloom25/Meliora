@@ -281,11 +281,10 @@ jobs:
 
           git add -A
           git commit -m "chore(update): sync upstream ${TARGET_TAG}"
-          git push origin "${TEMP_BRANCH}" --force
           {
             echo ""
             echo "- Upstream tag: \`${TARGET_TAG}\`"
-            echo "- Temporary branch was pushed for validation."
+            echo "- Temporary branch is kept local until validation passes."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up pnpm
@@ -344,7 +343,6 @@ jobs:
           pnpm format:check
           pnpm build
           pnpm test:bundle
-          git push origin "${TEMP_BRANCH}" --force
 
           git checkout "${TARGET_BRANCH}"
           git reset --hard "origin/${TARGET_BRANCH}"

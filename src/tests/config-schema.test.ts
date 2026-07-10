@@ -48,6 +48,31 @@ describe('validateMusicConfig', () => {
     expect(result.valid).toBe(true)
   })
 
+  it('allows private HTTP endpoints only when development mode is explicit', () => {
+    const result = validateMusicConfig(
+      { ...validConfig, apiEndpoint: 'http://localhost:3000' },
+      { allowPrivateUrls: true },
+    )
+
+    expect(result.valid).toBe(true)
+  })
+
+  it('rejects configurations that exceed the playlist limit', () => {
+    const result = validateMusicConfig(
+      {
+        ...validConfig,
+        playlists: Array.from({ length: 3 }, (_, index) => ({
+          server: 'netease',
+          playlistId: String(index),
+        })),
+      },
+      { maxPlaylists: 2 },
+    )
+
+    expect(result.valid).toBe(false)
+    expect(result.errors).toContain('playlists 最多允许 2 项')
+  })
+
   it('accepts an empty apiEndpoint when no remote playlists are enabled', () => {
     const result = validateMusicConfig({
       ...validConfig,
@@ -82,6 +107,19 @@ describe('validateMusicConfig', () => {
     expect(result.errors.some((e) => e.includes('playlistId'))).toBe(true)
   })
 
+  it('rejects duplicate playlists', () => {
+    const result = validateMusicConfig({
+      ...validConfig,
+      playlists: [
+        { server: 'netease', playlistId: '123' },
+        { server: 'netease', playlistId: ' 123 ' },
+      ],
+    })
+
+    expect(result.valid).toBe(false)
+    expect(result.errors).toContain('playlists[1] 与已有歌单重复')
+  })
+
   it('rejects empty localTrack audio', () => {
     const result = validateMusicConfig({
       ...validConfig,
@@ -89,6 +127,19 @@ describe('validateMusicConfig', () => {
     })
     expect(result.valid).toBe(false)
     expect(result.errors.some((e) => e.includes('audio'))).toBe(true)
+  })
+
+  it('rejects duplicate local track IDs before they reach the player index', () => {
+    const result = validateMusicConfig({
+      ...validConfig,
+      localTracks: [
+        { id: 'same-id', title: 'First', artist: 'Artist', audio: '/music/first.mp3' },
+        { id: ' same-id ', title: 'Second', artist: 'Artist', audio: '/music/second.mp3' },
+      ],
+    })
+
+    expect(result.valid).toBe(false)
+    expect(result.errors).toContain('localTracks[1].id 与已有歌曲重复')
   })
 
   it('rejects null input', () => {
@@ -132,6 +183,33 @@ describe('validateMusicConfig', () => {
       websiteId: 'abc',
     })
     expect(result.config?.googleAnalytics).toEqual({ enabled: true, measurementId: 'G-XXXX' })
+  })
+
+  it('rejects unsafe umami script URLs', () => {
+    const unsafeUrls = [
+      'http://analytics.example.com/script.js',
+      'javascript:alert(1)',
+      'data:text/javascript,alert(1)',
+      'https://localhost/script.js',
+      'https://192.168.1.10/script.js',
+    ]
+
+    for (const scriptUrl of unsafeUrls) {
+      const result = validateMusicConfig({
+        ...validConfig,
+        umami: {
+          enabled: true,
+          scriptUrl,
+          websiteId: 'abc',
+        },
+      })
+
+      expect(result.valid, scriptUrl).toBe(false)
+      expect(
+        result.errors.some((error) => error.includes('umami.scriptUrl')),
+        scriptUrl,
+      ).toBe(true)
+    }
   })
 
   it('preserves receivePrereleaseUpdates when provided', () => {

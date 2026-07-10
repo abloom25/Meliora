@@ -1,6 +1,5 @@
 <script setup lang="ts">
   import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-  import type { ComponentPublicInstance } from 'vue'
   import { Music, RefreshCw, Search, X } from '@lucide/vue'
   import type { Track } from '../types/music'
   import { useCoverCache } from '../composables/useCoverCache'
@@ -33,12 +32,13 @@
   // 容器高度通过 ResizeObserver 维护为响应式 ref,
   // 这样窗口/抽屉尺寸变化时 virtualItems 会重新计算可见区域,而不必等待下一次滚动。
   const containerHeight = ref(600)
-  const activeTrackElement = ref<HTMLElement | null>(null)
   const focusPulseTrackId = ref<string | null>(null)
   const debouncedQuery = ref(props.query)
   let scrollTimer = 0
   let focusTimer = 0
   let searchTimer = 0
+  let scrollFrame = 0
+  let pendingScrollAnimation = false
   let resizeObserver: ResizeObserver | null = null
 
   const displayList = computed(() =>
@@ -51,6 +51,19 @@
       index,
     })),
   )
+
+  const trackIndexById = computed(() => {
+    const indexById = new Map<string, number>()
+    props.tracks.forEach((track, index) => {
+      indexById.set(track.id, index)
+    })
+    return indexById
+  })
+
+  const currentTrackIndex = computed(() => {
+    if (!props.currentTrackId) return -1
+    return trackIndexById.value.get(props.currentTrackId) ?? -1
+  })
 
   const virtualItems = computed(() => {
     const height = containerHeight.value
@@ -95,23 +108,13 @@
     emit('update:query', '')
   }
 
-  function bindActiveTrackElement(
-    trackId: string,
-    element: Element | ComponentPublicInstance | null,
-  ) {
-    if (trackId !== props.currentTrackId) return
-    activeTrackElement.value = element instanceof HTMLElement ? element : null
-  }
-
   async function scrollActiveTrackIntoView(animate = true) {
     if (!props.currentTrackId) return
     await nextTick()
     const container = containerRef.value
     if (!container) return
 
-    const targetIndex = displayList.value.findIndex(
-      (item) => item.track.id === props.currentTrackId,
-    )
+    const targetIndex = currentTrackIndex.value
     if (targetIndex < 0) return
 
     const targetOffset = targetIndex * ITEM_HEIGHT
@@ -127,7 +130,16 @@
     }, 1200)
   }
 
-  onMounted(() => void scrollActiveTrackIntoView(false))
+  function scheduleActiveTrackScroll(animate = true) {
+    pendingScrollAnimation = animate
+    if (scrollFrame) window.cancelAnimationFrame(scrollFrame)
+    scrollFrame = window.requestAnimationFrame(() => {
+      scrollFrame = 0
+      void scrollActiveTrackIntoView(pendingScrollAnimation)
+    })
+  }
+
+  onMounted(() => scheduleActiveTrackScroll(false))
   // 监听容器节点:挂载时测量初始高度并接入 ResizeObserver,卸载/重建时断开旧 observer。
   // immediate 在 setup 阶段 containerRef.value 为 null,首次触发走 else 分支无副作用,
   // 节点真正绑定后再次触发完成接入。
@@ -148,21 +160,17 @@
     { immediate: true },
   )
   watch(
-    () => props.currentTrackId,
-    () => void scrollActiveTrackIntoView(),
+    () => ({ id: props.currentTrackId, index: currentTrackIndex.value }),
+    (next, previous) => scheduleActiveTrackScroll(next.id !== previous?.id),
   )
   watch(debouncedQuery, (value) => {
     handleSearchInput(value)
   })
-  // 用 tracks.length + 首个 track.id 替代全量 concat.join，避免 O(n) 字符串拼接
-  watch(
-    () => [props.tracks.length, props.tracks[0]?.id],
-    () => void scrollActiveTrackIntoView(false),
-  )
   onBeforeUnmount(() => {
     window.clearTimeout(scrollTimer)
     window.clearTimeout(focusTimer)
     window.clearTimeout(searchTimer)
+    if (scrollFrame) window.cancelAnimationFrame(scrollFrame)
     resizeObserver?.disconnect()
     resizeObserver = null
   })
@@ -212,7 +220,6 @@
         <button
           v-for="{ track, display, index, offset } in virtualItems.items"
           :key="track.id"
-          :ref="(el) => bindActiveTrackElement(track.id, el)"
           class="track-item"
           :class="{ active: track.id === currentTrackId, focused: track.id === focusPulseTrackId }"
           :style="{ position: 'absolute', top: `${offset}px`, left: '0', right: '0' }"

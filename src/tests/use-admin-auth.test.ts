@@ -92,4 +92,16 @@ describe('useAdminAuth setup status', () => {
     expect(auth.apiUnavailable.value).toBe(true)
     expect(auth.initialized.value).toBe(true)
   })
+
+  it('preserves backend login errors for the UI', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ error: '服务器正忙,请稍后再试' }, { status: 503 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const auth = await loadAuth()
+
+    await expect(auth.login('password')).resolves.toBe(false)
+    expect(auth.authError.value).toBe('服务器正忙,请稍后再试')
+  })
 })

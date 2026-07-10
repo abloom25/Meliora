@@ -151,7 +151,7 @@
   const sourceWarning = ref('')
   // 封面 CORS 回退:crossorigin="anonymous" 首次加载失败(CDN 不返回 CORS 头)时,
   // 移除 crossorigin 重新加载,保证封面显示(取色降级为默认色)。
-  // 用 Set 记录已回退的 trackId,通过 :key 变化触发 <img> 重建。
+  // 用 trackId + cover URL 持久记录已回退项,避免回切同一首歌时重复发起一次必失败的 CORS 请求。
   const coverCorsRetry = ref(new Set<string>())
   const { chromeHidden, scheduleChromeHide, revealChrome, clearChromeTimer } = useChromeAutoHide({
     listOpen,
@@ -252,9 +252,9 @@
       versions: track.titleVersions ?? [],
     }
   })
-  const lyricsVisible = computed(
-    () => lyricsEnabled.value && lyricAvailability.value !== 'unavailable',
-  )
+  const lyricsAvailable = computed(() => lyricAvailability.value !== 'unavailable')
+  const lyricsLayoutVisible = computed(() => lyricsEnabled.value && lyricsAvailable.value)
+  const lyricsVisible = computed(() => lyricsLayoutVisible.value && lyricsAvailable.value)
   const settingsAvailable = computed(() => tracks.value.length > 0)
   const lyricsPanelActive = computed(() =>
     isMobileSheet.value
@@ -268,6 +268,22 @@
       ? `url("${currentTrack.value.cover.replaceAll('"', '\\"')}")`
       : 'none',
   )
+  const mainCoverItems = computed(() => {
+    const track = currentTrack.value
+    if (!track?.cover || failedCovers.value.has(track.id)) return []
+    const corsKey = coverRetryKey(track.id, track.cover)
+    const corsRetried = coverCorsRetry.value.has(corsKey)
+    return [
+      {
+        id: track.id,
+        title: track.title,
+        cover: track.cover,
+        corsKey,
+        corsRetried,
+        key: `${corsKey}-${corsRetried}`,
+      },
+    ]
+  })
   const playModeText = computed(() => PLAY_MODE_META[settings.value.playMode].text)
   const playModeIcon = computed(() => PLAY_MODE_META[settings.value.playMode].icon)
   const beatStyle = computed(() => ({
@@ -294,6 +310,10 @@
   function clearNotice() {
     notice.value = ''
     window.clearTimeout(noticeTimer)
+  }
+
+  function setLyricAvailability(availability: LyricAvailability) {
+    lyricAvailability.value = availability
   }
 
   function showOfflineNotice() {
@@ -461,10 +481,15 @@
   })
 
   function toggleLyrics() {
-    if (lyricAvailability.value === 'unavailable') return
+    if (!lyricsLayoutVisible.value && !lyricsAvailable.value) return
     triggerHaptic('selection')
 
     if (isMobileSheet.value) {
+      if (!lyricsAvailable.value) {
+        lyricsEnabled.value = false
+        mobileView.value = 'cover'
+        return
+      }
       if (!lyricsEnabled.value) lyricsEnabled.value = true
       mobileView.value = mobileView.value === 'lyrics' ? 'cover' : 'lyrics'
       return
@@ -474,14 +499,14 @@
   }
 
   function showMobileLyrics() {
-    if (lyricAvailability.value === 'unavailable') return
+    if (!lyricsAvailable.value) return
     triggerHaptic('selection')
     lyricsEnabled.value = true
     mobileView.value = 'lyrics'
   }
 
   function handleLyricAvailability(availability: LyricAvailability) {
-    lyricAvailability.value = availability
+    setLyricAvailability(availability)
     if (availability === 'unavailable') mobileView.value = 'cover'
     if (availability === 'unavailable') {
       lyricsSnapshot.value = null
@@ -552,15 +577,29 @@
     applyTheme(immediateTheme)
   }
 
-  function handleMainCoverError(trackId: string) {
+  function coverRetryKey(trackId: string, cover: string) {
+    return `${trackId}\n${cover}`
+  }
+
+  function rememberCoverCorsRetry(corsKey: string) {
+    const next = new Set(coverCorsRetry.value)
+    if (next.has(corsKey)) next.delete(corsKey)
+    next.add(corsKey)
+    while (next.size > 512) {
+      const oldest = next.values().next().value
+      if (!oldest) break
+      next.delete(oldest)
+    }
+    coverCorsRetry.value = next
+  }
+
+  function handleMainCoverError(trackId: string, corsKey: string) {
     // crossorigin="anonymous" 模式下,CDN 不返回 Access-Control-Allow-Origin 会触发 onerror。
     // 首次失败时回退:标记该 trackId 并通过 :key 变化重建 <img>(移除 crossorigin),
     // 保证封面显示;此时取色因 canvas 污染降级为默认色。
     // 已回退过仍失败说明资源本身不可用,走正常的 failedCovers 标记流程。
-    if (!coverCorsRetry.value.has(trackId)) {
-      const next = new Set(coverCorsRetry.value)
-      next.add(trackId)
-      coverCorsRetry.value = next
+    if (!coverCorsRetry.value.has(corsKey)) {
+      rememberCoverCorsRetry(corsKey)
       return
     }
     markCoverFailed(trackId)
@@ -586,12 +625,10 @@
       // 切歌时立即重置主封面"已就绪"状态，让新封面重新走 fade-in transition；
       // 列表里的小封面缓存（loadedCovers）保留，避免抽屉滚动时小图重复闪现。
       resetMainCover()
-      // 清空 CORS 回退标记:新封面需要重新尝试 crossorigin 加载以支持取色。
-      coverCorsRetry.value = new Set()
       const nextTrackHasLyrics = hasTrackLyricsSource(currentTrack.value)
-      lyricAvailability.value = nextTrackHasLyrics ? 'loading' : 'unavailable'
+      setLyricAvailability(nextTrackHasLyrics ? 'loading' : 'unavailable')
       lyricsSnapshot.value = null
-      if (!nextTrackHasLyrics) {
+      if (!nextTrackHasLyrics && isMobileSheet.value) {
         mobileView.value = 'cover'
       }
       if (!currentTrack.value?.cover) {
@@ -679,12 +716,12 @@
     <section
       class="now-playing-layout"
       :class="{
-        'lyrics-hidden': !lyricsVisible,
+        'lyrics-hidden': !lyricsLayoutVisible,
         loading: loading && !store.tracks.length,
         softened: panelsSoftened,
       }"
     >
-      <div v-if="lyricAvailability !== 'unavailable'" class="mobile-view-tabs">
+      <div v-if="lyricsAvailable" class="mobile-view-tabs">
         <button :class="{ active: mobileView === 'cover' }" @click="mobileView = 'cover'">
           正在播放
         </button>
@@ -704,28 +741,27 @@
           class="artwork-frame"
           :class="{ loaded: currentTrack && mainCoverReadyTrackId === currentTrack.id }"
         >
-          <img
-            v-if="currentTrack?.cover && !failedCovers.has(currentTrack.id)"
-            class="artwork-glow"
-            :src="currentTrack.cover"
-            alt=""
-            aria-hidden="true"
-            decoding="async"
-            loading="eager"
-            draggable="false"
-          />
-          <img
-            v-if="currentTrack?.cover && !failedCovers.has(currentTrack.id)"
-            :key="`${currentTrack.id}-${coverCorsRetry.has(currentTrack.id)}`"
-            :src="currentTrack.cover"
-            :crossorigin="coverCorsRetry.has(currentTrack.id) ? undefined : 'anonymous'"
-            :alt="`${currentTrack.title} 封面`"
-            decoding="async"
-            loading="eager"
-            draggable="false"
-            @load="handleMainCoverLoaded(currentTrack.id, $event)"
-            @error="handleMainCoverError(currentTrack.id)"
-          />
+          <template v-for="cover in mainCoverItems" :key="cover.key">
+            <img
+              class="artwork-glow"
+              :src="cover.cover"
+              alt=""
+              aria-hidden="true"
+              decoding="async"
+              loading="eager"
+              draggable="false"
+            />
+            <img
+              :src="cover.cover"
+              :crossorigin="cover.corsRetried ? undefined : 'anonymous'"
+              :alt="`${cover.title} 封面`"
+              decoding="async"
+              loading="eager"
+              draggable="false"
+              @load="handleMainCoverLoaded(cover.id, $event)"
+              @error="handleMainCoverError(cover.id, cover.corsKey)"
+            />
+          </template>
         </div>
         <Transition name="meta-swap" mode="out-in">
           <div :key="currentTrackId || 'empty-meta'" class="primary-meta">
@@ -833,16 +869,16 @@
           <ListMusic :size="20" />
         </button>
         <button
-          :class="{ active: lyricsVisible }"
-          :aria-label="lyricsVisible ? '隐藏歌词' : '显示歌词'"
+          :class="{ active: lyricsLayoutVisible }"
+          :aria-label="lyricsLayoutVisible ? '隐藏歌词' : '显示歌词'"
           :title="
-            lyricAvailability === 'unavailable'
-              ? '暂无歌词'
-              : lyricsVisible
-                ? '隐藏歌词'
+            lyricsLayoutVisible
+              ? '隐藏歌词'
+              : lyricAvailability === 'unavailable'
+                ? '暂无歌词'
                 : '显示歌词'
           "
-          :disabled="lyricAvailability === 'unavailable'"
+          :disabled="lyricAvailability === 'unavailable' && !lyricsLayoutVisible"
           @click="toggleLyrics"
         >
           <MessageSquareText :size="19" />
@@ -1347,6 +1383,15 @@
       opacity 260ms ease,
       transform 600ms cubic-bezier(0.4, 0, 0.2, 1),
       visibility 0s linear 600ms;
+  }
+  .now-playing-layout.softened .lyrics-column.lyrics-disabled {
+    visibility: hidden;
+    opacity: 0;
+    transform: translateX(32px) scale(0.985);
+    transition:
+      opacity 160ms ease,
+      transform 160ms ease,
+      visibility 0s linear;
   }
   .lyrics-panel-swap-enter-active,
   .lyrics-panel-swap-leave-active {

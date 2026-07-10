@@ -1,3 +1,5 @@
+import { listenMediaQuery } from './media-query'
+
 const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)'
 const mediaQuery =
   typeof window !== 'undefined' && typeof window.matchMedia === 'function'
@@ -13,8 +15,8 @@ function notify(value: boolean) {
 }
 
 if (mediaQuery) {
-  const handler = (event: MediaQueryListEvent) => notify(event.matches)
-  if ('addEventListener' in mediaQuery) mediaQuery.addEventListener('change', handler)
+  const handler = (event: MediaQueryListEvent | MediaQueryList) => notify(event.matches)
+  listenMediaQuery(mediaQuery, handler)
 }
 
 export function isReducedMotion(): boolean {

@@ -1,11 +1,11 @@
 import {
-  isPrereleaseVersion,
   isSemver,
   normalizeVersionTag,
   selectLatestVersion,
   shouldOfferUpdate,
 } from '../../shared/version'
-import { isDevelopmentMode, isPublicHttpUrl, type Env } from './types'
+import { isDevelopmentMode, isPublicHttpsUrl, type Env } from './types'
+import { jsonResponse } from './http'
 
 const UPSTREAM_REPO = 'abloom25/Meliora'
 const UPDATE_WORKFLOW = 'update-from-upstream.yml'
@@ -65,17 +65,22 @@ interface UpdateStatusCacheEntry {
 
 let updateStatusCache: UpdateStatusCacheEntry | null = null
 
-function jsonResponse(body: unknown, status: number): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  })
-}
-
 function createGitHubError(message: string, status?: number): GitHubRequestError {
   const error = new Error(message) as GitHubRequestError
   error.status = status
   return error
+}
+
+async function createGitHubResponseError(
+  response: Response,
+  context: string,
+): Promise<GitHubRequestError> {
+  const data = (await response.json().catch(() => null)) as {
+    message?: string
+    documentation_url?: string
+  } | null
+  const suffix = data?.message ? `: ${data.message}` : ''
+  return createGitHubError(`${context} failed: ${response.status}${suffix}`, response.status)
 }
 
 function validateGitHubProxy(
@@ -86,7 +91,7 @@ function validateGitHubProxy(
   const probe = trimmed.includes('{url}')
     ? trimmed.replace('{url}', encodeURIComponent(GITHUB_API))
     : trimmed
-  return isPublicHttpUrl(probe) ? { ok: true, value: trimmed } : { ok: false }
+  return isPublicHttpsUrl(probe) ? { ok: true, value: trimmed } : { ok: false }
 }
 
 // githubProxy 只用于管理员明确配置的可信代理场景。检查更新经代理请求时不附带 GH_TOKEN；
@@ -184,19 +189,36 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError'
 }
 
-function mapGitHubError(error: unknown): { error: string; status: number } {
+function mapGitHubError(error: unknown): { error: string; status: number; detail?: string } {
   if (isAbortError(error)) return { error: '检查更新超时,请稍后重试', status: 504 }
 
   const status = (error as GitHubRequestError).status ?? 0
+  const detail = error instanceof Error ? error.message : undefined
   if (status >= 300 && status < 400) {
-    return { error: 'GitHub 代理重定向已拒绝,请使用直连的公网代理地址', status: 400 }
+    return {
+      error: 'GitHub 代理重定向已拒绝,请使用直连的公网代理地址',
+      status: 400,
+      detail,
+    }
   }
   if (status === 401 || status === 403) {
-    return { error: 'GitHub 鉴权失败或速率受限,请检查 GH_TOKEN 权限', status: 502 }
+    return {
+      error:
+        'GitHub 鉴权失败、速率受限或 GH_TOKEN 权限不足。Fine-grained token 需要 Contents: read/write 与 Actions: write 权限。',
+      status: 502,
+      detail,
+    }
   }
-  if (status === 429) return { error: 'GitHub 请求过于频繁,请稍后再试', status: 429 }
-  if (status >= 500) return { error: 'GitHub 服务暂时不可用', status: 502 }
-  return { error: '网络错误', status: 500 }
+  if (status === 404) {
+    return {
+      error: `未找到 ${UPDATE_WORKFLOW} 的运行记录,请确认工作流存在于目标分支且 GH_TOKEN 可访问 Actions。`,
+      status: 502,
+      detail,
+    }
+  }
+  if (status === 429) return { error: 'GitHub 请求过于频繁,请稍后再试', status: 429, detail }
+  if (status >= 500) return { error: 'GitHub 服务暂时不可用', status: 502, detail }
+  return { error: '网络错误', status: 500, detail }
 }
 
 function releaseMatchesTag(release: GitHubRelease | null, tagName: string): boolean {
@@ -227,11 +249,10 @@ export async function checkUpdate(
 
   const proxyCheck = validateGitHubProxy(githubProxy || env.GITHUB_PROXY)
   if (!proxyCheck.ok) {
-    return jsonResponse({ error: 'GitHub 代理必须是公网 http(s) URL' }, 400)
+    return jsonResponse({ error: 'GitHub 代理必须是公网 https URL' }, 400)
   }
 
-  const includePrerelease =
-    receivePrereleaseUpdates || isPrereleaseVersion(normalizedCurrentVersion)
+  const includePrerelease = receivePrereleaseUpdates
   const { signal, cleanup } = createTimeoutSignal()
 
   try {
@@ -251,6 +272,20 @@ export async function checkUpdate(
     const latestTagName = latest ? getGitHubVersion(latest) : undefined
 
     if (!latestTagName) {
+      if (!includePrerelease) {
+        return jsonResponse(
+          {
+            hasUpdate: false,
+            currentVersion: normalizedCurrentVersion,
+            latestVersion: normalizedCurrentVersion,
+            targetTag: '',
+            releaseNotes: '未启用预发布版本更新,当前没有可用的稳定版更新。',
+            releaseUrl: '',
+            publishedAt: '',
+          } satisfies UpdateInfo,
+          200,
+        )
+      }
       return jsonResponse({ error: '无法获取有效版本信息' }, 502)
     }
 
@@ -357,10 +392,12 @@ function parseSince(value: string | null): Date {
 }
 
 async function fetchWorkflowRuns(env: Env, signal: AbortSignal): Promise<GitHubWorkflowRun[]> {
-  const branch = encodeURIComponent(env.GH_BRANCH || 'main')
+  // 不在 GitHub API 查询参数里加 branch 过滤。workflow_dispatch 的运行记录在 fork、
+  // 默认分支变更和部署平台分支配置不一致时可能无法被 branch 参数稳定命中；
+  // 这里拉取最近的手动更新运行,再用 triggerId/时间窗口在本地精确匹配。
   const url = repoApiUrl(
     env,
-    `/actions/workflows/${UPDATE_WORKFLOW}/runs?event=workflow_dispatch&branch=${branch}&per_page=5`,
+    `/actions/workflows/${UPDATE_WORKFLOW}/runs?event=workflow_dispatch&per_page=20`,
   )
   const response = await fetch(url, {
     headers: githubHeaders(env, url),
@@ -369,7 +406,7 @@ async function fetchWorkflowRuns(env: Env, signal: AbortSignal): Promise<GitHubW
   })
 
   if (!response.ok) {
-    throw createGitHubError(`GitHub workflow runs failed: ${response.status}`, response.status)
+    throw await createGitHubResponseError(response, 'GitHub workflow runs')
   }
 
   const data = (await response.json()) as { workflow_runs?: GitHubWorkflowRun[] }
@@ -462,7 +499,15 @@ export async function getUpdateStatus(
     return response
   } catch (error) {
     const mapped = mapGitHubError(error)
-    return jsonResponse({ ok: false, error: mapped.error, message: mapped.error }, mapped.status)
+    return jsonResponse(
+      {
+        ok: false,
+        error: mapped.error,
+        message: mapped.error,
+        detail: mapped.detail,
+      },
+      mapped.status,
+    )
   } finally {
     cleanup()
   }
@@ -495,7 +540,7 @@ export async function triggerUpdate(
 
   const proxyCheck = validateGitHubProxy(githubProxy || env.GITHUB_PROXY)
   if (!proxyCheck.ok) {
-    return jsonResponse({ error: 'GitHub 代理必须是公网 http(s) URL' }, 400)
+    return jsonResponse({ error: 'GitHub 代理必须是公网 https URL' }, 400)
   }
   const normalizedTargetTag = targetTag?.trim() || ''
   if (normalizedTargetTag && !isSemver(normalizedTargetTag)) {

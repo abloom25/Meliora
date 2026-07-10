@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isPublicHttpUrl } from '../core/types'
+import { isPublicHttpUrl, isPublicHttpsUrl } from '../core/types'
 
 describe('isPublicHttpUrl', () => {
   it('rejects localhost and private address literals', () => {
@@ -17,5 +17,11 @@ describe('isPublicHttpUrl', () => {
   it('accepts public http and https URLs', () => {
     expect(isPublicHttpUrl('https://api.example.com')).toBe(true)
     expect(isPublicHttpUrl('http://93.184.216.34')).toBe(true)
+  })
+
+  it('accepts only public https URLs for server-side outbound integrations', () => {
+    expect(isPublicHttpsUrl('https://api.example.com')).toBe(true)
+    expect(isPublicHttpsUrl('http://api.example.com')).toBe(false)
+    expect(isPublicHttpsUrl('https://127.0.0.1')).toBe(false)
   })
 })

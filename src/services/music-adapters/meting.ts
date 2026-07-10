@@ -4,12 +4,20 @@ import { mapMetingTrack } from '../../utils/tracks'
 import type { MusicProviderAdapter, MusicProviderContext } from './types'
 
 function buildMetingPlaylistUrl(apiEndpoint: string, playlist: MetingPlaylistConfig): string {
-  const params = new URLSearchParams({
-    server: playlist.server,
-    type: 'playlist',
-    id: playlist.playlistId,
-  })
-  return `${apiEndpoint}?${params.toString()}`
+  const baseUrl = 'https://meliora.local'
+  const isAbsoluteUrl = /^[a-z][a-z\d+.-]*:/i.test(apiEndpoint)
+  const isProtocolRelativeUrl = apiEndpoint.startsWith('//')
+  const url = new URL(apiEndpoint, baseUrl)
+
+  url.searchParams.set('server', playlist.server)
+  url.searchParams.set('type', 'playlist')
+  url.searchParams.set('id', playlist.playlistId)
+
+  if (isAbsoluteUrl) return url.toString()
+  if (isProtocolRelativeUrl) return `//${url.host}${url.pathname}${url.search}${url.hash}`
+
+  const pathname = apiEndpoint.startsWith('/') ? url.pathname : url.pathname.replace(/^\//, '')
+  return `${pathname}${url.search}${url.hash}`
 }
 
 async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {

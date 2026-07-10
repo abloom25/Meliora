@@ -3,6 +3,7 @@
 const CACHE_NAME = '__SW_CACHE_NAME__'
 const CACHE_PREFIX = 'meliora-shell-'
 const APP_SHELL = ['./', './manifest.webmanifest', './favicon.svg', './pwa-icon.svg']
+const MUTABLE_ASSET_PATTERN = /^\/(?:music\/|icon\.(?:png|jpe?g|webp|ico)$)/i
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -43,6 +44,12 @@ self.addEventListener('fetch', (event) => {
   // 缓存优先策略会让退出登录后的 /api/auth 仍返回旧的 { authenticated: true },
   // 刷新页面后重新进入已登录态,导致退出登录在生产环境失效。
   if (requestUrl.pathname.startsWith('/api/')) return
+  // 后台上传的图标、封面和本地音乐使用稳定 URL。它们不是 Vite hash 资源,
+  // 缓存优先会让用户替换文件后仍看到旧内容,所以直接交给网络和浏览器缓存策略。
+  if (MUTABLE_ASSET_PATTERN.test(requestUrl.pathname)) return
+  // 非构建产物图片也经常使用稳定 URL(例如 /covers/foo.jpg)。这些图片数量可能随歌单增长,
+  // 不进入 SW Cache Storage,避免大歌单滚动/切歌后长期积累上千张封面。
+  if (event.request.destination === 'image' && !requestUrl.pathname.startsWith('/assets/')) return
 
   if (event.request.mode === 'navigate') {
     event.respondWith(

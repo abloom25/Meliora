@@ -1,4 +1,5 @@
 export interface PublicEnvLike {
+  GH_TOKEN?: string
   GH_REPO?: string
   CONFIG_ENCRYPTION_KEY?: string
   DEVELOPMENT?: string
@@ -44,6 +45,11 @@ export function isValidGitHubRepo(value: string | undefined): boolean {
   return true
 }
 
+export function isUsableGitHubToken(value: string | undefined): boolean {
+  const token = value?.trim() || ''
+  return Boolean(token && !token.toLowerCase().startsWith('placeholder'))
+}
+
 export function validateEncryptionKey(env: PublicEnvLike): KeyValidation {
   if (isDevelopmentMode(env)) return { ok: true }
   const key = env.CONFIG_ENCRYPTION_KEY || ''
@@ -74,6 +80,9 @@ export function validatePublicEnv(env: PublicEnvLike): EnvValidation {
   if (isDevelopmentMode(env)) return { ok: true, errors: [] }
 
   const errors: string[] = []
+  if (!isUsableGitHubToken(env.GH_TOKEN)) {
+    errors.push('未设置可用 GH_TOKEN,请在部署平台配置 GitHub Token 后再初始化')
+  }
   if (!isValidGitHubRepo(env.GH_REPO)) {
     errors.push('GH_REPO 格式无效,请使用 owner/repo 格式,例如 abloom25/Meliora')
   }

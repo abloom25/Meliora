@@ -65,6 +65,11 @@ function mockProgressRect(range: HTMLElement) {
   })
 }
 
+async function waitPreviewFrame() {
+  await new Promise((resolve) => requestAnimationFrame(resolve))
+  await nextTick()
+}
+
 describe('PlayerControls lyric preview', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -90,7 +95,7 @@ describe('PlayerControls lyric preview', () => {
       clientX: 50,
       clientY: 120,
     })
-    await nextTick()
+    await waitPreviewFrame()
 
     expect(document.body.querySelector('.lyric-preview-bubble')).toBeNull()
 
@@ -112,7 +117,7 @@ describe('PlayerControls lyric preview', () => {
       clientX: 50,
       clientY: 120,
     })
-    await nextTick()
+    await waitPreviewFrame()
 
     const preview = document.body.querySelector('.lyric-preview-bubble')
     expect(preview?.textContent).toContain('0:25')
@@ -121,6 +126,29 @@ describe('PlayerControls lyric preview', () => {
 
     dispatchPointerEvent(range.element, 'pointerleave', {})
     await nextTick()
+
+    expect(document.body.querySelector('.lyric-preview-bubble')).toBeNull()
+
+    wrapper.unmount()
+  })
+
+  it('does not show a stale lyric preview after the pointer leaves before the next frame', async () => {
+    const store = usePlayerStore()
+    store.duration = 100
+    store.currentTime = 0
+    store.settings.progressLyricPreview = true
+
+    const wrapper = mountProgressControls()
+
+    const range = wrapper.get<HTMLElement>('.range')
+    mockProgressRect(range.element)
+
+    dispatchPointerEvent(range.element, 'pointermove', {
+      clientX: 50,
+      clientY: 120,
+    })
+    dispatchPointerEvent(range.element, 'pointerleave', {})
+    await waitPreviewFrame()
 
     expect(document.body.querySelector('.lyric-preview-bubble')).toBeNull()
 
@@ -142,13 +170,13 @@ describe('PlayerControls lyric preview', () => {
       clientX: 50,
       clientY: 120,
     })
-    await nextTick()
+    await waitPreviewFrame()
 
     dispatchPointerEvent(range.element, 'pointermove', {
       clientX: 90,
       clientY: 120,
     })
-    await nextTick()
+    await waitPreviewFrame()
 
     const forwardPreview = document.body.querySelector('.lyric-preview-bubble')
     expect(forwardPreview?.classList.contains('scroll-forward')).toBe(true)
@@ -157,7 +185,7 @@ describe('PlayerControls lyric preview', () => {
       clientX: 20,
       clientY: 120,
     })
-    await nextTick()
+    await waitPreviewFrame()
 
     const backwardPreview = document.body.querySelector('.lyric-preview-bubble')
     expect(backwardPreview?.classList.contains('scroll-backward')).toBe(true)
@@ -180,7 +208,7 @@ describe('PlayerControls lyric preview', () => {
       clientX: 50,
       clientY: 120,
     })
-    await nextTick()
+    await waitPreviewFrame()
     expect(document.body.querySelector('.lyric-preview-bubble')).not.toBeNull()
 
     await wrapper.setProps({ previewEnabled: false })
@@ -205,7 +233,7 @@ describe('PlayerControls lyric preview', () => {
       clientX: 50,
       clientY: 120,
     })
-    await nextTick()
+    await waitPreviewFrame()
     expect(document.body.querySelector('.lyric-preview-bubble')).toBeNull()
 
     await wrapper.setProps({ lyricPreview })
@@ -237,7 +265,7 @@ describe('PlayerControls lyric preview', () => {
       clientY: 120,
       pointerType: 'touch',
     })
-    await nextTick()
+    await waitPreviewFrame()
 
     expect(document.body.querySelector('.lyric-preview-bubble')).toBeNull()
 
@@ -326,7 +354,7 @@ describe('PlayerControls lyric preview', () => {
       clientX: 50,
       clientY: 120,
     })
-    await nextTick()
+    await waitPreviewFrame()
     expect(document.body.querySelector('.lyric-preview-bubble')).not.toBeNull()
 
     dispatchPointerEvent(range.element, 'pointerdown', {

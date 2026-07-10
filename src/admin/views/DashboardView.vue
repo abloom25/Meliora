@@ -16,6 +16,7 @@
   import SecurityEditor from '../components/SecurityEditor.vue'
   import ConfigTransferView from './ConfigTransferView.vue'
   import AboutView from './AboutView.vue'
+  import { useTimedMessage } from '../composables/useTimedMessage'
 
   const router = useRouter()
   const { logout } = useAdminAuth()
@@ -24,8 +25,7 @@
   const loading = ref(true)
   const saving = ref(false)
   const activeTab = ref('site')
-  const message = ref('')
-  const messageType = ref<'success' | 'error' | ''>('')
+  const { message, messageType, showMessage, clearMessage } = useTimedMessage()
   const showSaveConfirm = ref(false)
   const showExitConfirm = ref(false)
   const showRevertConfirm = ref(false)
@@ -100,20 +100,6 @@
     }
     loading.value = false
   })
-
-  function showMessage(text: string, type: 'success' | 'error') {
-    message.value = text
-    messageType.value = type
-    window.setTimeout(() => {
-      message.value = ''
-      messageType.value = ''
-    }, 3500)
-  }
-
-  function clearMessage() {
-    message.value = ''
-    messageType.value = ''
-  }
 
   function requestSave() {
     if (!config.value || saving.value) return

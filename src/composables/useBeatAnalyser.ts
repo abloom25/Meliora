@@ -70,6 +70,33 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   let visibilityListenerRegistered = false
   let isUnmounted = false
 
+  function disconnectAnalysisGraph() {
+    for (const { source, target } of connectedSources) {
+      try {
+        source.disconnect(target)
+      } catch {
+        // The source may already have been disconnected by browser cleanup.
+      }
+    }
+    connectedSources.length = 0
+    for (const filter of eqFilters) {
+      try {
+        filter.disconnect()
+      } catch {
+        // Ignore disconnect errors during teardown.
+      }
+    }
+    eqFilters = []
+    try {
+      analyser?.disconnect()
+    } catch {
+      // Ignore disconnect errors during teardown.
+    }
+    analyser = null
+    frequencyData = null
+    previousFrequencyData = null
+  }
+
   function stopBeatAnalysis() {
     window.cancelAnimationFrame(beatFrame)
     beatFrame = 0
@@ -246,6 +273,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
         }
         const eqInput = eqFilters[0]
         const eqOutput = eqFilters[eqFilters.length - 1]
+        let taintedSourceDetected = false
         players.forEach((audio) => {
           let source = mediaSourceMap.get(audio)
           try {
@@ -262,12 +290,18 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
             if (isTainted) {
               // 音频源被 CORS 污染，无法通过 Web Audio API 读取数据
               // 通知调用方降级重建 audio(去掉 crossOrigin)，牺牲节拍分析保播放
+              taintedSourceDetected = true
               options.onTainted?.(audio)
             } else {
               console.warn('[useAudioPlayer] createMediaElementSource failed', error)
             }
           }
         })
+        if (taintedSourceDetected) {
+          stopBeatAnalysis()
+          disconnectAnalysisGraph()
+          return
+        }
         eqOutput.connect(analyser)
         analyser.connect(audioContext.destination)
         frequencyData = new Uint8Array(analyser.frequencyBinCount)
@@ -293,28 +327,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   onBeforeUnmount(() => {
     isUnmounted = true
     stopBeatAnalysis()
-    for (const { source, target } of connectedSources) {
-      try {
-        source.disconnect(target)
-      } catch {
-        // The source may already have been disconnected by browser cleanup.
-      }
-    }
-    connectedSources.length = 0
-    for (const filter of eqFilters) {
-      try {
-        filter.disconnect()
-      } catch {
-        // Ignore disconnect errors during teardown.
-      }
-    }
-    eqFilters = []
-    try {
-      analyser?.disconnect()
-    } catch {
-      // Ignore disconnect errors during teardown.
-    }
-    analyser = null
+    disconnectAnalysisGraph()
     // 挂起共享 AudioContext 释放音频硬件资源；SPA 生命周期内不 close，
     // 后续 startBeatAnalysis 可通过 resume() 恢复。
     if (sharedAudioContext?.state === 'running') {

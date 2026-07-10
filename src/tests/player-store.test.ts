@@ -297,6 +297,22 @@ describe('player store peekNext / peekPrevious', () => {
     expect(store.previousTrack('1')?.id).toBe('1')
     expect(store.currentTrackId).toBe('1')
   })
+
+  it('keeps the existing queue instance and version when stepping through the current queue', () => {
+    const store = usePlayerStore()
+    store.setTracks(tracks)
+    store.selectTrack(tracks[0]!, tracks)
+    const queue = store.queue
+    const queueVersion = store.queueVersion
+
+    expect(store.nextTrack()?.id).toBe('2')
+    expect(store.queue).toBe(queue)
+    expect(store.queueVersion).toBe(queueVersion)
+
+    expect(store.previousTrack()?.id).toBe('1')
+    expect(store.queue).toBe(queue)
+    expect(store.queueVersion).toBe(queueVersion)
+  })
 })
 
 describe('player settings migration', () => {

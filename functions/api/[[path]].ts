@@ -16,5 +16,7 @@ export const onRequest = async (context: PagesFunctionContext): Promise<Response
     DEVELOPMENT: context.env.DEVELOPMENT || '',
     CONFIG_ENCRYPTION_KEY: context.env.CONFIG_ENCRYPTION_KEY || '',
   }
-  return handleRequest(context.request, env)
+  return handleRequest(context.request, env, {
+    clientIp: context.request.headers.get('CF-Connecting-IP') || undefined,
+  })
 }

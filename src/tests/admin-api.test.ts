@@ -235,4 +235,26 @@ describe('admin-api', () => {
       expect.objectContaining({ credentials: 'include' }),
     )
   })
+
+  it('prefers backend detail when update status lookup fails', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse(
+        {
+          error: 'GitHub 鉴权失败',
+          message: 'GitHub 鉴权失败',
+          detail: 'GitHub workflow runs failed: 403: Resource not accessible',
+        },
+        { status: 502 },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { fetchUpdateStatus } = await import('../admin/services/admin-api')
+    const result = await fetchUpdateStatus('2026-06-30T10:00:00.000Z', 'dispatch-123')
+
+    expect(result).toEqual({
+      ok: false,
+      error: 'GitHub workflow runs failed: 403: Resource not accessible',
+    })
+  })
 })

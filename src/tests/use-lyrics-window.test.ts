@@ -8,11 +8,11 @@ vi.mock('../utils/browser', () => ({
   supportsDocumentPictureInPicture: vi.fn(() => false),
 }))
 
-function createPopupWindow(): Window {
+function createPopupWindow(readyState: DocumentReadyState = 'complete'): Window {
   const popupDocument = document.implementation.createHTMLDocument('Meliora lyrics')
   Object.defineProperty(popupDocument, 'readyState', {
     configurable: true,
-    value: 'complete',
+    value: readyState,
   })
   return {
     closed: false,
@@ -25,8 +25,7 @@ function createPopupWindow(): Window {
   } as unknown as Window
 }
 
-function mountLyricsWindowHarness() {
-  const popup = createPopupWindow()
+function mountLyricsWindowHarness(popup = createPopupWindow()) {
   vi.spyOn(window, 'open').mockReturnValue(popup)
 
   const track = reactive<Track>({
@@ -137,5 +136,18 @@ describe('useLyricsWindow', () => {
 
     expect(popup.document.querySelector('.translation')).toBeNull()
     wrapper.unmount()
+  })
+
+  it('closes a popup that is still opening when the composable unmounts', async () => {
+    const popup = createPopupWindow('loading')
+    const { api, wrapper } = mountLyricsWindowHarness(popup)
+
+    const opening = api.toggleLyricsWindow()
+    await nextTick()
+    wrapper.unmount()
+    await vi.runOnlyPendingTimersAsync()
+    await opening
+
+    expect(popup.close).toHaveBeenCalled()
   })
 })

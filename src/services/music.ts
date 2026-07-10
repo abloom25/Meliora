@@ -31,6 +31,7 @@ const DEFAULT_ADAPTERS: MusicAdapterRegistry = {
 }
 
 const MUSIC_SOURCE_TIMEOUT_MS = 8000
+const MUSIC_SOURCE_CONCURRENCY = 3
 
 interface ConfiguredSource {
   load(config: PublicMusicConfig): Promise<Track[]>
@@ -61,6 +62,40 @@ function createConfiguredSources(
   ]
 }
 
+async function settleConfiguredSources(
+  sources: ConfiguredSource[],
+  config: PublicMusicConfig,
+  concurrency: number,
+): Promise<PromiseSettledResult<Track[]>[]> {
+  const settled: PromiseSettledResult<Track[]>[] = new Array(sources.length)
+  let nextSourceIndex = 0
+
+  async function worker() {
+    while (nextSourceIndex < sources.length) {
+      const sourceIndex = nextSourceIndex
+      nextSourceIndex += 1
+      const source = sources[sourceIndex]
+      if (!source) continue
+
+      try {
+        settled[sourceIndex] = {
+          status: 'fulfilled',
+          value: await source.load(config),
+        }
+      } catch (reason) {
+        settled[sourceIndex] = {
+          status: 'rejected',
+          reason,
+        }
+      }
+    }
+  }
+
+  const workerCount = Math.min(Math.max(1, concurrency), sources.length)
+  await Promise.all(Array.from({ length: workerCount }, () => worker()))
+  return settled
+}
+
 export async function loadConfiguredTracks(
   config: PublicMusicConfig,
   options: LoadConfiguredTracksOptions = {},
@@ -70,7 +105,7 @@ export async function loadConfiguredTracks(
     ...options.adapters,
   }
   const sources = createConfiguredSources(config, adapters)
-  const settled = await Promise.allSettled(sources.map((source) => source.load(config)))
+  const settled = await settleConfiguredSources(sources, config, MUSIC_SOURCE_CONCURRENCY)
   const remoteTracks: Track[] = []
   let failedSources = 0
 

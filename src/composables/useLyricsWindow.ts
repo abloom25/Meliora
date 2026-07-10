@@ -64,11 +64,13 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
   })
   const isOpen = ref(false)
   let lyricsWindow: Window | null = null
+  let openingWindow: Window | null = null
   let cachedNodes: CachedNodes | null = null
   let closedPollTimer = 0
   let readyCheckTimer = 0
   let resolveReadyCheck: (() => void) | null = null
   let isToggling = false
+  let isDisposed = false
   let windowCloseListeners: Array<() => void> = []
 
   function setSnapshot(value: LyricsSnapshot) {
@@ -342,7 +344,12 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     // render() 开头通过 isWindowClosed 守卫确保不会在已销毁窗口上操作 DOM。
     const win = window.open('', 'meliora-lyrics', 'popup,width=430,height=600,resizable=yes')
     if (!win) throw new Error('Lyrics window was blocked')
-    await createDocument(win)
+    openingWindow = win
+    try {
+      await createDocument(win)
+    } finally {
+      if (openingWindow === win) openingWindow = null
+    }
     return win
   }
 
@@ -352,8 +359,21 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     ).documentPictureInPicture!
     const win = await pictureInPicture.requestWindow({ width: 430, height: 600 })
     // Document PiP 窗口的 document 是空白的,需要写入内容
-    await createDocument(win)
+    openingWindow = win
+    try {
+      await createDocument(win)
+    } finally {
+      if (openingWindow === win) openingWindow = null
+    }
     return win
+  }
+
+  function closeWindowQuietly(target: Window) {
+    try {
+      target.close()
+    } catch {
+      // 窗口可能已销毁
+    }
   }
 
   async function toggleLyricsWindow() {
@@ -362,11 +382,7 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     try {
       if (lyricsWindow) {
         if (!isWindowClosed(lyricsWindow)) {
-          try {
-            lyricsWindow.close()
-          } catch {
-            // 窗口可能已销毁
-          }
+          closeWindowQuietly(lyricsWindow)
           teardownWindow(lyricsWindow)
           return
         }
@@ -380,6 +396,11 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
         win = await openViaWindowOpen()
       }
 
+      if (isDisposed) {
+        closeWindowQuietly(win)
+        teardownWindow(win)
+        return
+      }
       lyricsWindow = win
       isOpen.value = true
       render()
@@ -388,14 +409,25 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     }
   }
 
-  watch([currentTrack, isPlaying], render, { deep: true })
+  watch(
+    [
+      () => currentTrack.value?.id,
+      () => currentTrack.value?.title,
+      () => currentTrack.value?.artist,
+      () => currentTrack.value?.cover,
+      isPlaying,
+    ],
+    render,
+  )
   onBeforeUnmount(() => {
+    isDisposed = true
+    if (openingWindow) {
+      closeWindowQuietly(openingWindow)
+      teardownWindow(openingWindow)
+      openingWindow = null
+    }
     if (lyricsWindow) {
-      try {
-        lyricsWindow.close()
-      } catch {
-        // 窗口可能已销毁
-      }
+      closeWindowQuietly(lyricsWindow)
       teardownWindow(lyricsWindow)
     }
   })

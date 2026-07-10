@@ -1,6 +1,8 @@
 import type { MusicConfig } from '../../types/music'
 import { validateMusicConfig } from '../../../shared/config-schema'
 import { markAdminUnauthenticated } from '../composables/useAdminAuth'
+import { fetchWithCsrf } from '../utils/csrf'
+import { UPLOAD_LIMITS } from '../../../shared/constants'
 
 export interface SaveResult {
   ok: boolean
@@ -31,9 +33,61 @@ export interface DeleteFilesResult {
   error?: string
 }
 
-export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
-export const MAX_UPLOAD_BASE64_LENGTH = Math.ceil(MAX_UPLOAD_BYTES / 3) * 4
-export const MAX_UPLOAD_SIZE_LABEL = '25MB'
+export const MAX_UPLOAD_BYTES = UPLOAD_LIMITS.MAX_BYTES
+export const MAX_UPLOAD_BASE64_LENGTH = UPLOAD_LIMITS.MAX_BASE64_LENGTH
+export const MAX_UPLOAD_SIZE_LABEL = UPLOAD_LIMITS.MAX_SIZE_LABEL
+
+interface ApiErrorPayload {
+  error?: string
+  detail?: string
+  details?: string[]
+  message?: string
+}
+
+type AdminRequestResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; data: Partial<T> & ApiErrorPayload; error: string }
+
+async function requestAdminJson<T extends object>(
+  url: string,
+  init: RequestInit,
+  options: {
+    fallbackError: string
+    abortedError?: string
+    markUnauthenticated?: boolean
+  },
+): Promise<AdminRequestResult<T>> {
+  try {
+    const response = await fetchWithCsrf(url, { ...init, credentials: 'include' })
+    const data = (await response.json().catch(() => ({}))) as Partial<T> & ApiErrorPayload
+    if (response.ok) return { ok: true, data: data as T }
+
+    if (
+      options.markUnauthenticated !== false &&
+      (response.status === 401 || response.status === 403)
+    ) {
+      markAdminUnauthenticated()
+      return { ok: false, data, error: '登录已过期,请重新登录' }
+    }
+
+    return {
+      ok: false,
+      data,
+      error:
+        data.details?.join('; ') ||
+        data.detail ||
+        data.error ||
+        data.message ||
+        options.fallbackError,
+    }
+  } catch (error) {
+    const message =
+      error instanceof DOMException && error.name === 'AbortError'
+        ? options.abortedError || '请求已取消'
+        : '网络错误'
+    return { ok: false, data: {}, error: message }
+  }
+}
 
 export interface ApiPlaylistCheck {
   server: string
@@ -53,24 +107,12 @@ export interface MusicApiTestResult {
 }
 
 export async function fetchConfig(): Promise<MusicConfig | null> {
-  try {
-    const response = await fetch('/api/config', { credentials: 'include' })
-    if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
-        markAdminUnauthenticated()
-      }
-      return null
-    }
-    return (await response.json()) as MusicConfig
-  } catch {
-    return null
-  }
-}
-
-function markUnauthenticatedResponse(response: Response): boolean {
-  if (response.status !== 401 && response.status !== 403) return false
-  markAdminUnauthenticated()
-  return true
+  const result = await requestAdminJson<MusicConfig>(
+    '/api/config',
+    {},
+    { fallbackError: '配置加载失败' },
+  )
+  return result.ok ? result.data : null
 }
 
 export async function saveConfig(config: MusicConfig): Promise<SaveResult> {
@@ -79,39 +121,27 @@ export async function saveConfig(config: MusicConfig): Promise<SaveResult> {
     return { ok: false, error: validation.errors.join('; ') }
   }
 
-  try {
-    const response = await fetch('/api/config', {
+  const result = await requestAdminJson<{ sha?: string }>(
+    '/api/config',
+    {
       method: 'PUT',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
-    })
-    if (!response.ok) {
-      if (markUnauthenticatedResponse(response)) {
-        return { ok: false, error: '登录已过期,请重新登录' }
-      }
-      const data = (await response.json().catch(() => ({}))) as {
-        error?: string
-        details?: string[]
-      }
+    },
+    { fallbackError: '保存失败' },
+  )
+  if (!result.ok) return { ok: false, error: result.error }
+
+  if (import.meta.env.DEV) {
+    const synced = await syncLocalGeneratedConfig(config)
+    if (!synced.ok) {
       return {
-        ok: false,
-        error: data.details?.join('; ') || data.error || '保存失败',
+        ok: true,
+        warning: `后端配置已保存,但本地播放器配置同步失败:${synced.error || '未知错误'}`,
       }
     }
-    if (import.meta.env.DEV) {
-      const synced = await syncLocalGeneratedConfig(config)
-      if (!synced.ok) {
-        return {
-          ok: true,
-          warning: `后端配置已保存,但本地播放器配置同步失败:${synced.error || '未知错误'}`,
-        }
-      }
-    }
-    return { ok: true }
-  } catch {
-    return { ok: false, error: '网络错误' }
   }
+  return { ok: true }
 }
 
 async function syncLocalGeneratedConfig(
@@ -137,115 +167,81 @@ async function syncLocalGeneratedConfig(
 }
 
 export async function uploadFile(path: string, content: string): Promise<UploadResult> {
-  try {
-    if (content.length > MAX_UPLOAD_BASE64_LENGTH) {
-      return { ok: false, error: `文件过大,最大 ${MAX_UPLOAD_SIZE_LABEL}` }
-    }
+  if (content.length > MAX_UPLOAD_BASE64_LENGTH) {
+    return { ok: false, error: `文件过大,最大 ${MAX_UPLOAD_SIZE_LABEL}` }
+  }
 
-    const response = await fetch('/api/upload', {
+  const result = await requestAdminJson<{ sha?: string; path?: string; local?: boolean }>(
+    '/api/upload',
+    {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path, content }),
-    })
-    if (!response.ok) {
-      if (markUnauthenticatedResponse(response)) {
-        return { ok: false, error: '登录已过期,请重新登录' }
-      }
-      const data = (await response.json().catch(() => ({}))) as { error?: string }
-      return { ok: false, error: data.error || '上传失败' }
-    }
-    const data = (await response.json()) as { sha?: string; path?: string; local?: boolean }
-    return { ok: true, sha: data.sha, path: data.path, local: data.local }
-  } catch {
-    return { ok: false, error: '网络错误' }
-  }
+    },
+    { fallbackError: '上传失败' },
+  )
+  if (!result.ok) return { ok: false, error: result.error }
+  return { ok: true, sha: result.data.sha, path: result.data.path, local: result.data.local }
 }
 
 export async function deleteFiles(paths: string[]): Promise<DeleteFilesResult> {
   if (paths.length === 0) return { ok: true, results: [] }
 
-  try {
-    const response = await fetch('/api/file', {
+  const request = await requestAdminJson<{ results?: DeleteFileResult[] }>(
+    '/api/file',
+    {
       method: 'DELETE',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ paths }),
-    })
-    const data = (await response.json().catch(() => ({}))) as {
-      error?: string
-      results?: DeleteFileResult[]
-    }
-    const results = Array.isArray(data.results) ? data.results : []
-    const failed = results.filter((item) => !item.deleted)
-
-    if (!response.ok) {
-      if (markUnauthenticatedResponse(response)) {
-        return { ok: false, results, error: '登录已过期,请重新登录' }
-      }
-      return { ok: false, results, error: data.error || '删除失败' }
-    }
-
-    if (results.length !== paths.length) {
-      return { ok: false, results, error: '删除结果数量异常,请刷新后重试' }
-    }
-
-    if (failed.length > 0) {
-      return {
-        ok: false,
-        results,
-        error: `部分文件删除失败: ${failed.map((item) => item.path).join(', ')}`,
-      }
-    }
-
-    return { ok: true, results }
-  } catch {
-    return { ok: false, results: [], error: '网络错误' }
+    },
+    { fallbackError: '删除失败' },
+  )
+  const results = Array.isArray(request.data.results) ? request.data.results : []
+  if (!request.ok) return { ok: false, results, error: request.error }
+  if (results.length !== paths.length) {
+    return { ok: false, results, error: '删除结果数量异常,请刷新后重试' }
   }
+  const failed = results.filter((item) => !item.deleted)
+  if (failed.length > 0) {
+    return {
+      ok: false,
+      results,
+      error: `部分文件删除失败: ${failed.map((item) => item.path).join(', ')}`,
+    }
+  }
+  return { ok: true, results }
 }
 
 export async function changePassword(current: string, next: string): Promise<SaveResult> {
-  try {
-    const response = await fetch('/api/change-password', {
+  const result = await requestAdminJson<{ success?: boolean }>(
+    '/api/change-password',
+    {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ current, next }),
-    })
-    if (!response.ok) {
-      if (markUnauthenticatedResponse(response)) {
-        return { ok: false, error: '登录已过期,请重新登录' }
-      }
-      const data = (await response.json().catch(() => ({}))) as { error?: string }
-      return { ok: false, error: data.error || '修改失败' }
-    }
-    return { ok: true }
-  } catch {
-    return { ok: false, error: '网络错误' }
-  }
+    },
+    { fallbackError: '修改失败' },
+  )
+  return result.ok ? { ok: true } : { ok: false, error: result.error }
 }
 
 export async function testMusicApi(
   config: MusicConfig,
 ): Promise<{ ok: boolean; data?: MusicApiTestResult; error?: string }> {
-  try {
-    const response = await fetch('/api/test-music-api', {
+  const result = await requestAdminJson<MusicApiTestResult>(
+    '/api/test-music-api',
+    {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
-    })
-    if (!response.ok) {
-      if (markUnauthenticatedResponse(response)) {
-        return { ok: false, error: '登录已过期,请重新登录' }
-      }
-      const data = (await response.json().catch(() => ({}))) as { error?: string }
-      return { ok: false, error: data.error || '测试失败' }
-    }
-    const data = (await response.json()) as MusicApiTestResult
-    return { ok: data.ok, data, error: data.ok ? undefined : '部分资源测试失败' }
-  } catch {
-    return { ok: false, error: '网络错误' }
+    },
+    { fallbackError: '测试失败' },
+  )
+  if (!result.ok) return { ok: false, error: result.error }
+  return {
+    ok: result.data.ok,
+    data: result.data,
+    error: result.data.ok ? undefined : '部分资源测试失败',
   }
 }
 
@@ -302,10 +298,10 @@ export async function checkUpdate(
   signal?: AbortSignal,
   options: { markUnauthenticated?: boolean } = {},
 ): Promise<{ ok: boolean; data?: UpdateInfo; error?: string }> {
-  try {
-    const response = await fetch('/api/check-update', {
+  const result = await requestAdminJson<UpdateInfo>(
+    '/api/check-update',
+    {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         current: currentVersion,
@@ -313,22 +309,14 @@ export async function checkUpdate(
         receivePrereleaseUpdates,
       }),
       signal,
-    })
-    if (!response.ok) {
-      if (options.markUnauthenticated !== false && markUnauthenticatedResponse(response)) {
-        return { ok: false, error: '登录已过期,请重新登录' }
-      }
-      const data = (await response.json().catch(() => ({}))) as { error?: string; detail?: string }
-      return { ok: false, error: data.detail || data.error || '检查失败' }
-    }
-    const data = (await response.json()) as UpdateInfo
-    return { ok: true, data }
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      return { ok: false, error: '检查已取消' }
-    }
-    return { ok: false, error: '网络错误' }
-  }
+    },
+    {
+      fallbackError: '检查失败',
+      abortedError: '检查已取消',
+      markUnauthenticated: options.markUnauthenticated,
+    },
+  )
+  return result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error }
 }
 
 export async function triggerUpdate(
@@ -336,37 +324,29 @@ export async function triggerUpdate(
   targetTag?: string,
   receivePrereleaseUpdates = false,
 ): Promise<SaveResult> {
-  try {
-    const response = await fetch('/api/update', {
+  const result = await requestAdminJson<{
+    message?: string
+    triggeredAt?: string
+    triggerId?: string
+  }>(
+    '/api/update',
+    {
       method: 'POST',
-      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         githubProxy: githubProxy?.trim() || '',
         targetTag: targetTag?.trim() || '',
         receivePrereleaseUpdates,
       }),
-    })
-    if (!response.ok) {
-      if (markUnauthenticatedResponse(response)) {
-        return { ok: false, error: '登录已过期,请重新登录' }
-      }
-      const data = (await response.json().catch(() => ({}))) as { error?: string; detail?: string }
-      return { ok: false, error: data.detail || data.error || '触发失败' }
-    }
-    const data = (await response.json().catch(() => ({}))) as {
-      message?: string
-      triggeredAt?: string
-      triggerId?: string
-    }
-    return {
-      ok: true,
-      message: data.message,
-      triggeredAt: data.triggeredAt,
-      triggerId: data.triggerId,
-    }
-  } catch {
-    return { ok: false, error: '网络错误' }
+    },
+    { fallbackError: '触发失败' },
+  )
+  if (!result.ok) return { ok: false, error: result.error }
+  return {
+    ok: true,
+    message: result.data.message,
+    triggeredAt: result.data.triggeredAt,
+    triggerId: result.data.triggerId,
   }
 }
 
@@ -375,31 +355,14 @@ export async function fetchUpdateStatus(
   triggerId?: string,
   signal?: AbortSignal,
 ): Promise<{ ok: boolean; data?: UpdateStatusInfo; error?: string }> {
-  try {
-    const params = new URLSearchParams()
-    if (since) params.set('since', since)
-    if (triggerId) params.set('triggerId', triggerId)
-    const response = await fetch(`/api/update/status${params.toString() ? `?${params}` : ''}`, {
-      credentials: 'include',
-      signal,
-    })
-    if (!response.ok) {
-      if (markUnauthenticatedResponse(response)) {
-        return { ok: false, error: '登录已过期,请重新登录' }
-      }
-      const data = (await response.json().catch(() => ({}))) as {
-        error?: string
-        message?: string
-        retryAfterSeconds?: number
-      }
-      return { ok: false, error: data.error || data.message || '获取更新状态失败' }
-    }
-    const data = (await response.json()) as UpdateStatusInfo
-    return { ok: true, data }
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      return { ok: false, error: '状态查询已取消' }
-    }
-    return { ok: false, error: '网络错误' }
-  }
+  const params = new URLSearchParams()
+  if (since) params.set('since', since)
+  if (triggerId) params.set('triggerId', triggerId)
+  const query = params.toString()
+  const result = await requestAdminJson<UpdateStatusInfo>(
+    `/api/update/status${query ? `?${query}` : ''}`,
+    { signal },
+    { fallbackError: '获取更新状态失败', abortedError: '状态查询已取消' },
+  )
+  return result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error }
 }

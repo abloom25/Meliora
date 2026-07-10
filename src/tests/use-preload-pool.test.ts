@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h, ref, type Ref } from 'vue'
 import { mount } from '@vue/test-utils'
-import { usePreloadPool } from '../composables/usePreloadPool'
+import { preloadCover, usePreloadPool } from '../composables/usePreloadPool'
 import { usePlayerStore } from '../stores/player'
 import type { PlayerSettings, Track } from '../types/music'
 
@@ -32,8 +32,49 @@ const defaultSettings: PlayerSettings = {
   settingsVersion: 1,
 }
 
+class MockImage {
+  static instances: MockImage[] = []
+  static decodeHandlers = new Map<string, () => Promise<void>>()
+
+  src = ''
+
+  constructor() {
+    MockImage.instances.push(this)
+  }
+
+  decode() {
+    return MockImage.decodeHandlers.get(this.src)?.() ?? Promise.resolve()
+  }
+}
+
+class MockImageWithoutDecode {
+  static instances: MockImageWithoutDecode[] = []
+
+  onload: (() => void) | null = null
+  onerror: (() => void) | null = null
+  private currentSrc = ''
+
+  constructor() {
+    MockImageWithoutDecode.instances.push(this)
+  }
+
+  get src() {
+    return this.currentSrc
+  }
+
+  set src(value: string) {
+    this.currentSrc = value
+    queueMicrotask(() => this.onload?.())
+  }
+}
+
 function createAudioMock(): HTMLAudioElement {
   return new Audio()
+}
+
+function resolveDeferred(callback: (() => void) | null) {
+  expect(callback).toBeTypeOf('function')
+  callback?.()
 }
 
 function mountPool(settings: Ref<PlayerSettings>) {
@@ -65,6 +106,9 @@ function mountPool(settings: Ref<PlayerSettings>) {
 describe('usePreloadPool', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    MockImage.instances = []
+    MockImage.decodeHandlers.clear()
+    vi.stubGlobal('Image', MockImage)
     vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined)
     vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined)
   })
@@ -146,5 +190,70 @@ describe('usePreloadPool', () => {
     expect(pool.preloadMessage.value).toBe('预加载歌曲暂时无法播放，当前播放不受影响')
     expect(pool.preloadMessage.value).not.toContain('已跳过')
     expect(store.currentTrackId).toBe('1')
+  })
+
+  it('skips a failed preloaded next track when predicting a manual next action', async () => {
+    const settings = ref({ ...defaultSettings })
+    const { pool, store } = mountPool(settings)
+    store.settings.playMode = 'loop'
+    store.selectTrack(tracks[0]!, tracks)
+
+    const ready = pool.loadSlot('next', tracks[1]!)
+    pool.preloadSlots.next.audio.dispatchEvent(new Event('error'))
+    await expect(ready).resolves.toBe(false)
+
+    expect(pool.predictNextTrack(true)?.id).toBe('3')
+  })
+
+  it('deduplicates concurrent cover preload requests for the same url', async () => {
+    const coverUrl = '/covers/inflight-dedupe.jpg'
+    let resolveDecode: (() => void) | null = null
+    MockImage.decodeHandlers.set(
+      coverUrl,
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDecode = resolve
+        }),
+    )
+
+    const first = preloadCover(coverUrl)
+    const second = preloadCover(coverUrl)
+
+    expect(second).toBe(first)
+    expect(MockImage.instances).toHaveLength(1)
+
+    resolveDeferred(resolveDecode)
+    await expect(first).resolves.toBeUndefined()
+  })
+
+  it('allows a failed cover preload to be retried later', async () => {
+    const coverUrl = '/covers/retry-after-failure.jpg'
+    const outcomes = [Promise.reject(new Error('decode failed')), Promise.resolve()]
+    MockImage.decodeHandlers.set(coverUrl, () => outcomes.shift() ?? Promise.resolve())
+
+    await expect(preloadCover(coverUrl)).resolves.toBeUndefined()
+    await expect(preloadCover(coverUrl)).resolves.toBeUndefined()
+
+    expect(MockImage.instances.map((image) => image.src)).toEqual([coverUrl, coverUrl])
+  })
+
+  it('falls back to image load events when decode is unavailable', async () => {
+    const coverUrl = '/covers/load-event-fallback.jpg'
+    MockImageWithoutDecode.instances = []
+    vi.stubGlobal('Image', MockImageWithoutDecode)
+
+    await expect(preloadCover(coverUrl)).resolves.toBeUndefined()
+
+    expect(MockImageWithoutDecode.instances.map((image) => image.src)).toEqual([coverUrl])
+  })
+
+  it('keeps the successful cover preload cache bounded by evicting old entries', async () => {
+    const coverUrls = Array.from({ length: 70 }, (_, index) => `/covers/bounded-${index}.jpg`)
+
+    await Promise.all(coverUrls.map((url) => preloadCover(url)))
+    await preloadCover(coverUrls[0]!)
+
+    expect(MockImage.instances).toHaveLength(71)
+    expect(MockImage.instances.at(-1)?.src).toBe(coverUrls[0])
   })
 })

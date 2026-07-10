@@ -1,6 +1,8 @@
 import { isDevelopmentMode, validateEncryptionKey, type Env } from './types'
 import { GitHubWriteError, readFile, writeFile, utf8ToBase64 } from './github'
 import { encryptString, decryptString, looksEncrypted } from './crypto'
+import { logSanitizedError } from './error-handler'
+import { AUTH_CONSTANTS } from '../../shared/constants'
 
 const ADMIN_PATH = 'public/admin.json'
 // PBKDF2 迭代次数:遵循 OWASP 当前建议(PBKDF2-HMAC-SHA-256 ≥ 600k)。
@@ -8,8 +10,21 @@ const ADMIN_PATH = 'public/admin.json'
 // 因此提升该常量向后兼容 —— 旧哈希仍按其存储次数验证,新设置/改密时使用更高的新次数。
 // 注意:此处的迭代次数仅用于管理员密码哈希,与 crypto.ts 中派生配置加密密钥的
 // PBKDF2 迭代次数相互独立(后者变更会令已加密配置不可解,不可随意调整)。
-const PBKDF2_ITERATIONS = 600000
-const MIN_PASSWORD_LENGTH = 8
+const PBKDF2_ITERATIONS = AUTH_CONSTANTS.PBKDF2_ITERATIONS
+const MIN_PASSWORD_LENGTH = AUTH_CONSTANTS.MIN_PASSWORD_LENGTH
+
+// 管理员数据结构
+export interface AdminData {
+  passwordHash?: string
+  tokenVersion?: number
+  role?: 'admin' | 'viewer'
+  createdAt?: number
+}
+
+const DEFAULT_ADMIN_DATA: AdminData = {
+  role: 'admin',
+  createdAt: Date.now(),
+}
 
 let localAdminCache: { passwordHash?: string; tokenVersion?: number } | null = null
 let localSetupPending = false
@@ -22,7 +37,7 @@ let localSetupPending = false
 // TTL 取 5s(而非更长的 30s):管理后台为低频流量,单次 dashboard 加载后即命中缓存,
 // 短 TTL 对 GitHub API 调用影响可忽略,却将跨实例撤销窗口缩到最小。
 // 跨实例无共享存储是 Edge 固有限制,彻底消除需 Durable Objects / KV。
-const TOKEN_VERSION_TTL_MS = 5_000
+const TOKEN_VERSION_TTL_MS = AUTH_CONSTANTS.TOKEN_VERSION_TTL
 let cachedTokenVersion: number | null = null
 let tokenVersionExpiresAt = 0
 
@@ -105,11 +120,6 @@ function timingSafeEqualString(a: string, b: string): boolean {
     result |= aBytes[i] ^ bBytes[i]
   }
   return result === 0
-}
-
-interface AdminData {
-  passwordHash?: string
-  tokenVersion?: number
 }
 
 async function readAdminData(env: Env): Promise<AdminData> {
@@ -217,7 +227,7 @@ export async function setupPassword(
       return { ok: false, error: '密码已初始化,请直接登录' }
     }
     const passwordHash = await hashPassword(password)
-    const initialData: AdminData = { passwordHash, tokenVersion: 0 }
+    const initialData: AdminData = { ...DEFAULT_ADMIN_DATA, passwordHash, tokenVersion: 0 }
     const result = await createAdminData(initialData, env)
     if (!result.ok) {
       return {
@@ -229,7 +239,7 @@ export async function setupPassword(
     tokenVersionExpiresAt = Date.now() + TOKEN_VERSION_TTL_MS
     return { ok: true }
   } catch (error) {
-    console.error('setupPassword failed:', error)
+    logSanitizedError('setupPassword', error)
     return { ok: false, error: '初始化失败,请稍后重试' }
   }
 }
@@ -261,7 +271,7 @@ export async function changePassword(
     if (error instanceof GitHubWriteError && (error.status === 409 || error.status === 422)) {
       return { ok: false, error: '管理员数据已被其他操作修改,请刷新后重试' }
     }
-    console.error('changePassword failed:', error)
+    logSanitizedError('changePassword', error)
     return { ok: false, error: '修改失败,请稍后重试' }
   }
 }

@@ -3,27 +3,14 @@
   import { changePassword } from '../services/admin-api'
   import BaseInput from '../../components/BaseInput.vue'
   import Toast from '../../components/Toast.vue'
+  import { AUTH_CONSTANTS } from '../../../shared/constants'
+  import { useTimedMessage } from '../composables/useTimedMessage'
 
   const currentPassword = ref('')
   const newPassword = ref('')
   const confirmPassword = ref('')
   const saving = ref(false)
-  const message = ref('')
-  const messageType = ref<'success' | 'error' | ''>('')
-
-  function showMessage(text: string, type: 'success' | 'error') {
-    message.value = text
-    messageType.value = type
-    window.setTimeout(() => {
-      message.value = ''
-      messageType.value = ''
-    }, 3500)
-  }
-
-  function clearMessage() {
-    message.value = ''
-    messageType.value = ''
-  }
+  const { message, messageType, showMessage, clearMessage } = useTimedMessage()
 
   async function submit() {
     if (saving.value) return
@@ -38,8 +25,8 @@
       return
     }
 
-    if (newPassword.value.length < 8) {
-      showMessage('新密码至少 8 位', 'error')
+    if (newPassword.value.length < AUTH_CONSTANTS.MIN_PASSWORD_LENGTH) {
+      showMessage(`新密码至少 ${AUTH_CONSTANTS.MIN_PASSWORD_LENGTH} 位`, 'error')
       return
     }
 
@@ -78,7 +65,7 @@
         <BaseInput
           v-model="newPassword"
           type="password"
-          placeholder="至少 8 位"
+          :placeholder="`至少 ${AUTH_CONSTANTS.MIN_PASSWORD_LENGTH} 位`"
           autocomplete="new-password"
         />
       </div>

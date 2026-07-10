@@ -12,6 +12,7 @@ import {
   type PreloadDirection,
   type PreloadSlot,
 } from './usePreloadPool'
+import { MEDIA_SESSION_ACTIONS } from '../../shared/constants'
 
 const CROSSFADE_DURATION = 650
 const FADE_OUT_DURATION = 180
@@ -64,6 +65,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   // 修复手动切歌时旧音频未及时衰减导致的叠放。
   // 计数器从 1 起,0 表示"无动画/已 invalidate"。
   const gainAnimations = new WeakMap<HTMLAudioElement, number>()
+  const gainAnimationFrames = new Set<number>()
   let switchAbortController: AbortController | null = null
   const pendingPlayerTimeouts = new Set<number>()
   // 当 active audio 还没有有效 duration 时，记录用户请求的 seek 时间，
@@ -262,6 +264,28 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     gainAnimations.set(audio, 0)
   }
 
+  function clearGainAnimationFrames() {
+    // 创建副本以避免在迭代过程中修改集合
+    const framesToCancel = Array.from(gainAnimationFrames)
+    for (const frame of framesToCancel) {
+      try {
+        window.cancelAnimationFrame(frame)
+      } catch (error) {
+        // 忽略无效的 frame ID，防止清理过程本身出错
+        console.warn('Failed to cancel animation frame:', error)
+      }
+    }
+    gainAnimationFrames.clear()
+  }
+
+  function requestGainAnimationFrame(callback: FrameRequestCallback) {
+    const frame = window.requestAnimationFrame((now) => {
+      gainAnimationFrames.delete(frame)
+      callback(now)
+    })
+    gainAnimationFrames.add(frame)
+  }
+
   function animateGain(
     audios: HTMLAudioElement[],
     updaters: Array<(eased: number) => void>,
@@ -293,7 +317,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
           resolve()
           return
         }
-        window.requestAnimationFrame(step)
+        requestGainAnimationFrame(step)
       }
 
       if (document.hidden) {
@@ -301,7 +325,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         resolve()
         return
       }
-      window.requestAnimationFrame(step)
+      requestGainAnimationFrame(step)
     })
   }
 
@@ -675,20 +699,15 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       return
     }
     const queue = store.queue
-    const candidates: Track[] = []
     for (let offset = 1; offset <= queue.length; offset += 1) {
       const index = (store.currentIndex - offset + queue.length) % queue.length
       const candidate = queue[index]
-      if (candidate && !failedTrackIds.has(candidate.id)) {
-        candidates.push(candidate)
-      }
-    }
-    for (const track of candidates) {
-      const switched = await switchToTrack(track, queue, {
+      if (!candidate || failedTrackIds.has(candidate.id)) continue
+      const switched = await switchToTrack(candidate, queue, {
         shouldPlay: isPlaying.value,
         direction: 'previous',
         waitForReady: false,
-        updateStore: () => store.previousTrack(track.id),
+        updateStore: () => store.previousTrack(candidate.id),
       })
       if (switched) return
     }
@@ -871,16 +890,6 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   }
   mountActiveAudioForIOS()
 
-  const MEDIA_SESSION_ACTIONS: MediaSessionAction[] = [
-    'play',
-    'pause',
-    'previoustrack',
-    'nexttrack',
-    'seekto',
-    'seekbackward',
-    'seekforward',
-  ]
-
   // Safari 15-16 对部分 MediaSessionAction 不支持,setActionHandler 会抛 TypeError,
   // 用统一包装函数兜底,避免初始化阶段整体失败。
   function safeSetActionHandler(
@@ -911,30 +920,78 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   }
 
   onBeforeUnmount(() => {
-    switchAbortController?.abort()
-    switchAbortController = null
-    for (const timeout of pendingPlayerTimeouts) window.clearTimeout(timeout)
-    pendingPlayerTimeouts.clear()
-    stopBeatAnalysis()
-    for (const audio of players) cancelGainAnimation(audio)
-    for (const { audio, type, listener } of audioListeners) {
-      audio.removeEventListener(type, listener)
-    }
-    audioListeners.length = 0
-    for (const audio of players) {
-      audio.pause()
-      audio.src = ''
-    }
-    iosAudioHost?.remove()
-    iosAudioHost = null
-    if ('mediaSession' in navigator) {
-      for (const action of MEDIA_SESSION_ACTIONS) {
+    try {
+      // 清理 AbortController
+      switchAbortController?.abort()
+      switchAbortController = null
+
+      // 清理所有挂起的 timeout
+      const timeoutsToClear = Array.from(pendingPlayerTimeouts)
+      for (const timeout of timeoutsToClear) {
         try {
-          navigator.mediaSession.setActionHandler(action, null)
-        } catch {
-          // 某些浏览器对部分 action 不支持，setActionHandler(action, null) 会抛错，忽略即可。
+          window.clearTimeout(timeout)
+        } catch (error) {
+          console.warn('Failed to clear timeout:', error)
         }
       }
+      pendingPlayerTimeouts.clear()
+
+      // 停止节拍分析
+      stopBeatAnalysis()
+
+      // 清理音频增益动画
+      for (const audio of players) {
+        try {
+          cancelGainAnimation(audio)
+        } catch (error) {
+          console.warn('Failed to cancel gain animation for audio:', error)
+        }
+      }
+
+      // 清理所有动画帧
+      clearGainAnimationFrames()
+
+      // 清理事件监听器
+      const listenersToRemove = Array.from(audioListeners)
+      for (const { audio, type, listener } of listenersToRemove) {
+        try {
+          audio.removeEventListener(type, listener)
+        } catch (error) {
+          console.warn(`Failed to remove ${type} event listener:`, error)
+        }
+      }
+      audioListeners.length = 0
+
+      // 清理音频元素
+      for (const audio of players) {
+        try {
+          audio.pause()
+          audio.src = ''
+        } catch (error) {
+          console.warn('Failed to cleanup audio element:', error)
+        }
+      }
+
+      // 清理 iOS 音频宿主
+      try {
+        iosAudioHost?.remove()
+      } catch (error) {
+        console.warn('Failed to remove iOS audio host:', error)
+      }
+      iosAudioHost = null
+
+      // 清理 Media Session
+      if ('mediaSession' in navigator) {
+        for (const action of MEDIA_SESSION_ACTIONS) {
+          try {
+            navigator.mediaSession.setActionHandler(action, null)
+          } catch {
+            // 某些浏览器对部分 action 不支持，setActionHandler(action, null) 会抛错，忽略即可。
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error during cleanup:', error)
     }
   })
 
