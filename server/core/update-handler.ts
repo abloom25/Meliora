@@ -152,6 +152,31 @@ async function fetchLatestRelease(
   return (await response.json()) as GitHubRelease
 }
 
+async function fetchReleaseByTag(
+  tagName: string,
+  env: Env,
+  proxy: string | undefined,
+  signal: AbortSignal,
+): Promise<GitHubRelease | null> {
+  const encodedTag = encodeURIComponent(tagName)
+  const url = githubUrl(`/repos/${UPSTREAM_REPO}/releases/tags/${encodedTag}`, proxy)
+  const response = await fetch(url, {
+    headers: githubHeaders(env, url),
+    redirect: 'manual',
+    signal,
+  })
+
+  if (response.status >= 300 && response.status < 400) {
+    throw createGitHubError(`GitHub tagged release redirected: ${response.status}`, response.status)
+  }
+  if (response.status === 404) return null
+  if (!response.ok) {
+    throw createGitHubError(`GitHub tagged release failed: ${response.status}`, response.status)
+  }
+
+  return (await response.json()) as GitHubRelease
+}
+
 async function fetchLatestTag(
   env: Env,
   proxy: string | undefined,
@@ -297,7 +322,7 @@ export async function checkUpdate(
       ? latest
       : releaseMatchesTag(release, latestTagName)
         ? release
-        : null
+        : await fetchReleaseByTag(latestTagName, env, proxyCheck.value, signal)
 
     const info: UpdateInfo = {
       hasUpdate,

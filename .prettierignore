@@ -1,0 +1,6 @@
+# Deployment-owned encrypted payloads are opaque ciphertext, not JSON.
+public/admin.json
+public/config.json
+
+# User-managed media assets are preserved across upstream updates.
+public/music/

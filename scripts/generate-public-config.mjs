@@ -1,5 +1,5 @@
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { webcrypto } from 'node:crypto'
 
@@ -76,6 +76,23 @@ async function loadBuildEnv() {
     }
   }
   return { ...env, ...process.env }
+}
+
+async function resolveBuildConfigPath(buildEnv) {
+  const explicitPath = String(buildEnv.MELIORA_CONFIG_PATH || '').trim()
+  if (explicitPath) return resolve(process.cwd(), explicitPath)
+
+  const localDevConfigPath = resolveDefaultLocalDevConfigPath()
+  if (shouldLoadDevVars() && (await fileExists(localDevConfigPath))) {
+    return localDevConfigPath
+  }
+
+  const ciPublicConfigPath = join(process.cwd(), '.github/ci-public-config.json')
+  if (truthy(buildEnv.GITHUB_ACTIONS) && (await fileExists(ciPublicConfigPath))) {
+    return ciPublicConfigPath
+  }
+
+  return resolveDefaultConfigPath()
 }
 
 async function fileExists(path) {
@@ -349,13 +366,12 @@ async function renderAdminEnvModule(env) {
 }
 
 export async function generatePublicConfig(options = {}) {
-  const buildEnv = { ...(await loadBuildEnv()), ...(options.adminEnv ?? {}) }
-  const localDevConfigPath = resolveDefaultLocalDevConfigPath()
-  const configPath =
-    options.configPath ??
-    (shouldLoadDevVars() && (await fileExists(localDevConfigPath))
-      ? localDevConfigPath
-      : resolveDefaultConfigPath())
+  const envSchema = await loadEnvSchema()
+  const buildEnv = envSchema.resolveDeploymentEnv({
+    ...(await loadBuildEnv()),
+    ...(options.adminEnv ?? {}),
+  })
+  const configPath = options.configPath ?? (await resolveBuildConfigPath(buildEnv))
   const targetPath = options.targetPath ?? resolveDefaultTargetPath()
   const adminEnvTargetPath = options.adminEnvTargetPath ?? resolveDefaultAdminEnvTargetPath()
   const encryptionKey = options.encryptionKey ?? buildEnv.CONFIG_ENCRYPTION_KEY ?? ''

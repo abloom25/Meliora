@@ -112,7 +112,11 @@ pnpm dev:full     # 前端 + 后端模拟(5175 + 8788)
 
 用户只需要点击一次“更新”。后台会触发 GitHub Actions,Actions 在 `meliora-update/*` 临时分支里同步上游代码,运行依赖安装、测试、类型检查、Lint、格式检查与构建;验证通过后再合并目标分支最新提交并执行关键验证,无冲突才自动合并并推送回目标分支。
 
-失败、冲突或推送被拒绝时目标分支保持不变,后台会显示运行状态、失败原因和 GitHub Actions 日志入口,不需要用户手动 merge。流程会保留 `public/config.json`、`public/admin.json`、`public/music/`、`.env`、`.env.local`、`.dev.vars` 和构建产物等用户数据;`.env.example`、`.dev.vars.example` 等模板文件会随上游更新。
+失败、冲突或推送被拒绝时目标分支保持不变,后台会显示运行状态、失败原因和 GitHub Actions 日志入口,不需要用户手动 merge。流程会保留 `public/config.json`、`public/admin.json`、`public/music/`、`.github/workflows/`、`.prettierignore`、`.env`、`.env.local`、`.dev.vars` 和构建产物等部署数据;`.env.example`、`.dev.vars.example` 等模板文件会随上游更新。
+
+新版更新协议把工作流视为部署仓库自己的固定启动器:普通代码、UI、后端和依赖升级不会改写 `.github/workflows/`,因此只使用 Actions 自动提供的 `GITHUB_TOKEN` 即可推送验证后的业务代码,不需要再给 Actions 单独配置高权限 PAT。工作流本身若需要升级,必须单独手动同步;这不会阻塞日常版本更新。
+
+> **不向下兼容:**旧版部署需要手动同步或重新部署一次才能进入新版更新协议。进入新版后,日常上游升级为后台一键完成。
 
 如果仓库启用了 branch protection 且禁止 `github-actions[bot]` push,自动合并会失败,需要允许 GitHub Actions 写入目标分支,或后续改用 PR auto-merge 模式。如果你已经修改过源码、样式、工作流或部署配置,请不要使用后台一键更新,应自行通过 Git 合并上游代码并处理冲突。
 
@@ -149,19 +153,21 @@ pnpm dev:full     # 前端 + 后端模拟(5175 + 8788)
 
 部署后在平台 Dashboard 的 Settings → Environment Variables 中配置环境变量:
 
-| 变量                    | 必填 | 说明                                                                                                                                                                                            |
-| ----------------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GH_TOKEN`              | ✅   | GitHub Personal Access Token。Fine-grained token 需要 `Contents: Read and write` + `Actions: Write`; classic token 可使用 `repo` 权限。用于配置读写、文件上传、触发更新 workflow 与查询更新状态 |
-| `GH_REPO`               | ✅   | 仓库标识,`owner/repo` 格式                                                                                                                                                                      |
-| `CONFIG_ENCRYPTION_KEY` | ✅   | 配置加密密钥,32 位以上随机字符串。配置加密、Cookie 签名与构建期公开配置生成都依赖它,GH_TOKEN 可独立轮换而不影响已加密配置                                                                       |
-| `GH_BRANCH`             | ❌   | 目标分支,默认 `main`                                                                                                                                                                            |
-| `GITHUB_PROXY`          | ❌   | GitHub 代理,必须是公网 HTTPS URL。用于检查更新和 workflow 内拉取上游代码;触发 workflow 与查询 Actions 状态仍需部署环境可访问 `api.github.com`                                                   |
-| `ADMIN_DISABLED`        | ❌   | 设为 `true`/`1`/`yes`/`on`(大小写不敏感)时禁用管理后台,`/admin` 显示“已禁用”,除状态探针外所有 `/api/*` 返回 403                                                                                 |
-| `DEVELOPMENT`           | ❌   | 设为 `true`/`1`/`yes`/`on`(大小写不敏感)时进入开发模式:配置与密码不持久化、加密走明文降级                                                                                                       |
+| 变量                    | 必填 | 说明                                                                                                                                                                                        |
+| ----------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GH_TOKEN`              | ✅   | 部署运行时使用的 GitHub Personal Access Token。Fine-grained token 需要 `Contents: Read and write` + `Actions: Write`; classic token 可使用 `repo` 权限。无需再复制到 GitHub Actions Secrets |
+| `GH_REPO`               | 条件 | 仓库标识,`owner/repo` 格式。Vercel 开启 System Environment Variables 后会从 `VERCEL_GIT_REPO_OWNER` / `VERCEL_GIT_REPO_SLUG` 自动推导,其他平台需填写                                        |
+| `CONFIG_ENCRYPTION_KEY` | ✅   | 配置加密密钥,32 位以上随机字符串。配置加密、Cookie 签名与构建期公开配置生成都依赖它,GH_TOKEN 可独立轮换而不影响已加密配置                                                                   |
+| `GH_BRANCH`             | ❌   | 目标分支。优先使用显式值,Vercel 可从 `VERCEL_GIT_COMMIT_REF` 自动推导,其余情况默认 `main`                                                                                                   |
+| `GITHUB_PROXY`          | ❌   | GitHub 代理,必须是公网 HTTPS URL。用于检查更新和 workflow 内拉取上游代码;触发 workflow 与查询 Actions 状态仍需部署环境可访问 `api.github.com`                                               |
+| `ADMIN_DISABLED`        | ❌   | 设为 `true`/`1`/`yes`/`on`(大小写不敏感)时禁用管理后台,`/admin` 显示“已禁用”,除状态探针外所有 `/api/*` 返回 403                                                                             |
+| `DEVELOPMENT`           | ❌   | 设为 `true`/`1`/`yes`/`on`(大小写不敏感)时进入开发模式:配置与密码不持久化、加密走明文降级                                                                                                   |
 
 > 生成 `CONFIG_ENCRYPTION_KEY`:`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
 
 > `CONFIG_ENCRYPTION_KEY` 需要同时提供给平台的构建环境和 Functions/运行时环境。构建期会用它解密 `public/config.json`,生成前端公开配置;如果仓库中已有密文配置但构建阶段缺少该变量,构建会失败以避免站点静默变成空配置。
+
+> GitHub Actions 验证固定读取 `.github/ci-public-config.json`,不会解密生产配置,因此不需要把 `CONFIG_ENCRYPTION_KEY` 复制到 GitHub Secrets。生产平台构建仍会严格要求真实密钥。
 
 > ### 🎉 零配置密码
 >

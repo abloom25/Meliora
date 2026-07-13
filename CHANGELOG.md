@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **无密钥 CI 配置**:新增 `.github/ci-public-config.json` 与 `MELIORA_CONFIG_PATH` 构建入口,GitHub Actions 验证不再需要解密部署仓库的 `public/config.json`
+- **Vercel 仓库自动识别**:未显式配置 `GH_REPO` / `GH_BRANCH` 时,自动使用 `VERCEL_GIT_REPO_OWNER`、`VERCEL_GIT_REPO_SLUG` 与 `VERCEL_GIT_COMMIT_REF`
+
+### Changed
+
+- **新版更新协议**:自动同步永久保留部署仓库的 `.github/workflows/` 与 `.prettierignore`,普通升级只写业务代码,不再要求 Actions 使用可修改工作流的额外 PAT;本协议不向下兼容旧更新器
+- **部署数据格式检查**:恢复 `.prettierignore`,明确排除加密的 `public/admin.json`、`public/config.json` 和用户音乐目录
+
+### Fixed
+
+- **预发布说明缺失**:选择到 RC / prerelease Tag 后按 `/releases/tags/{tag}` 获取对应 Release,不再错误复用仅返回稳定版的 `/releases/latest`
+- **更新推送被 GitHub 拒绝**:自动同步不再尝试使用内置 `GITHUB_TOKEN` 修改 `.github/workflows/`,避免 `refusing to allow a GitHub App to create or update workflow` 失败
+
 ## [0.2.0-rc7] - 2026-07-10
 
 ### Added

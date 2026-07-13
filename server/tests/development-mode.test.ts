@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { resolveDeploymentEnv } from '../../shared/env-schema'
 import { isDevelopmentMode, truthy, validateEnv } from '../core/types'
 import type { Env } from '../core/types'
 
@@ -144,5 +145,55 @@ describe('validateEnv', () => {
         GH_REPO,
       ).toBe(true)
     }
+  })
+})
+
+describe('resolveDeploymentEnv', () => {
+  it('infers the repository and branch from Vercel system variables', () => {
+    expect(
+      resolveDeploymentEnv({
+        VERCEL_GIT_PROVIDER: 'github',
+        VERCEL_GIT_REPO_OWNER: 'abloom25',
+        VERCEL_GIT_REPO_SLUG: 'MelioraSite',
+        VERCEL_GIT_COMMIT_REF: 'production',
+      }),
+    ).toMatchObject({
+      GH_REPO: 'abloom25/MelioraSite',
+      GH_BRANCH: 'production',
+    })
+  })
+
+  it('keeps explicit GitHub settings ahead of platform inference', () => {
+    expect(
+      resolveDeploymentEnv({
+        GH_REPO: 'owner/explicit-repo',
+        GH_BRANCH: 'release',
+        VERCEL_GIT_REPO_OWNER: 'ignored',
+        VERCEL_GIT_REPO_SLUG: 'ignored',
+        VERCEL_GIT_COMMIT_REF: 'ignored',
+      }),
+    ).toMatchObject({
+      GH_REPO: 'owner/explicit-repo',
+      GH_BRANCH: 'release',
+    })
+  })
+
+  it('does not infer malformed Vercel repository values', () => {
+    expect(
+      resolveDeploymentEnv({
+        VERCEL_GIT_REPO_OWNER: 'bad_owner',
+        VERCEL_GIT_REPO_SLUG: 'repo',
+      }).GH_REPO,
+    ).toBe('')
+  })
+
+  it('does not treat non-GitHub Vercel projects as GitHub repositories', () => {
+    expect(
+      resolveDeploymentEnv({
+        VERCEL_GIT_PROVIDER: 'gitlab',
+        VERCEL_GIT_REPO_OWNER: 'owner',
+        VERCEL_GIT_REPO_SLUG: 'repo',
+      }).GH_REPO,
+    ).toBe('')
   })
 })

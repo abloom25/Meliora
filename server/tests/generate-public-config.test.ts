@@ -36,18 +36,34 @@ async function withTempCwd<T>(run: (dir: string) => Promise<T>): Promise<T> {
   return withTempDir(async (dir) => {
     const cwd = process.cwd()
     const envSnapshot = {
+      GH_TOKEN: process.env.GH_TOKEN,
       GH_REPO: process.env.GH_REPO,
+      GH_BRANCH: process.env.GH_BRANCH,
       CONFIG_ENCRYPTION_KEY: process.env.CONFIG_ENCRYPTION_KEY,
       DEVELOPMENT: process.env.DEVELOPMENT,
       ADMIN_DISABLED: process.env.ADMIN_DISABLED,
       MELIORA_LOAD_DEV_VARS: process.env.MELIORA_LOAD_DEV_VARS,
+      MELIORA_CONFIG_PATH: process.env.MELIORA_CONFIG_PATH,
+      GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
+      VERCEL_GIT_REPO_OWNER: process.env.VERCEL_GIT_REPO_OWNER,
+      VERCEL_GIT_REPO_SLUG: process.env.VERCEL_GIT_REPO_SLUG,
+      VERCEL_GIT_COMMIT_REF: process.env.VERCEL_GIT_COMMIT_REF,
+      VERCEL_GIT_PROVIDER: process.env.VERCEL_GIT_PROVIDER,
     }
     try {
+      delete process.env.GH_TOKEN
       delete process.env.GH_REPO
+      delete process.env.GH_BRANCH
       delete process.env.CONFIG_ENCRYPTION_KEY
       delete process.env.DEVELOPMENT
       delete process.env.ADMIN_DISABLED
       delete process.env.MELIORA_LOAD_DEV_VARS
+      delete process.env.MELIORA_CONFIG_PATH
+      delete process.env.GITHUB_ACTIONS
+      delete process.env.VERCEL_GIT_REPO_OWNER
+      delete process.env.VERCEL_GIT_REPO_SLUG
+      delete process.env.VERCEL_GIT_COMMIT_REF
+      delete process.env.VERCEL_GIT_PROVIDER
       process.chdir(dir)
       return await run(dir)
     } finally {
@@ -267,6 +283,80 @@ describe('generate-public-config', () => {
 
       expect(result.config.siteName).toBe('Local Generated Meliora')
       expect(source).toContain("siteName: 'Local Generated Meliora'")
+    })
+  })
+
+  it('uses the dedicated CI config in GitHub Actions without decrypting production data', async () => {
+    await withTempCwd(async (dir) => {
+      process.env.GITHUB_ACTIONS = 'true'
+      await mkdir(join(dir, '.github'), { recursive: true })
+      await mkdir(join(dir, 'public'), { recursive: true })
+      await writeFile(join(dir, 'public/config.json'), 'v1:encrypted-production-payload')
+      await writeFile(
+        join(dir, '.github/ci-public-config.json'),
+        JSON.stringify({
+          siteName: 'CI Meliora',
+          apiEndpoint: '',
+          playlists: [],
+          localTracks: [],
+        }),
+      )
+
+      const result = await generatePublicConfig({
+        targetPath: join(dir, 'public-config.ts'),
+        adminEnvTargetPath: join(dir, 'admin-env.ts'),
+      })
+
+      expect(result.config.siteName).toBe('CI Meliora')
+    })
+  })
+
+  it('honors MELIORA_CONFIG_PATH ahead of automatic config selection', async () => {
+    await withTempCwd(async (dir) => {
+      process.env.GITHUB_ACTIONS = 'true'
+      process.env.MELIORA_CONFIG_PATH = 'fixtures/custom-config.json'
+      await mkdir(join(dir, '.github'), { recursive: true })
+      await mkdir(join(dir, 'fixtures'), { recursive: true })
+      await writeFile(
+        join(dir, '.github/ci-public-config.json'),
+        JSON.stringify({ siteName: 'Ignored CI', apiEndpoint: '', playlists: [], localTracks: [] }),
+      )
+      await writeFile(
+        join(dir, 'fixtures/custom-config.json'),
+        JSON.stringify({
+          siteName: 'Explicit CI',
+          apiEndpoint: '',
+          playlists: [],
+          localTracks: [],
+        }),
+      )
+
+      const result = await generatePublicConfig({
+        targetPath: join(dir, 'public-config.ts'),
+        adminEnvTargetPath: join(dir, 'admin-env.ts'),
+      })
+
+      expect(result.config.siteName).toBe('Explicit CI')
+    })
+  })
+
+  it('infers GH_REPO for generated admin status on Vercel', async () => {
+    await withTempCwd(async (dir) => {
+      process.env.GH_TOKEN = 'ghp_testtokenvalue1234567890abcdef'
+      process.env.CONFIG_ENCRYPTION_KEY = STRONG_KEY
+      process.env.VERCEL_GIT_REPO_OWNER = 'owner'
+      process.env.VERCEL_GIT_REPO_SLUG = 'site'
+      process.env.VERCEL_GIT_COMMIT_REF = 'production'
+      process.env.VERCEL_GIT_PROVIDER = 'github'
+
+      const result = await generatePublicConfig({
+        configPath: join(dir, 'missing-config.json'),
+        targetPath: join(dir, 'public-config.ts'),
+        adminEnvTargetPath: join(dir, 'admin-env.ts'),
+      })
+      const source = await readFile(result.adminEnvTargetPath, 'utf8')
+
+      expect(source).toContain("status: 'idle'")
     })
   })
 

@@ -31,4 +31,17 @@ describe('update workflow safeguards', () => {
     expect(source).toContain('Temporary branch is kept local until validation passes.')
     expect(source).not.toContain('git push origin "${TEMP_BRANCH}" --force')
   })
+
+  it('keeps downstream workflow files and formatting rules deployment-owned', async () => {
+    const source = await readFile(workflowPath, 'utf8')
+
+    expect(source).toContain("--exclude='.github/workflows/'")
+    expect(source).toContain("--exclude='.prettierignore'")
+  })
+
+  it('validates updates with the non-secret CI config', async () => {
+    const source = await readFile(workflowPath, 'utf8')
+
+    expect(source).toContain('MELIORA_CONFIG_PATH: .github/ci-public-config.json')
+  })
 })

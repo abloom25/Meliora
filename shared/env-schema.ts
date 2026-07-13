@@ -1,8 +1,13 @@
 export interface PublicEnvLike {
   GH_TOKEN?: string
   GH_REPO?: string
+  GH_BRANCH?: string
   CONFIG_ENCRYPTION_KEY?: string
   DEVELOPMENT?: string
+  VERCEL_GIT_PROVIDER?: string
+  VERCEL_GIT_REPO_OWNER?: string
+  VERCEL_GIT_REPO_SLUG?: string
+  VERCEL_GIT_COMMIT_REF?: string
 }
 
 export interface EnvValidation {
@@ -48,6 +53,22 @@ export function isValidGitHubRepo(value: string | undefined): boolean {
 export function isUsableGitHubToken(value: string | undefined): boolean {
   const token = value?.trim() || ''
   return Boolean(token && !token.toLowerCase().startsWith('placeholder'))
+}
+
+export function resolveDeploymentEnv<T extends PublicEnvLike>(
+  env: T,
+): T & {
+  GH_REPO: string
+  GH_BRANCH: string
+} {
+  const explicitRepo = env.GH_REPO || ''
+  const inferredRepo = `${env.VERCEL_GIT_REPO_OWNER || ''}/${env.VERCEL_GIT_REPO_SLUG || ''}`
+  const provider = env.VERCEL_GIT_PROVIDER?.trim().toLowerCase() || 'github'
+  const GH_REPO =
+    explicitRepo || (provider === 'github' && isValidGitHubRepo(inferredRepo) ? inferredRepo : '')
+  const GH_BRANCH = env.GH_BRANCH?.trim() || env.VERCEL_GIT_COMMIT_REF?.trim() || 'main'
+
+  return { ...env, GH_REPO, GH_BRANCH }
 }
 
 export function validateEncryptionKey(env: PublicEnvLike): KeyValidation {

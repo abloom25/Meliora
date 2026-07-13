@@ -35,6 +35,8 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
+    env:
+      MELIORA_CONFIG_PATH: .github/ci-public-config.json
     steps:
       - name: Checkout current repository
         uses: actions/checkout@v4
@@ -246,6 +248,8 @@ jobs:
           set -euo pipefail
           rsync -a --delete \
             --exclude='.git/' \
+            --exclude='.github/workflows/' \
+            --exclude='.prettierignore' \
             --exclude='.dev.vars' \
             --exclude='.env' \
             --exclude='.env.local' \

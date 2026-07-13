@@ -21,6 +21,18 @@ function releaseResponse(tag: string): Response {
   )
 }
 
+function releaseResponseWithNotes(tag: string, notes: string): Response {
+  return new Response(
+    JSON.stringify({
+      tag_name: tag,
+      body: notes,
+      html_url: `https://github.com/abloom25/Meliora/releases/tag/${tag}`,
+      published_at: '2026-07-13T00:00:00Z',
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  )
+}
+
 function tagsResponse(tags: string[]): Response {
   return new Response(JSON.stringify(tags.map((name) => ({ name }))), {
     status: 200,
@@ -114,6 +126,7 @@ describe('server update handler', () => {
       .fn()
       .mockResolvedValueOnce(new Response(null, { status: 404 }))
       .mockResolvedValueOnce(tagsResponse(['latest', 'v0.9.0', 'v0.10.0']))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
     vi.stubGlobal('fetch', fetchMock)
 
     const response = await checkUpdate('0.8.0', ENV)
@@ -144,14 +157,25 @@ describe('server update handler', () => {
       .fn()
       .mockResolvedValueOnce(releaseResponse('v0.2.0'))
       .mockResolvedValueOnce(tagsResponse(['v0.3.0-rc.1', 'v0.2.0']))
+      .mockResolvedValueOnce(releaseResponseWithNotes('v0.3.0-rc.1', 'prerelease notes'))
     vi.stubGlobal('fetch', fetchMock)
 
     const response = await checkUpdate('0.2.0', ENV, undefined, true)
-    const data = (await response.json()) as { hasUpdate: boolean; latestVersion: string }
+    const data = (await response.json()) as {
+      hasUpdate: boolean
+      latestVersion: string
+      releaseNotes: string
+    }
 
     expect(response.status).toBe(200)
     expect(data.hasUpdate).toBe(true)
     expect(data.latestVersion).toBe('0.3.0-rc.1')
+    expect(data.releaseNotes).toBe('prerelease notes')
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      'https://api.github.com/repos/abloom25/Meliora/releases/tags/v0.3.0-rc.1',
+      expect.any(Object),
+    )
   })
 
   it('rejects private GitHub proxy URLs', async () => {
