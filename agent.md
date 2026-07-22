@@ -360,7 +360,7 @@ PWA       public/sw.js, public/manifest.webmanifest
   - 标题不超过 100 字符,末尾不加句号。
   - body 和 footer 可选,每行不超过 100 字符。
 - **Git Hooks**:
-  - `pre-commit`: 自动运行 `lint-staged`,对暂存文件执行 `pnpm lint`、`pnpm type-check`、`pnpm format`。
+  - `pre-commit`: 自动运行 `lint-staged`,对暂存文件执行 `eslint --fix` 与 `prettier --write`,并运行全仓 `pnpm type-check`。
   - `commit-msg`: 自动运行 `commitlint`,校验提交信息格式。
   - 如需跳过 hook(不推荐):`git commit --no-verify`。
 - **PR 流程**:
@@ -373,7 +373,7 @@ PWA       public/sw.js, public/manifest.webmanifest
   - 所有平台配置必须统一:构建命令 `pnpm build`、输出目录 `dist`;运行时版本遵循 `package.json` 的 `engines` 与各平台配置。
   - **公开站点配置方向**:播放器前端所需的公开配置(站点名称、站点图标、公开歌单、本地曲库、统计与公开自定义样式/脚本等)必须在构建期生成并硬编译进前端,因为后台保存配置本身会写仓库并触发重新部署;不要为了这些公开配置保留首屏必需的 Worker 配置接口。管理后台保存/上传/鉴权/更新等仍通过后端 API 执行,敏感密钥、`apiToken`、管理员数据、GitHub 代理配置不得进入前端 bundle。远程歌单只硬编译 `apiEndpoint` 与歌单 ID 等配置,歌曲列表仍由播放器运行时请求 Meting API,不得预抓取或硬编码 Meting 返回结果。
   - **环境变量(3 必填)**:`GH_TOKEN`(GitHub PAT,Contents Read and write)、`GH_REPO`(`owner/repo` 格式)、`CONFIG_ENCRYPTION_KEY`(配置加密、Cookie 签名、构建期公开配置解密的主密钥,至少 32 位,生产模式校验强度——拒绝全相同字符 / 纯顺序字符等弱模式)。环境就绪提示会校验 `GH_TOKEN` 是否可用、`GH_REPO` 格式与 `CONFIG_ENCRYPTION_KEY` 强度;`GH_TOKEN` 缺失或占位会进入 env-not-ready。`GH_BRANCH` 可选(默认 `main`),`GITHUB_PROXY` 可选且必须是公网 HTTPS URL,`ADMIN_DISABLED` 可选(设为 `true`/`1`/`yes`/`on`,大小写不敏感;禁用管理后台时除状态探针(`GET /api/setup-status`、`GET /api/status-page`,返回 HTML 状态页)外,所有 `/api/*` 返回 403,`/admin` 显示"已禁用")。
-    - **不再使用** `ADMIN_PASSWORD` 和 `ADMIN_SECRET`——密码通过 `/setup` 页面首次设置(PBKDF2-SHA256 100k 迭代哈希存入 `public/admin.json`);Cookie 签名密钥与配置加密密钥**均从 `CONFIG_ENCRYPTION_KEY` 派生**(`HMAC-SHA256` / `PBKDF2`),与 `GH_TOKEN` 完全解耦,`GH_TOKEN` 可独立轮换而不影响已加密配置与已签发 Cookie。
+    - **不再使用** `ADMIN_PASSWORD` 和 `ADMIN_SECRET`——密码通过 `/setup` 页面首次设置(PBKDF2-SHA256 600k 迭代哈希存入 `public/admin.json`,遵循 OWASP 当前建议);Cookie 签名密钥与配置加密密钥**均从 `CONFIG_ENCRYPTION_KEY` 派生**(`HMAC-SHA256` / `PBKDF2`),与 `GH_TOKEN` 完全解耦,`GH_TOKEN` 可独立轮换而不影响已加密配置与已签发 Cookie。
     - 开发模式:`DEVELOPMENT=true` 时进入内存模式(配置 / 密码不持久化,加密与签名走明文降级)。
   - **安全头一致性**:所有平台的 headers 配置必须保持一致(CSP、X-Content-Type-Options、X-Frame-Options、Referrer-Policy、Permissions-Policy)。
   - **SPA Fallback**:所有平台必须配置 `/* -> /index.html` 的 200 重写,确保路由刷新有效。

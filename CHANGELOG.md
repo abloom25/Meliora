@@ -19,8 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **配置与媒体文件原子提交**:后台上传先创建不挂载到分支的 Git Blob,保存时再将加密配置、暂存文件和不再引用的旧资源合并进同一个 Tree / Commit;撤销、离开或保存冲突不再提前覆盖或删除线上文件,并移除独立即时删除接口
 - **预发布说明缺失**:选择到 RC / prerelease Tag 后按 `/releases/tags/{tag}` 获取对应 Release,不再错误复用仅返回稳定版的 `/releases/latest`
 - **更新推送被 GitHub 拒绝**:自动同步不再尝试使用内置 `GITHUB_TOKEN` 修改 `.github/workflows/`,避免 `refusing to allow a GitHub App to create or update workflow` 失败
+- **日志脱敏失效**:修复查询字符串脱敏正则中 `\s` 被误写为字面"反斜杠+s"的问题,含字母 s 的敏感参数值会残留进日志,且脱敏会吞掉查询串之后的日志文本
+- **配置删除绕过路径白名单**:受管资源路径映射拒绝 `..` 等穿越段,与上传路径校验统一安全标准
+- **修改密码后随机登出**:tokenVersion 缓存改为持久化成功后再更新,消除写库失败时的版本错乱
+- **Service Worker 缓存污染**:导航响应校验 `response.ok` 才写入离线外壳缓存;缓存命中时后台更新失败不再产生未处理 rejection
+- **跨 locale 分享链接失效**:曲目归一化改用 locale 无关的 `toLowerCase`,修复土耳其语等环境下分享 ID 不一致的问题
+- **播放失败后状态错位**:skipOnError 且没有可跳曲目时,store 同步回退到上一首,避免界面与实际播放音频不一致
+- **预加载超时后带宽泄漏**:超时未就绪的预加载完整释放 slot 并中止下载
+- **搜索时列表强拉滚动**:仅在切歌或恢复上次定位时滚动到当前曲目,搜索输入不再打断浏览
 
 ## [0.2.0-rc7] - 2026-07-10
 
