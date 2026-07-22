@@ -161,7 +161,15 @@
   )
   watch(
     () => ({ id: props.currentTrackId, index: currentTrackIndex.value }),
-    (next, previous) => scheduleActiveTrackScroll(next.id !== previous?.id),
+    (next, previous) => {
+      if (next.id !== previous?.id) {
+        scheduleActiveTrackScroll(true)
+      } else if (!props.query && next.index >= 0 && (previous?.index ?? -1) < 0) {
+        // 非搜索状态下曲目从无效变为有效(如启动时恢复上次曲目)才定位;
+        // 搜索过滤导致的 index 变化不强拉滚动,避免打断用户浏览结果。
+        scheduleActiveTrackScroll(false)
+      }
+    },
   )
   watch(debouncedQuery, (value) => {
     handleSearchInput(value)

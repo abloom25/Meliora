@@ -1,7 +1,9 @@
 import type { LocalTrackConfig, MetingTrack, Track } from '../types/music'
 import { splitDisplayTitle } from './title'
 
-const normalize = (value: string) => value.trim().toLocaleLowerCase().replace(/\s+/g, ' ')
+// 使用 toLowerCase 而非 toLocaleLowerCase:trackIdentity 是分享链接哈希的输入,
+// 土耳其语等 locale 下 'I' 会变为 'ı',导致跨 locale 分享链接互相打不开。
+const normalize = (value: string) => value.trim().toLowerCase().replace(/\s+/g, ' ')
 
 type TrackIdentityInput = Pick<Track, 'title' | 'artist' | 'titleVersions'>
 type TrackSearchInput = Pick<Track, 'title' | 'artist' | 'titleVersions'>

@@ -242,10 +242,12 @@ export function usePreloadPool(options: PreloadPoolOptions) {
           return
         }
         if (slot.track?.id === track.id) {
-          slot.track = null
-          slot.ready = null
+          // 超时未就绪:完整释放 slot(pause + 移除 src + load 中止下载),
+          // 否则慢速响应的连接会一直挂着占用带宽。clearSlot 内部幂等调用 cleanup。
+          clearSlot(slot)
+        } else {
+          cleanup()
         }
-        cleanup()
         resolve(false)
       }, PRELOAD_READY_TIMEOUT)
       pendingPreloadTimeouts.add(timeout)

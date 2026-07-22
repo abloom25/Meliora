@@ -55,8 +55,11 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       fetch(event.request)
         .then((response) => {
-          const copy = response.clone()
-          void caches.open(CACHE_NAME).then((cache) => cache.put('./', copy))
+          // 只缓存成功响应,避免部署窗口期的 5xx 错误页污染离线兜底外壳
+          if (response.ok) {
+            const copy = response.clone()
+            void caches.open(CACHE_NAME).then((cache) => cache.put('./', copy))
+          }
           return response
         })
         .catch(() => caches.match('./')),
@@ -73,13 +76,15 @@ self.addEventListener('fetch', (event) => {
         }
         return response
       })
-      return (
-        cached ||
-        network.catch(() =>
-          caches
-            .match(event.request)
-            .then((res) => res || new Response('', { status: 504, statusText: 'Gateway Timeout' })),
-        )
+      // 缓存命中时仅做后台更新;吞掉网络失败,避免离线时 unhandled rejection
+      if (cached) {
+        void network.catch(() => {})
+        return cached
+      }
+      return network.catch(() =>
+        caches
+          .match(event.request)
+          .then((res) => res || new Response('', { status: 504, statusText: 'Gateway Timeout' })),
       )
     }),
   )

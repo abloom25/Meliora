@@ -52,7 +52,9 @@ export function clampGain(value: number): number {
 }
 
 export function isValidPreset(id: unknown): id is EqPresetId {
-  return typeof id === 'string' && id in EQ_PRESETS
+  // 用 Object.hasOwn 而非 in:'toString' 等原型链属性在 in 下也返回 true,
+  // 会把篡改 localStorage 写入的非法值误判为合法 preset。
+  return typeof id === 'string' && Object.hasOwn(EQ_PRESETS, id)
 }
 
 export function normalizeBands(bands: unknown): number[] {

@@ -572,7 +572,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         void fadePlayer(oldAudioRef, oldGain, 0, FADE_OUT_DURATION)
       }
 
-      const { oldAudio, newAudio } = replaceActiveWithSlot(slot, direction)
+      const { oldAudio, oldTrack, newAudio } = replaceActiveWithSlot(slot, direction)
       mountActiveAudioForIOS()
       // 仅在必要时重置 currentTime，避免对预加载 slot（已经是 0）做重复浏览器调用。
       if (newAudio.currentTime > 0.01) newAudio.currentTime = 0
@@ -644,6 +644,10 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
           if (settings.value.skipOnError && queue.length > 1) {
             preloadMessage.value = `已跳过暂时无法播放的歌曲，正在继续播放`
             activeAudio = oldAudio
+            // 同步把 store 回退到旧曲目:audio 已回退,若 store 仍指向失败曲目,
+            // 当 next(true) 找不到后继时会出现"UI 显示失败曲目、实际播放上一首"的错位。
+            // previousTrack 只 setCurrentTrack、不 bump queueVersion,跳过语义不受影响。
+            if (oldTrack) store.previousTrack(oldTrack.id)
             mountActiveAudioForIOS()
             const reverseSlot = preloadSlots[direction === 'next' ? 'previous' : 'next']
             reverseSlot.audio = newAudio

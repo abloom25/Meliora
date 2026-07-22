@@ -126,7 +126,7 @@ export function parseLyrics(source: string): LyricLine[] {
 function normalizeLyricMessage(value: string): string {
   return value
     .normalize('NFKC')
-    .toLocaleLowerCase()
+    .toLowerCase()
     .replace(/[\s,，。.!！?？、~～…·:：;；'"“”‘’()[\]{}（）【】<>《》_\-—]/g, '')
 }
 

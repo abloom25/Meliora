@@ -240,7 +240,7 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     const nextTitle = track?.title || 'Meliora'
     if (title.textContent !== nextTitle) title.textContent = nextTitle
 
-    const nextCover = track?.cover || new URL('favicon.svg', window.location.href).href
+    const nextCover = track?.cover || `${import.meta.env.BASE_URL}favicon.svg`
     if (cover.getAttribute('src') !== nextCover) cover.src = nextCover
 
     const nextBackground = track?.cover ? `url("${track.cover.replaceAll('"', '\\"')}")` : 'none'
