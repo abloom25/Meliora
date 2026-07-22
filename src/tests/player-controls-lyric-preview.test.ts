@@ -51,6 +51,19 @@ function mountProgressControls(props: Partial<InstanceType<typeof PlayerControls
   })
 }
 
+function mountPlayerControls(variant: 'bar' | 'page' | 'progress' | 'mini' | 'vertical') {
+  return mount(PlayerControls, {
+    attachTo: document.body,
+    props: {
+      variant,
+      onToggle: vi.fn(),
+      onPrevious: vi.fn(),
+      onNext: vi.fn(),
+      onSeek: vi.fn(),
+    },
+  })
+}
+
 function mockProgressRect(range: HTMLElement) {
   vi.spyOn(range, 'getBoundingClientRect').mockReturnValue({
     x: 0,
@@ -390,4 +403,31 @@ describe('PlayerControls lyric preview', () => {
     expect(onSeek).toHaveBeenLastCalledWith(100)
     wrapper.unmount()
   })
+})
+
+describe('PlayerControls variant layout', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    document.body.innerHTML = ''
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    document.body.innerHTML = ''
+  })
+
+  it.each(['page', 'mini', 'vertical'] as const)(
+    'keeps the %s wrapper state separate from the transport child state',
+    (variant) => {
+      const wrapper = mountPlayerControls(variant)
+      const controls = wrapper.get('.controls')
+      const buttons = wrapper.get(variant === 'mini' ? '.mini-buttons' : '.transport-buttons')
+
+      expect(controls.classes()).toContain(`controls--${variant}`)
+      expect(controls.classes()).not.toContain(`is-${variant}`)
+      expect(buttons.classes()).toContain(`is-${variant}`)
+
+      wrapper.unmount()
+    },
+  )
 })

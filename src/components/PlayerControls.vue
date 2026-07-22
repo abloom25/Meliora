@@ -27,7 +27,7 @@
 </script>
 
 <template>
-  <div class="controls" :class="`is-${variant}`">
+  <div class="controls" :class="`controls--${variant}`">
     <div v-if="variant !== 'mini'" class="transport">
       <TransportButtons
         v-if="variant !== 'progress'"
@@ -72,7 +72,7 @@
     gap: 3px;
   }
 
-  .is-bar .transport {
+  .controls--bar .transport {
     display: grid;
     min-width: 0;
     width: 100%;
@@ -81,7 +81,7 @@
     grid-template-columns: auto;
   }
 
-  .is-progress {
+  .controls--progress {
     display: block;
     min-width: 0;
 
@@ -92,7 +92,7 @@
     }
   }
 
-  .is-page {
+  .controls--page {
     display: block;
     width: 100%;
 
@@ -104,11 +104,11 @@
     }
   }
 
-  .is-mini {
+  .controls--mini {
     display: block;
   }
 
-  .is-vertical {
+  .controls--vertical {
     display: block;
     width: 54px;
 
@@ -121,13 +121,13 @@
   }
 
   @media (max-width: 720px) {
-    .is-page .transport {
+    .controls--page .transport {
       gap: clamp(16px, 2.8svh, 24px);
     }
   }
 
   @media (max-width: 420px) {
-    .is-page .transport {
+    .controls--page .transport {
       gap: 13px;
     }
   }
