@@ -262,9 +262,11 @@ export async function changePassword(
     // bump tokenVersion:旧 Cookie token 的 ver 与新版本不匹配,verifyAuth 拒绝,
     // 从而在改密码后立即吊销所有已签发的 token。
     adminData.tokenVersion = (adminData.tokenVersion ?? 0) + 1
+    // 先持久化再更新缓存:写库失败时若缓存已 bump,TTL 窗口内签发的新 token
+    // 会在缓存从磁盘重载回旧版本后随机失效。
+    await writeAdminData(adminData, env)
     cachedTokenVersion = adminData.tokenVersion
     tokenVersionExpiresAt = Date.now() + TOKEN_VERSION_TTL_MS
-    await writeAdminData(adminData, env)
     return { ok: true }
   } catch (error) {
     // sha 乐观锁冲突:管理员数据已被其他操作修改,提示刷新重试。

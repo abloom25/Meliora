@@ -155,7 +155,7 @@ export function sanitizeLogMessage(message: string): string {
   sanitized = sanitized.replace(/\b[a-zA-Z0-9+/]{32,}={0,2}\b/g, '[LONG_STRING_REDACTED]')
 
   // 移除可能的敏感 URL 参数（整个查询字符串）
-  sanitized = sanitized.replace(/\?[^\\s"']+/g, '?[QUERY_REDACTED]')
+  sanitized = sanitized.replace(/\?[^\s"']+/g, '?[QUERY_REDACTED]')
 
   // 移除 IP 地址（可能包含敏感的网络信息）
   sanitized = sanitized.replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g, '[IP_REDACTED]')
