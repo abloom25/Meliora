@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { uploadFile, deleteTrackFiles } from '../core/upload-handler'
+import { uploadFile } from '../core/upload-handler'
 import type { Env } from '../core/types'
 
 const ENV: Env = {
@@ -171,40 +171,27 @@ describe('upload-handler path whitelist', () => {
     })
   })
 
-  describe('deleteTrackFiles', () => {
-    it('marks allowed music paths as deletable in development mode', async () => {
-      const response = await deleteTrackFiles(
-        ['public/music/track1.mp3', 'public/music/track2.mp3'],
-        ENV,
+  describe('staged upload behavior', () => {
+    it('stages remote uploads as unattached blobs instead of changing the branch', async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(new Response(JSON.stringify({ sha: 'a'.repeat(40) }), { status: 201 }))
+      vi.stubGlobal('fetch', fetchMock)
+
+      const response = await uploadFile(
+        { path: 'public/music/track1/audio.mp3', content: 'YXVkaW8=' },
+        REMOTE_ENV,
       )
+      const data = (await response.json()) as { blobSha?: string; path?: string }
+
       expect(response.status).toBe(200)
-      const data = (await response.json()) as { results: Array<{ path: string; deleted: boolean }> }
-      expect(data.results).toHaveLength(2)
-      expect(data.results[0].deleted).toBe(true)
-      expect(data.results[1].deleted).toBe(true)
-    })
-
-    it('marks non-whitelisted paths as not deleted in development mode', async () => {
-      const response = await deleteTrackFiles(
-        ['public/music/track1.mp3', 'public/sw.js', 'server/core/router.ts'],
-        ENV,
-      )
-      expect(response.status).toBe(200)
-      const data = (await response.json()) as { results: Array<{ path: string; deleted: boolean }> }
-      expect(data.results).toHaveLength(3)
-      expect(data.results[0].deleted).toBe(true)
-      expect(data.results[1].deleted).toBe(false)
-      expect(data.results[2].deleted).toBe(false)
-    })
-
-    it('treats missing allowed remote files as already deleted', async () => {
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 404 })))
-
-      const response = await deleteTrackFiles(['public/music/track1.mp3'], REMOTE_ENV)
-      expect(response.status).toBe(200)
-      const data = (await response.json()) as { results: Array<{ path: string; deleted: boolean }> }
-
-      expect(data.results).toEqual([{ path: 'public/music/track1.mp3', deleted: true }])
+      expect(data).toEqual({
+        blobSha: 'a'.repeat(40),
+        path: 'public/music/track1/audio.mp3',
+      })
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(String(fetchMock.mock.calls[0]![0])).toContain('/git/blobs')
+      expect(String(fetchMock.mock.calls[0]![0])).not.toContain('/contents/')
     })
   })
 })

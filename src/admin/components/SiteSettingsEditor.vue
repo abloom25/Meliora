@@ -1,5 +1,5 @@
 <script setup lang="ts">
-  import { ref, computed } from 'vue'
+  import { computed, onBeforeUnmount, ref } from 'vue'
   import { Check, Loader2, PlugZap, Upload, X } from '@lucide/vue'
   import type { MusicConfig } from '../../types/music'
   import BaseInput from '../../components/BaseInput.vue'
@@ -9,19 +9,37 @@
     testMusicApi,
     uploadFile,
     type MusicApiTestResult,
+    type StagedUpload,
   } from '../services/admin-api'
+  import { useFileStagingState } from '../composables/useFileStagingState'
 
   const props = defineProps<{ config: MusicConfig }>()
   const emit = defineEmits<{
     'update:config': [value: MusicConfig]
+    'file-staged': [value: StagedUpload]
     notify: [message: string, type: 'success' | 'error']
   }>()
 
   const iconUrlInput = ref(props.config.siteIcon || '')
   const uploadStatus = ref('')
+  const iconUploading = ref(false)
+  const uploadStatusTimer = ref<number | null>(null)
+  const { beginFileStaging } = useFileStagingState()
   const testingApi = ref(false)
   const apiTestStatus = ref<'idle' | 'success' | 'error'>('idle')
   const apiTestResult = ref<MusicApiTestResult | null>(null)
+
+  onBeforeUnmount(() => {
+    if (uploadStatusTimer.value !== null) window.clearTimeout(uploadStatusTimer.value)
+  })
+
+  function clearUploadStatusLater() {
+    if (uploadStatusTimer.value !== null) window.clearTimeout(uploadStatusTimer.value)
+    uploadStatusTimer.value = window.setTimeout(() => {
+      uploadStatus.value = ''
+      uploadStatusTimer.value = null
+    }, 3000)
+  }
 
   const siteName = computed({
     get: () => props.config.siteName,
@@ -102,25 +120,30 @@
     const input = event.target as HTMLInputElement
     const file = input.files?.[0]
     if (!file) return
+    if (iconUploading.value) {
+      input.value = ''
+      return
+    }
 
     if (file.size > MAX_UPLOAD_BYTES) {
       uploadStatus.value = `文件过大,最大 ${MAX_UPLOAD_SIZE_LABEL}`
       input.value = ''
-      window.setTimeout(() => {
-        uploadStatus.value = ''
-      }, 3000)
+      clearUploadStatusLater()
       return
     }
 
-    uploadStatus.value = '上传中...'
+    const finishFileStaging = beginFileStaging()
+    iconUploading.value = true
+    uploadStatus.value = '正在暂存...'
     try {
       const { base64, dataUrl } = await readFileAsBase64(file)
       const ext = file.name.split('.').pop()?.toLowerCase() || 'png'
       const path = `public/icon.${ext}`
       const result = await uploadFile(path, base64)
-      if (result.ok) {
+      if (result.ok && result.blobSha && result.path) {
+        emit('file-staged', { path: result.path, blobSha: result.blobSha })
         setIcon(result.local && import.meta.env.DEV ? dataUrl : `./icon.${ext}`)
-        uploadStatus.value = '上传成功'
+        uploadStatus.value = '已暂存，保存全部后生效'
       } else {
         uploadStatus.value = result.error || '上传失败'
       }
@@ -128,9 +151,9 @@
       uploadStatus.value = '读取失败'
     } finally {
       input.value = ''
-      window.setTimeout(() => {
-        uploadStatus.value = ''
-      }, 3000)
+      iconUploading.value = false
+      finishFileStaging()
+      clearUploadStatusLater()
     }
   }
 
@@ -168,14 +191,20 @@
               v-model="iconUrlInput"
               type="url"
               placeholder="图标 URL 或上传文件"
+              :disabled="iconUploading"
               @blur="applyIconUrl"
               @keydown.enter.prevent="applyIconUrl"
             />
-            <label class="icon-action" title="上传图标">
+            <label
+              class="icon-action"
+              :class="{ disabled: iconUploading }"
+              :title="iconUploading ? '正在暂存图标' : '上传图标'"
+            >
               <Upload :size="15" />
               <input
                 type="file"
                 accept="image/png,image/jpeg,image/webp,image/x-icon,image/vnd.microsoft.icon"
+                :disabled="iconUploading"
                 @change="handleIconUpload"
               />
             </label>
@@ -184,6 +213,7 @@
               type="button"
               class="icon-action clear"
               title="清除图标"
+              :disabled="iconUploading"
               @click="setIcon(undefined)"
             >
               <X :size="15" />
@@ -458,6 +488,13 @@
         background: rgba(255, 139, 139, 0.12);
         border-color: rgba(255, 139, 139, 0.28);
       }
+    }
+
+    &.disabled,
+    &:disabled {
+      opacity: 0.55;
+      cursor: wait;
+      pointer-events: none;
     }
   }
 

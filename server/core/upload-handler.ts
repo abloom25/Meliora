@@ -1,5 +1,5 @@
 import { isDevelopmentMode, type Env, type UploadPayload } from './types'
-import { readFile, writeFile, deleteFile } from './github'
+import { createBlob } from './github'
 
 const MUSIC_UPLOAD_PREFIX = 'public/music/'
 const SITE_ICON_UPLOAD_PATTERN = /^public\/icon\.(?:png|jpe?g|webp|ico)$/i
@@ -57,7 +57,7 @@ function hasUrlScheme(path: string): boolean {
   return /^[a-z][a-z0-9+.-]*:/i.test(path.trim())
 }
 
-function isAllowedUploadPath(path: string): { allowed: boolean; normalizedPath: string } {
+export function isAllowedUploadPath(path: string): { allowed: boolean; normalizedPath: string } {
   if (!path || path.includes('\0')) return { allowed: false, normalizedPath: '' }
   if (hasUrlScheme(path)) return { allowed: false, normalizedPath: '' }
 
@@ -126,7 +126,7 @@ export async function uploadFile(body: UploadPayload, env: Env): Promise<Respons
 
   if (isDevelopmentMode(env)) {
     return new Response(
-      JSON.stringify({ sha: 'local-dev', path: pathCheck.normalizedPath, local: true }),
+      JSON.stringify({ blobSha: 'local-dev', path: pathCheck.normalizedPath, local: true }),
       {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -135,12 +135,11 @@ export async function uploadFile(body: UploadPayload, env: Env): Promise<Respons
   }
 
   try {
-    const existing = await readFile(pathCheck.normalizedPath, env)
-    const message = `chore(music): upload ${pathCheck.normalizedPath} via admin ${new Date().toISOString()}`
     // content 由前端 FileReader.readAsDataURL 读取后以 base64 提供,
-    // 已是 GitHub Contents API 所需的 base64 编码,直接透传给 writeFile,不再二次编码。
-    const sha = await writeFile(pathCheck.normalizedPath, content, env, message, existing?.sha)
-    return new Response(JSON.stringify({ sha, path: pathCheck.normalizedPath }), {
+    // 此处仅创建未挂载到分支的 Blob。配置保存时才把 Blob、配置和删除项放进同一个 Commit，
+    // 因而上传后撤销不会提前覆盖线上稳定路径，也不会在分支上留下孤儿文件。
+    const blobSha = await createBlob(content, env)
+    return new Response(JSON.stringify({ blobSha, path: pathCheck.normalizedPath }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     })
@@ -150,42 +149,4 @@ export async function uploadFile(body: UploadPayload, env: Env): Promise<Respons
       headers: { 'Content-Type': 'application/json' },
     })
   }
-}
-
-export async function deleteTrackFiles(paths: string[], env: Env): Promise<Response> {
-  if (isDevelopmentMode(env)) {
-    const summary = paths.map((path) => {
-      const pathCheck = isAllowedUploadPath(path)
-      return {
-        path,
-        deleted: pathCheck.allowed,
-      }
-    })
-    return new Response(JSON.stringify({ results: summary }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    })
-  }
-
-  const results = await Promise.allSettled(
-    paths.map(async (path) => {
-      const pathCheck = isAllowedUploadPath(path)
-      if (!pathCheck.allowed) return { path, deleted: false }
-      const file = await readFile(pathCheck.normalizedPath, env)
-      if (!file) return { path, deleted: true }
-      const message = `chore(music): delete ${pathCheck.normalizedPath} via admin ${new Date().toISOString()}`
-      await deleteFile(pathCheck.normalizedPath, env, message, file.sha)
-      return { path, deleted: true }
-    }),
-  )
-
-  const summary = results.map((result, index) => ({
-    path: paths[index],
-    deleted: result.status === 'fulfilled' && result.value.deleted,
-  }))
-
-  return new Response(JSON.stringify({ results: summary }), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' },
-  })
 }

@@ -39,10 +39,15 @@ function encodePath(path: string): string {
     .join('/')
 }
 
-function apiUrl(path: string, env: Env): string {
-  const branch = encodeURIComponent(env.GH_BRANCH || 'main')
+function contentsApiUrl(path: string, env: Env, ref = env.GH_BRANCH || 'main'): string {
+  const branch = encodeURIComponent(ref)
   const repo = encodePath(env.GH_REPO)
   return `${GITHUB_API}/repos/${repo}/contents/${encodePath(path)}?ref=${branch}`
+}
+
+function repositoryApiUrl(resource: string, env: Env): string {
+  const repo = encodePath(env.GH_REPO)
+  return `${GITHUB_API}/repos/${repo}/${resource}`
 }
 
 function headers(env: Env): Record<string, string> {
@@ -72,8 +77,14 @@ export interface GitHubFile {
   sha: string
 }
 
-export async function readFile(path: string, env: Env): Promise<GitHubFile | null> {
-  const response = await fetchWithTimeout(apiUrl(path, env), { headers: headers(env) })
+export async function readFile(
+  path: string,
+  env: Env,
+  ref = env.GH_BRANCH || 'main',
+): Promise<GitHubFile | null> {
+  const response = await fetchWithTimeout(contentsApiUrl(path, env, ref), {
+    headers: headers(env),
+  })
   // 404 表示文件不存在,返回 null 让调用方按"未初始化/未创建"处理。
   if (response.status === 404) return null
   if (!response.ok)
@@ -99,8 +110,8 @@ export function utf8ToBase64(text: string): string {
 }
 
 // contentBase64 必须是已 base64 编码的内容(GitHub Contents API 要求)。
-// 调用方负责编码:文本类内容(加密后的配置/管理员数据)用 utf8ToBase64;
-// 二进制类内容(音频/封面/歌词)由前端以 base64 形式传入,直接透传。
+// 调用方负责编码:文本类内容(管理员数据等)用 utf8ToBase64。
+// 媒体文件使用 createBlob 暂存，并通过 commitTreeAtomically 与配置一起提交。
 // 严禁在此处再次编码,否则会导致生产环境文件内容双重编码而损坏。
 export async function writeFile(
   path: string,
@@ -116,7 +127,7 @@ export async function writeFile(
   }
   if (sha) body.sha = sha
 
-  const response = await fetchWithTimeout(apiUrl(path, env), {
+  const response = await fetchWithTimeout(contentsApiUrl(path, env), {
     method: 'PUT',
     headers: { ...headers(env), 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -135,29 +146,139 @@ export async function writeFile(
   return data.commit?.sha || ''
 }
 
-export async function deleteFile(
-  path: string,
+export interface GitHubBranchSnapshot {
+  commitSha: string
+  treeSha: string
+}
+
+export interface GitHubTreeEntry {
+  path: string
+  mode: '100644'
+  type: 'blob'
+  sha: string | null
+}
+
+export interface GitHubTreeListing {
+  paths: Set<string>
+  truncated: boolean
+}
+
+async function readRequiredJson<T>(url: string, env: Env, operation: string): Promise<T> {
+  const response = await fetchWithTimeout(url, { headers: headers(env) })
+  if (!response.ok) {
+    throw new GitHubReadError(`GitHub ${operation} failed: ${response.status}`, response.status)
+  }
+  return (await response.json()) as T
+}
+
+async function writeJson<T>(
+  url: string,
+  env: Env,
+  operation: string,
+  method: 'POST' | 'PATCH',
+  body: unknown,
+): Promise<T> {
+  const response = await fetchWithTimeout(url, {
+    method,
+    headers: { ...headers(env), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    throw new GitHubWriteError(
+      `GitHub ${operation} failed: ${response.status} ${detail}`,
+      response.status,
+      detail,
+    )
+  }
+  return (await response.json()) as T
+}
+
+/** 获取分支头及其根 Tree，后续所有读取和提交都固定在这份快照上。 */
+export async function getBranchSnapshot(env: Env): Promise<GitHubBranchSnapshot> {
+  const branch = env.GH_BRANCH || 'main'
+  const ref = await readRequiredJson<{ object?: { sha?: string } }>(
+    repositoryApiUrl(`git/ref/heads/${encodePath(branch)}`, env),
+    env,
+    'getBranchRef',
+  )
+  const commitSha = ref.object?.sha
+  if (!commitSha) throw new GitHubReadError('GitHub branch ref has no commit SHA', 502)
+
+  const commit = await readRequiredJson<{ tree?: { sha?: string } }>(
+    repositoryApiUrl(`git/commits/${encodeURIComponent(commitSha)}`, env),
+    env,
+    'getCommit',
+  )
+  const treeSha = commit.tree?.sha
+  if (!treeSha) throw new GitHubReadError('GitHub commit has no tree SHA', 502)
+  return { commitSha, treeSha }
+}
+
+/**
+ * 创建尚未挂载到任何分支的 Git Blob。只有后续原子配置提交成功后，文件才会在线上出现。
+ */
+export async function createBlob(contentBase64: string, env: Env): Promise<string> {
+  const result = await writeJson<{ sha?: string }>(
+    repositoryApiUrl('git/blobs', env),
+    env,
+    'createBlob',
+    'POST',
+    { content: contentBase64, encoding: 'base64' },
+  )
+  if (!result.sha) throw new GitHubWriteError('GitHub createBlob returned no SHA', 502, '')
+  return result.sha
+}
+
+/** 列出快照 Tree 中的文件路径，用于避免删除本来就不存在的条目。 */
+export async function listTreePaths(treeSha: string, env: Env): Promise<GitHubTreeListing> {
+  const result = await readRequiredJson<{
+    tree?: Array<{ path?: string; type?: string }>
+    truncated?: boolean
+  }>(repositoryApiUrl(`git/trees/${encodeURIComponent(treeSha)}?recursive=1`, env), env, 'listTree')
+  const paths = new Set(
+    (result.tree || [])
+      .filter((entry) => entry.type === 'blob' && typeof entry.path === 'string')
+      .map((entry) => entry.path as string),
+  )
+  return { paths, truncated: result.truncated === true }
+}
+
+/**
+ * 基于指定快照创建一个 Commit，并以非 force 方式推进分支。
+ * 如果分支在此期间被其他写入推进，GitHub 会拒绝非快进更新，从而保持原提交不变。
+ */
+export async function commitTreeAtomically(
+  entries: GitHubTreeEntry[],
   env: Env,
   message: string,
-  sha: string,
+  snapshot: GitHubBranchSnapshot,
 ): Promise<string> {
-  const body = JSON.stringify({
-    message,
-    sha,
-    branch: env.GH_BRANCH || 'main',
-  })
+  const tree = await writeJson<{ sha?: string }>(
+    repositoryApiUrl('git/trees', env),
+    env,
+    'createTree',
+    'POST',
+    { base_tree: snapshot.treeSha, tree: entries },
+  )
+  if (!tree.sha) throw new GitHubWriteError('GitHub createTree returned no SHA', 502, '')
 
-  const response = await fetchWithTimeout(apiUrl(path, env), {
-    method: 'DELETE',
-    headers: { ...headers(env), 'Content-Type': 'application/json' },
-    body,
-  })
+  const commit = await writeJson<{ sha?: string }>(
+    repositoryApiUrl('git/commits', env),
+    env,
+    'createCommit',
+    'POST',
+    { message, tree: tree.sha, parents: [snapshot.commitSha] },
+  )
+  if (!commit.sha) throw new GitHubWriteError('GitHub createCommit returned no SHA', 502, '')
 
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => '')
-    throw new Error(`GitHub deleteFile failed: ${response.status} ${errorText}`)
-  }
-
-  const data = (await response.json()) as { commit?: { sha?: string } }
-  return data.commit?.sha || ''
+  const branch = env.GH_BRANCH || 'main'
+  await writeJson(
+    repositoryApiUrl(`git/refs/heads/${encodePath(branch)}`, env),
+    env,
+    'updateBranchRef',
+    'PATCH',
+    { sha: commit.sha, force: false },
+  )
+  return commit.sha
 }

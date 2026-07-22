@@ -1,25 +1,68 @@
 <script setup lang="ts">
-  import { ref } from 'vue'
+  import { onBeforeUnmount, ref } from 'vue'
   import { ChevronDown, Plus, Trash2, Upload } from '@lucide/vue'
   import type { LocalTrackConfig } from '../../types/music'
   import {
     MAX_UPLOAD_BYTES,
     MAX_UPLOAD_SIZE_LABEL,
     uploadFile,
-    deleteFiles,
+    type StagedUpload,
   } from '../services/admin-api'
   import ConfirmModal from './ConfirmModal.vue'
   import Collapse from '../../components/Collapse.vue'
   import BaseInput from '../../components/BaseInput.vue'
+  import { useFileStagingState } from '../composables/useFileStagingState'
 
   const props = defineProps<{ tracks: LocalTrackConfig[] }>()
-  const emit = defineEmits<{ 'update:tracks': [value: LocalTrackConfig[]] }>()
+  const emit = defineEmits<{
+    'update:tracks': [value: LocalTrackConfig[]]
+    'file-staged': [value: StagedUpload]
+  }>()
 
   const expanded = ref<number | null>(null)
   const pendingRemoveIndex = ref<number | null>(null)
-  const removingIndex = ref<number | null>(null)
-  const removeStatus = ref('')
   const uploadStatus = ref<Record<string, string>>({})
+  const uploadingKeys = ref<Set<string>>(new Set())
+  const statusTimers = new Map<string, number>()
+  const { beginFileStaging } = useFileStagingState()
+
+  onBeforeUnmount(() => {
+    for (const timer of statusTimers.values()) window.clearTimeout(timer)
+    statusTimers.clear()
+  })
+
+  function isUploading(key: string): boolean {
+    return uploadingKeys.value.has(key)
+  }
+
+  function uploadKey(
+    track: LocalTrackConfig,
+    index: number,
+    role: 'audio' | 'cover' | 'lyrics',
+  ): string {
+    return `${track.id || `index-${index}`}-${role}`
+  }
+
+  function setUploading(key: string, uploading: boolean) {
+    const next = new Set(uploadingKeys.value)
+    if (uploading) next.add(key)
+    else next.delete(key)
+    uploadingKeys.value = next
+  }
+
+  function clearStatusLater(key: string) {
+    const existing = statusTimers.get(key)
+    if (existing !== undefined) window.clearTimeout(existing)
+    statusTimers.set(
+      key,
+      window.setTimeout(() => {
+        const next = { ...uploadStatus.value }
+        delete next[key]
+        uploadStatus.value = next
+        statusTimers.delete(key)
+      }, 3000),
+    )
+  }
 
   function update(index: number, patch: Partial<LocalTrackConfig>) {
     const next = props.tracks.map((item, i) => (i === index ? { ...item, ...patch } : item))
@@ -32,20 +75,8 @@
     expanded.value = props.tracks.length
   }
 
-  async function remove(index: number) {
-    const track = props.tracks[index]
-    if (!track) return
-    const paths: string[] = []
-    if (track.audio?.startsWith('./music/')) paths.push(`public${track.audio.slice(1)}`)
-    if (track.cover?.startsWith('./music/')) paths.push(`public${track.cover.slice(1)}`)
-    if (track.lyrics?.startsWith('./music/')) paths.push(`public${track.lyrics.slice(1)}`)
-    if (paths.length) {
-      const result = await deleteFiles(paths)
-      if (!result.ok) {
-        removeStatus.value = result.error || '部分文件删除失败,曲目未从配置中移除'
-        return
-      }
-    }
+  function remove(index: number) {
+    if (!props.tracks[index]) return
     emit(
       'update:tracks',
       props.tracks.filter((_, i) => i !== index),
@@ -55,27 +86,18 @@
   }
 
   function requestRemove(index: number) {
-    removeStatus.value = ''
     pendingRemoveIndex.value = index
   }
 
   function cancelRemove() {
-    removeStatus.value = ''
     pendingRemoveIndex.value = null
   }
 
-  async function confirmRemove() {
-    if (pendingRemoveIndex.value === null || removingIndex.value !== null) return
+  function confirmRemove() {
+    if (pendingRemoveIndex.value === null) return
     const index = pendingRemoveIndex.value
-    removingIndex.value = index
-    try {
-      await remove(index)
-      if (!removeStatus.value) {
-        pendingRemoveIndex.value = null
-      }
-    } finally {
-      removingIndex.value = null
-    }
+    remove(index)
+    pendingRemoveIndex.value = null
   }
 
   function getIncompleteReason(track: LocalTrackConfig): string {
@@ -109,29 +131,49 @@
     const file = input.files?.[0]
     if (!file) return
 
-    const key = `${index}-${role}`
+    const track = props.tracks[index]
+    if (!track) {
+      input.value = ''
+      return
+    }
+    const key = uploadKey(track, index, role)
+    if (isUploading(key)) {
+      input.value = ''
+      return
+    }
     if (file.size > MAX_UPLOAD_BYTES) {
       uploadStatus.value[key] = `文件过大(>${MAX_UPLOAD_SIZE_LABEL})`
       input.value = ''
+      clearStatusLater(key)
       return
     }
 
-    const track = props.tracks[index]
     if (!track.id) {
       uploadStatus.value[key] = '请先填写曲目 ID'
       input.value = ''
+      clearStatusLater(key)
       return
     }
 
-    uploadStatus.value[key] = '上传中...'
+    const finishFileStaging = beginFileStaging()
+    setUploading(key, true)
+    uploadStatus.value[key] = '正在暂存...'
     try {
       const base64 = await readFileAsBase64(file)
       const ext = getExt(file.name)
       const path = `public/music/${track.id}/${role}.${ext}`
       const result = await uploadFile(path, base64)
-      if (result.ok) {
-        update(index, { [role]: `./music/${track.id}/${role}.${ext}` })
-        uploadStatus.value[key] = '上传成功'
+      if (result.ok && result.blobSha && result.path) {
+        const currentIndex = props.tracks.findIndex(
+          (item) => item === track || item.id === track.id,
+        )
+        if (currentIndex < 0) {
+          uploadStatus.value[key] = '曲目已被修改,暂存文件未加入配置'
+          return
+        }
+        emit('file-staged', { path: result.path, blobSha: result.blobSha })
+        update(currentIndex, { [role]: `./music/${track.id}/${role}.${ext}` })
+        uploadStatus.value[key] = '已暂存，保存全部后生效'
       } else {
         uploadStatus.value[key] = result.error || '上传失败'
       }
@@ -139,9 +181,9 @@
       uploadStatus.value[key] = '读取文件失败'
     } finally {
       input.value = ''
-      window.setTimeout(() => {
-        delete uploadStatus.value[key]
-      }, 3000)
+      setUploading(key, false)
+      finishFileStaging()
+      clearStatusLater(key)
     }
   }
 </script>
@@ -215,55 +257,75 @@
             <div class="upload-cell">
               <span>音频 *</span>
               <small v-if="track.audio">{{ track.audio }}</small>
-              <label class="upload-button">
+              <label
+                class="upload-button"
+                :class="{ disabled: isUploading(uploadKey(track, index, 'audio')) }"
+              >
                 <Upload :size="13" />
                 <span>{{ track.audio ? '替换音频' : '上传音频' }}</span>
-                <input type="file" accept="audio/*" @change="handleFile(index, 'audio', $event)" />
+                <input
+                  type="file"
+                  accept="audio/*"
+                  :disabled="isUploading(uploadKey(track, index, 'audio'))"
+                  @change="handleFile(index, 'audio', $event)"
+                />
               </label>
-              <small v-if="uploadStatus[`${index}-audio`]" class="upload-status">
-                {{ uploadStatus[`${index}-audio`] }}
+              <small v-if="uploadStatus[uploadKey(track, index, 'audio')]" class="upload-status">
+                {{ uploadStatus[uploadKey(track, index, 'audio')] }}
               </small>
             </div>
 
             <div class="upload-cell">
               <span>封面(可选)</span>
               <small v-if="track.cover">{{ track.cover }}</small>
-              <label class="upload-button">
+              <label
+                class="upload-button"
+                :class="{ disabled: isUploading(uploadKey(track, index, 'cover')) }"
+              >
                 <Upload :size="13" />
                 <span>{{ track.cover ? '替换封面' : '上传封面' }}</span>
-                <input type="file" accept="image/*" @change="handleFile(index, 'cover', $event)" />
+                <input
+                  type="file"
+                  accept="image/*"
+                  :disabled="isUploading(uploadKey(track, index, 'cover'))"
+                  @change="handleFile(index, 'cover', $event)"
+                />
               </label>
-              <small v-if="uploadStatus[`${index}-cover`]" class="upload-status">
-                {{ uploadStatus[`${index}-cover`] }}
+              <small v-if="uploadStatus[uploadKey(track, index, 'cover')]" class="upload-status">
+                {{ uploadStatus[uploadKey(track, index, 'cover')] }}
               </small>
             </div>
 
             <div class="upload-cell">
               <span>歌词 LRC(可选)</span>
               <small v-if="track.lyrics">{{ track.lyrics }}</small>
-              <label class="upload-button">
+              <label
+                class="upload-button"
+                :class="{ disabled: isUploading(uploadKey(track, index, 'lyrics')) }"
+              >
                 <Upload :size="13" />
                 <span>{{ track.lyrics ? '替换歌词' : '上传歌词' }}</span>
                 <input
                   type="file"
                   accept=".lrc,text/plain"
+                  :disabled="isUploading(uploadKey(track, index, 'lyrics'))"
                   @change="handleFile(index, 'lyrics', $event)"
                 />
               </label>
-              <small v-if="uploadStatus[`${index}-lyrics`]" class="upload-status">
-                {{ uploadStatus[`${index}-lyrics`] }}
+              <small v-if="uploadStatus[uploadKey(track, index, 'lyrics')]" class="upload-status">
+                {{ uploadStatus[uploadKey(track, index, 'lyrics')] }}
               </small>
             </div>
           </div>
 
           <div class="danger-zone">
             <span>
-              <strong>删除本地曲目</strong>
-              <small>会立即删除已上传到本曲目目录的文件,并从当前配置中移除该曲目</small>
+              <strong>从草稿移除</strong>
+              <small>保存前可以撤销，不会立刻影响线上音乐</small>
             </span>
             <button class="remove-button" type="button" @click="requestRemove(index)">
               <Trash2 :size="14" />
-              <span>删除</span>
+              <span>移除</span>
             </button>
           </div>
         </div>
@@ -277,11 +339,10 @@
 
     <ConfirmModal
       :visible="pendingRemoveIndex !== null"
-      title="删除这首本地音乐?"
+      title="从草稿移除这首音乐?"
       cancel-text="取消"
-      :confirm-text="removingIndex !== null ? '删除中...' : '确认删除'"
+      confirm-text="确认移除"
       danger
-      :loading="removingIndex !== null"
       @cancel="cancelRemove"
       @confirm="confirmRemove"
     >
@@ -294,9 +355,8 @@
             '未命名曲目'
           }}
         </strong>
-        ,并立即删除已上传到该曲目目录的音频、封面和歌词文件。文件删除成功后,曲目会从当前配置中移除。
+        。现在只会修改当前草稿，不会立刻影响线上网站。保存后，这首音乐和不再使用的关联文件会一起移除；保存前仍可撤销。
       </p>
-      <p v-if="removeStatus" class="remove-status">{{ removeStatus }}</p>
     </ConfirmModal>
   </div>
 </template>
@@ -475,6 +535,12 @@
       background: rgba(255, 255, 255, 0.12);
     }
 
+    &.disabled {
+      opacity: 0.55;
+      cursor: wait;
+      pointer-events: none;
+    }
+
     input[type='file'] {
       display: none;
     }
@@ -514,13 +580,6 @@
         line-height: 1.45;
       }
     }
-  }
-
-  .remove-status {
-    margin: 10px 0 0;
-    color: #ff8b8b;
-    font-size: 0.76rem;
-    line-height: 1.45;
   }
 
   .add-button {

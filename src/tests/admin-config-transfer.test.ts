@@ -1,4 +1,5 @@
 import { mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import AdminSidebar from '../admin/components/AdminSidebar.vue'
 import ConfigTransferView from '../admin/views/ConfigTransferView.vue'
@@ -98,6 +99,56 @@ describe('admin plaintext config import/export', () => {
     expect(restored.classes()).toContain('collapsed')
 
     restored.unmount()
+  })
+
+  it('waits for the mobile navigation to close before emitting save', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn().mockReturnValue({
+        matches: true,
+        media: '(max-width: 760px)',
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }),
+    )
+
+    const wrapper = mount(AdminSidebar, {
+      attachTo: document.body,
+      props: {
+        active: 'site',
+        config: validConfig(),
+        saving: false,
+      },
+    })
+
+    try {
+      await wrapper.get('button[aria-label="打开管理导航"]').trigger('click')
+      await vi.advanceTimersByTimeAsync(40)
+      await nextTick()
+
+      const mobileSave = document.body.querySelector<HTMLButtonElement>(
+        '.mobile-nav-panel .sidebar-save',
+      )
+      if (!mobileSave) throw new Error('Mobile save button was not rendered')
+      mobileSave.click()
+      await nextTick()
+
+      expect(wrapper.emitted('save')).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(359)
+      expect(wrapper.emitted('save')).toBeUndefined()
+
+      await vi.advanceTimersByTimeAsync(1)
+      await nextTick()
+      expect(wrapper.emitted('save')).toHaveLength(1)
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
   })
 
   it('warns before exporting plaintext JSON and includes sensitive config fields', async () => {

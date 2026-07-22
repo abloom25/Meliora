@@ -7,7 +7,7 @@ import {
   getSigningSecret,
 } from './auth'
 import { getConfig, putConfig } from './config-handler'
-import { uploadFile, deleteTrackFiles } from './upload-handler'
+import { uploadFile } from './upload-handler'
 import {
   verifyAdminPassword,
   isInitialized,
@@ -65,7 +65,7 @@ const UPDATE_STATUS_RATE_LIMIT = {
   blockMs: 2 * 60 * 1000,
 }
 
-// changePassword 执行 PBKDF2 100k 迭代(CPU 密集),token 泄露后可被滥用消耗 CPU,故限流。
+// changePassword 执行 PBKDF2 600k 迭代(CPU 密集),token 泄露后可被滥用消耗 CPU,故限流。
 const CHANGE_PASSWORD_RATE_LIMIT = {
   key: 'change-password',
   limit: 5,
@@ -406,23 +406,6 @@ export async function handleRequest(
         return jsonResponse({ error: `文件过大,最大 ${UPLOAD_LIMITS.MAX_SIZE_LABEL}` }, 413)
       }
       return uploadFile({ path: body.path, content: body.content }, env)
-    }
-
-    if (path === '/api/file' && request.method === 'DELETE') {
-      if (!(await verifyAuth(request, env))) {
-        return jsonResponse({ error: '未授权' }, 401)
-      }
-      const csrfError = await csrfErrorResponse(request, env)
-      if (csrfError) return csrfError
-      const body = (await request.json().catch(() => null)) as { paths?: string[] } | null
-      if (!body || !Array.isArray(body.paths)) {
-        return jsonResponse({ error: '缺少 paths' }, 400)
-      }
-      // 限制单次删除数量,避免并发发起大量 GitHub API 请求触发速率限制或超时。
-      if (body.paths.length > 50) {
-        return jsonResponse({ error: '单次最多删除 50 个文件' }, 400)
-      }
-      return deleteTrackFiles(body.paths, env)
     }
 
     return jsonResponse({ error: '未找到' }, 404)

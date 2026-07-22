@@ -21,10 +21,11 @@
 
   const SIDEBAR_COLLAPSED_KEY = 'meliora:admin-sidebar-collapsed'
 
-  defineProps<{
+  const props = defineProps<{
     active: string
     config: MusicConfig | null
     saving: boolean
+    saveDisabled?: boolean
   }>()
 
   const emit = defineEmits<{
@@ -46,6 +47,7 @@
   ]
 
   const menuOpen = ref(false)
+  const pendingMobileAction = ref<'save' | 'logout' | 'back' | null>(null)
   const desktopCollapsed = ref(loadDesktopCollapsed())
   const mobileNavPanelRef = ref<HTMLElement | null>(null)
   const mobileNavHandleRef = ref<HTMLElement | null>(null)
@@ -94,6 +96,9 @@
     active: menuOpen,
     onDismiss: () => {
       menuOpen.value = false
+      const action = pendingMobileAction.value
+      pendingMobileAction.value = null
+      if (action) emitAction(action)
     },
     sheetHeight: () => getSheetHeight(mobileNavPanelRef.value),
     halfOffset: () => getSheetHalfOffset(mobileNavPanelRef.value),
@@ -109,16 +114,30 @@
   })
 
   const mobileNavIsHalf = computed(() => mobileNavDetent.value === 'half')
+  const saveLabel = computed(() => {
+    if (props.saving) return '保存中...'
+    if (props.saveDisabled) return '暂存文件中...'
+    return '保存全部'
+  })
 
   function selectTab(tabId: string) {
     emit('update:active', tabId)
     closeMobileNavAnimated()
   }
 
-  function emitAndClose(action: 'save' | 'logout' | 'back') {
+  function emitAction(action: 'save' | 'logout' | 'back') {
     if (action === 'save') emit('save')
     else if (action === 'logout') emit('logout')
     else if (action === 'back') emit('back')
+  }
+
+  function emitAndClose(action: 'save' | 'logout' | 'back') {
+    if (menuOpen.value && isMobileViewport()) {
+      pendingMobileAction.value = action
+      dismissMobileNavAnimated()
+      return
+    }
+    emitAction(action)
     closeMobileNavAnimated()
   }
 
@@ -244,11 +263,11 @@
             <button
               type="button"
               class="sidebar-save"
-              :disabled="saving"
+              :disabled="saving || saveDisabled"
               @click="emitAndClose('save')"
             >
               <Save :size="16" />
-              <span class="sidebar-label">{{ saving ? '保存中...' : '保存全部' }}</span>
+              <span class="sidebar-label">{{ saveLabel }}</span>
             </button>
             <button type="button" class="sidebar-action logout" @click="emitAndClose('logout')">
               <LogOut :size="15" />
@@ -267,12 +286,12 @@
       <button
         type="button"
         class="sidebar-save"
-        :disabled="saving"
-        :title="desktopCollapsed ? (saving ? '保存中...' : '保存全部') : undefined"
+        :disabled="saving || saveDisabled"
+        :title="desktopCollapsed ? saveLabel : undefined"
         @click="emitAndClose('save')"
       >
         <Save :size="16" />
-        <span class="sidebar-label">{{ saving ? '保存中...' : '保存全部' }}</span>
+        <span class="sidebar-label">{{ saveLabel }}</span>
       </button>
       <button
         type="button"

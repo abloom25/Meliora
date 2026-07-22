@@ -97,7 +97,11 @@ describe('admin-api', () => {
   })
 
   it('accepts base64 content length produced by an exact 25 MiB file', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ path: 'public/music/a/audio.mp3' }))
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ path: 'public/music/a/audio.mp3', blobSha: 'a'.repeat(40) }),
+      )
     vi.stubGlobal('fetch', fetchMock)
 
     const { MAX_UPLOAD_BASE64_LENGTH, uploadFile } = await import('../admin/services/admin-api')
@@ -110,22 +114,21 @@ describe('admin-api', () => {
     expect(fetchMock).toHaveBeenCalled()
   })
 
-  it('reports partial delete failures from backend results', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      jsonResponse({
-        results: [
-          { path: 'public/music/a/audio.mp3', deleted: true },
-          { path: 'public/music/a/cover.jpg', deleted: false },
-        ],
-      }),
-    )
+  it('sends config and staged blob references in one save request', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ sha: 'commit-next' }))
     vi.stubGlobal('fetch', fetchMock)
 
-    const { deleteFiles } = await import('../admin/services/admin-api')
-    const result = await deleteFiles(['public/music/a/audio.mp3', 'public/music/a/cover.jpg'])
+    const { saveConfig } = await import('../admin/services/admin-api')
+    const current = validConfig({
+      siteIcon: './icon.png',
+    })
+    const uploads = [{ path: 'public/icon.png', blobSha: 'a'.repeat(40) }]
+    const result = await saveConfig(current, uploads)
 
-    expect(result.ok).toBe(false)
-    expect(result.error).toContain('public/music/a/cover.jpg')
+    expect(result.ok).toBe(true)
+    const configCall = fetchMock.mock.calls.find((call) => call[0] === '/api/config')
+    expect(configCall).toBeDefined()
+    expect(JSON.parse(String(configCall?.[1]?.body))).toEqual({ config: current, uploads })
   })
 
   it('does not send invalid empty local tracks to the backend', async () => {

@@ -15,22 +15,15 @@ export interface SaveResult {
 
 export interface UploadResult {
   ok: boolean
-  sha?: string
+  blobSha?: string
   path?: string
   local?: boolean
   error?: string
 }
 
-export interface DeleteFileResult {
+export interface StagedUpload {
   path: string
-  deleted: boolean
-  error?: string
-}
-
-export interface DeleteFilesResult {
-  ok: boolean
-  results: DeleteFileResult[]
-  error?: string
+  blobSha: string
 }
 
 export const MAX_UPLOAD_BYTES = UPLOAD_LIMITS.MAX_BYTES
@@ -115,7 +108,10 @@ export async function fetchConfig(): Promise<MusicConfig | null> {
   return result.ok ? result.data : null
 }
 
-export async function saveConfig(config: MusicConfig): Promise<SaveResult> {
+export async function saveConfig(
+  config: MusicConfig,
+  uploads: StagedUpload[] = [],
+): Promise<SaveResult> {
   const validation = validateMusicConfig(config)
   if (!validation.valid) {
     return { ok: false, error: validation.errors.join('; ') }
@@ -126,7 +122,7 @@ export async function saveConfig(config: MusicConfig): Promise<SaveResult> {
     {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(config),
+      body: JSON.stringify({ config, uploads }),
     },
     { fallbackError: '保存失败' },
   )
@@ -171,7 +167,7 @@ export async function uploadFile(path: string, content: string): Promise<UploadR
     return { ok: false, error: `文件过大,最大 ${MAX_UPLOAD_SIZE_LABEL}` }
   }
 
-  const result = await requestAdminJson<{ sha?: string; path?: string; local?: boolean }>(
+  const result = await requestAdminJson<{ blobSha?: string; path?: string; local?: boolean }>(
     '/api/upload',
     {
       method: 'POST',
@@ -181,35 +177,15 @@ export async function uploadFile(path: string, content: string): Promise<UploadR
     { fallbackError: '上传失败' },
   )
   if (!result.ok) return { ok: false, error: result.error }
-  return { ok: true, sha: result.data.sha, path: result.data.path, local: result.data.local }
-}
-
-export async function deleteFiles(paths: string[]): Promise<DeleteFilesResult> {
-  if (paths.length === 0) return { ok: true, results: [] }
-
-  const request = await requestAdminJson<{ results?: DeleteFileResult[] }>(
-    '/api/file',
-    {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paths }),
-    },
-    { fallbackError: '删除失败' },
-  )
-  const results = Array.isArray(request.data.results) ? request.data.results : []
-  if (!request.ok) return { ok: false, results, error: request.error }
-  if (results.length !== paths.length) {
-    return { ok: false, results, error: '删除结果数量异常,请刷新后重试' }
+  if (!result.data.blobSha || !result.data.path) {
+    return { ok: false, error: '暂存响应不完整,文件未加入待保存列表' }
   }
-  const failed = results.filter((item) => !item.deleted)
-  if (failed.length > 0) {
-    return {
-      ok: false,
-      results,
-      error: `部分文件删除失败: ${failed.map((item) => item.path).join(', ')}`,
-    }
+  return {
+    ok: true,
+    blobSha: result.data.blobSha,
+    path: result.data.path,
+    local: result.data.local,
   }
-  return { ok: true, results }
 }
 
 export async function changePassword(current: string, next: string): Promise<SaveResult> {

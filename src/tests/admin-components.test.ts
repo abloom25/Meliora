@@ -9,7 +9,6 @@ import SiteSettingsEditor from '../admin/components/SiteSettingsEditor.vue'
 
 const adminApiMock = vi.hoisted(() => ({
   changePassword: vi.fn(),
-  deleteFiles: vi.fn(),
   uploadFile: vi.fn(),
   testMusicApi: vi.fn(),
 }))
@@ -18,7 +17,6 @@ vi.mock('../admin/services/admin-api', () => ({
   MAX_UPLOAD_BYTES: 25 * 1024 * 1024,
   MAX_UPLOAD_SIZE_LABEL: '25MB',
   changePassword: adminApiMock.changePassword,
-  deleteFiles: adminApiMock.deleteFiles,
   uploadFile: adminApiMock.uploadFile,
   testMusicApi: adminApiMock.testMusicApi,
 }))
@@ -58,16 +56,7 @@ describe('admin consistency components', () => {
     wrapper.unmount()
   })
 
-  it('keeps a local track when backend file deletion only partially succeeds', async () => {
-    adminApiMock.deleteFiles.mockResolvedValue({
-      ok: false,
-      results: [
-        { path: 'public/music/t1/audio.mp3', deleted: true },
-        { path: 'public/music/t1/cover.jpg', deleted: false },
-      ],
-      error: '部分文件删除失败: public/music/t1/cover.jpg',
-    })
-
+  it('only removes a local track from the draft and never deletes files immediately', async () => {
     const wrapper = mount(LocalTrackEditor, {
       attachTo: document.body,
       props: {
@@ -86,14 +75,10 @@ describe('admin consistency components', () => {
     await wrapper.find('button.remove-button').trigger('click')
     await nextTick()
     await document.body.querySelector<HTMLButtonElement>('.confirm-modal-btn.confirm')?.click()
-    await flushPromises()
+    await nextTick()
 
-    expect(adminApiMock.deleteFiles).toHaveBeenCalledWith([
-      'public/music/t1/audio.mp3',
-      'public/music/t1/cover.jpg',
-    ])
-    expect(wrapper.emitted('update:tracks')).toBeUndefined()
-    expect(document.body.textContent).toContain('部分文件删除失败')
+    expect(wrapper.emitted('update:tracks')?.[0]).toEqual([[]])
+    expect(document.body.textContent).not.toContain('立即删除')
 
     wrapper.unmount()
   })
@@ -102,7 +87,8 @@ describe('admin consistency components', () => {
     let resolveUpload!: () => void
     adminApiMock.uploadFile.mockReturnValue(
       new Promise((resolve) => {
-        resolveUpload = () => resolve({ ok: true, path: 'public/icon.png' })
+        resolveUpload = () =>
+          resolve({ ok: true, path: 'public/icon.png', blobSha: 'a'.repeat(40) })
       }),
     )
 
@@ -128,6 +114,7 @@ describe('admin consistency components', () => {
       props: { config: config() },
     })
     const fileInput = wrapper.find<HTMLInputElement>('input[type="file"]')
+    const iconUrlInput = wrapper.find<HTMLInputElement>('input[type="url"]')
     const file = new File(['icon'], 'icon.png', { type: 'image/png' })
     Object.defineProperty(fileInput.element, 'files', {
       value: [file],
@@ -137,7 +124,9 @@ describe('admin consistency components', () => {
     const change = fileInput.trigger('change')
     await nextTick()
 
-    expect(wrapper.text()).toContain('上传中...')
+    expect(wrapper.text()).toContain('正在暂存...')
+    expect(fileInput.attributes('disabled')).toBeDefined()
+    expect(iconUrlInput.attributes('disabled')).toBeDefined()
 
     const reader = FakeFileReader.lastInstance
     if (!reader) throw new Error('FileReader was not created')
@@ -145,15 +134,21 @@ describe('admin consistency components', () => {
     reader.onload?.(new ProgressEvent('load') as ProgressEvent<FileReader>)
     await flushPromises()
 
-    expect(wrapper.text()).toContain('上传中...')
+    expect(wrapper.text()).toContain('正在暂存...')
+    expect(fileInput.attributes('disabled')).toBeDefined()
     expect(adminApiMock.uploadFile).toHaveBeenCalledWith('public/icon.png', 'aWNvbg==')
 
     resolveUpload()
     await change
     await nextTick()
 
-    expect(wrapper.text()).toContain('上传成功')
+    expect(wrapper.text()).toContain('已暂存，保存全部后生效')
+    expect(fileInput.attributes('disabled')).toBeUndefined()
+    expect(iconUrlInput.attributes('disabled')).toBeUndefined()
     expect(wrapper.emitted('update:config')?.[0]).toEqual([{ ...config(), siteIcon: './icon.png' }])
+    expect(wrapper.emitted('file-staged')?.[0]).toEqual([
+      { path: 'public/icon.png', blobSha: 'a'.repeat(40) },
+    ])
   })
 
   it('does not offer SVG as an uploadable site icon type', () => {
