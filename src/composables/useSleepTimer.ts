@@ -54,6 +54,13 @@ export function useSleepTimer(options: UseSleepTimerOptions) {
     sleepTimerId = window.setTimeout(tickSleepTimer, 1000)
   }
 
+  // 后台标签页里 1s 链式 setTimeout 会被浏览器节流（最长可延迟约 1 分钟），
+  // 回到前台时立即校验 endsAt，已过期则直接走 tick 的到期分支，不等下一次 tick。
+  function handleVisibilityChange() {
+    if (document.hidden || !sleepTimerEndsAt) return
+    if (Date.now() >= sleepTimerEndsAt) tickSleepTimer()
+  }
+
   function setSleepTimer(minutes: number) {
     sleepTimerMinutes.value = minutes
     sleepTimerDraftMinutes.value = null
@@ -84,7 +91,16 @@ export function useSleepTimer(options: UseSleepTimerOptions) {
     setSleepTimer(snapSleepTimerMinutes(value))
   }
 
-  onBeforeUnmount(clearSleepTimer)
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+  }
+
+  onBeforeUnmount(() => {
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+    clearSleepTimer()
+  })
 
   return {
     sleepTimerMinutes,

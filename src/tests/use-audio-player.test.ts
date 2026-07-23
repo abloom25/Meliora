@@ -312,4 +312,46 @@ describe('useAudioPlayer', () => {
       restore()
     }
   })
+
+  it('retries a previously failed track after the failure TTL expires', async () => {
+    vi.useFakeTimers()
+    const originalPlay = HTMLAudioElement.prototype.play
+    const playMock = vi.fn().mockResolvedValue(undefined)
+    HTMLAudioElement.prototype.play = playMock
+    try {
+      const { player, store } = mountPlayer()
+      store.settings.playMode = 'loop'
+      store.settings.skipOnError = false
+
+      await player.selectAndPlay(tracks[0]!, tracks)
+      await Promise.resolve()
+
+      // track2 播放失败一次 → 被标记失败（next 路径不 bump queueVersion，标记保留）
+      playMock.mockRejectedValueOnce(new DOMException('boom', 'NotSupportedError'))
+      await player.next(true)
+      await Promise.resolve()
+      expect(store.currentTrackId).toBe('2')
+
+      // 回到 track1；TTL 内手动下一首会跳过 track2 落到 track3
+      await player.previous()
+      await Promise.resolve()
+      expect(store.currentTrackId).toBe('1')
+      await player.next(true)
+      await Promise.resolve()
+      expect(store.currentTrackId).toBe('3')
+
+      // 超过 TTL（5 分钟）后允许重试：上一首可以停在 track2 并成功播放
+      vi.setSystemTime(Date.now() + 5 * 60 * 1000 + 1000)
+      await player.play()
+      await Promise.resolve()
+      await player.previous()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(store.currentTrackId).toBe('2')
+      expect(store.isPlaying).toBe(true)
+    } finally {
+      HTMLAudioElement.prototype.play = originalPlay
+      vi.useRealTimers()
+    }
+  })
 })

@@ -130,6 +130,9 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     preloadSlots,
     preloadMessage,
     failedTrackIds,
+    markTrackFailed,
+    clearFailedTrack,
+    isTrackFailed,
     predictNextTrack,
     clearPreloads,
     clearSlot,
@@ -542,7 +545,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
             : await loadSlot(direction, track)
         if (!ready || isSwitchAborted(controller)) {
           if (!ready) {
-            failedTrackIds.add(track.id)
+            markTrackFailed(track.id)
             if (shouldPlay && settings.value.skipOnError && queue.length > 1) {
               preloadMessage.value = `已跳过暂时无法播放的歌曲，正在继续播放`
               schedulePlayerTimeout(() => void next(false), 80)
@@ -615,6 +618,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         .then(() => {
           // 启动期间用户又点了别的歌：本次播放作废，让新流程接管收尾
           if (isSwitchAborted(controller)) return
+          // 播放成功即解除失败标记：手动点选曾被拉黑的曲目时立即恢复
+          clearFailedTrack(track.id)
           currentTime.value = newAudio.currentTime
           duration.value = Number.isFinite(newAudio.duration) ? newAudio.duration : 0
           isPlaying.value = true
@@ -638,7 +643,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         })
         .catch((error) => {
           if (isSwitchAborted(controller)) return
-          failedTrackIds.add(track.id)
+          markTrackFailed(track.id)
           store.errorMessage = describePlaybackError(error, newAudio)
           newAudio.pause()
           if (settings.value.skipOnError && queue.length > 1) {
@@ -706,7 +711,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     for (let offset = 1; offset <= queue.length; offset += 1) {
       const index = (store.currentIndex - offset + queue.length) % queue.length
       const candidate = queue[index]
-      if (!candidate || failedTrackIds.has(candidate.id)) continue
+      if (!candidate || isTrackFailed(candidate.id)) continue
       const switched = await switchToTrack(candidate, queue, {
         shouldPlay: isPlaying.value,
         direction: 'previous',
@@ -855,7 +860,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       automaticCrossfadeStarted = false
       const willSkip = Boolean(failedTrack) && settings.value.skipOnError && store.queue.length > 1
       if (failedTrack) {
-        failedTrackIds.add(failedTrack.id)
+        markTrackFailed(failedTrack.id)
         if (wasTransitioning) {
           console.warn(
             '[useAudioPlayer] active audio error during transition',

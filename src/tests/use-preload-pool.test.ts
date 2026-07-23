@@ -256,4 +256,42 @@ describe('usePreloadPool', () => {
     expect(MockImage.instances).toHaveLength(71)
     expect(MockImage.instances.at(-1)?.src).toBe(coverUrls[0])
   })
+
+  it('clearFailedTrack removes the failure mark so the track can be predicted again', async () => {
+    const settings = ref({ ...defaultSettings })
+    const { pool, store } = mountPool(settings)
+    store.settings.playMode = 'loop'
+    store.selectTrack(tracks[0]!, tracks)
+
+    const ready = pool.loadSlot('next', tracks[1]!)
+    pool.preloadSlots.next.audio.dispatchEvent(new Event('error'))
+    await expect(ready).resolves.toBe(false)
+    expect(pool.predictNextTrack(true)?.id).toBe('3')
+
+    pool.clearFailedTrack('2')
+    expect(pool.predictNextTrack(true)?.id).toBe('2')
+  })
+
+  it('allows a failed track to be retried after the failure TTL expires', async () => {
+    vi.useFakeTimers()
+    try {
+      const settings = ref({ ...defaultSettings })
+      const { pool, store } = mountPool(settings)
+      store.settings.playMode = 'loop'
+      store.selectTrack(tracks[0]!, tracks)
+
+      const ready = pool.loadSlot('next', tracks[1]!)
+      pool.preloadSlots.next.audio.dispatchEvent(new Event('error'))
+      await expect(ready).resolves.toBe(false)
+
+      // 失败标记有效期内跳过该曲目
+      expect(pool.predictNextTrack(true)?.id).toBe('3')
+
+      // 超过 TTL（5 分钟）后放行重试一次
+      vi.setSystemTime(Date.now() + 5 * 60 * 1000 + 1000)
+      expect(pool.predictNextTrack(true)?.id).toBe('2')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

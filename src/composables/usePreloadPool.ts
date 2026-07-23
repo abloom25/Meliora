@@ -7,6 +7,9 @@ import { PRELOAD_TIMEOUTS, CACHE_CONSTANTS } from '../../shared/constants'
 const PRELOAD_READY_TIMEOUT = PRELOAD_TIMEOUTS.COVER
 const COVER_PRELOAD_CACHE_LIMIT = CACHE_CONSTANTS.COVER_PRELOAD_LIMIT
 const COVER_PRELOAD_CACHE_TTL = CACHE_CONSTANTS.COVER_PRELOAD_TTL
+// 失败标记的重试窗口:超过后允许该曲目重试一次,
+// 避免一次瞬时网络抖动把曲目拉黑整个会话。
+const FAILED_TRACK_RETRY_TTL = 5 * 60 * 1000
 export type PreloadDirection = 'previous' | 'next'
 
 export interface PreloadSlot {
@@ -118,13 +121,33 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     },
   }
   const preloadMessage = ref('')
-  const failedTrackIds = new Set<string>()
+  // id → 失败时间戳;判断走 isTrackFailed(TTL 过期自动放行),写入走 markTrackFailed。
+  const failedTrackIds = new Map<string, number>()
   const pendingPreloadTimeouts = new Set<number>()
   const isPoolUnmounted = ref(false)
 
+  function markTrackFailed(id: string) {
+    failedTrackIds.set(id, Date.now())
+  }
+
+  function clearFailedTrack(id: string) {
+    failedTrackIds.delete(id)
+  }
+
+  function isTrackFailed(id: string): boolean {
+    const failedAt = failedTrackIds.get(id)
+    if (failedAt === undefined) return false
+    if (Date.now() - failedAt > FAILED_TRACK_RETRY_TTL) {
+      // 超过重试窗口,放行一次;若再次失败会由 markTrackFailed 重新计时
+      failedTrackIds.delete(id)
+      return false
+    }
+    return true
+  }
+
   function findCachedTrack(direction: PreloadDirection): Track | null {
     const track = preloadSlots[direction].track
-    if (!track || track.id === store.currentTrack?.id || failedTrackIds.has(track.id)) return null
+    if (!track || track.id === store.currentTrack?.id || isTrackFailed(track.id)) return null
     return track
   }
 
@@ -132,7 +155,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     const queue = store.queue
     if (!queue.length) return null
     if (store.currentIndex < 0) {
-      return queue.find((track) => !failedTrackIds.has(track.id)) ?? null
+      return queue.find((track) => !isTrackFailed(track.id)) ?? null
     }
 
     const step = direction === 'next' ? 1 : -1
@@ -141,7 +164,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
       direction === 'next' && store.settings.playMode === 'single' && !manual
     if (shouldRepeatCurrent) {
       const current = store.currentTrack
-      return current && !failedTrackIds.has(current.id) ? current : null
+      return current && !isTrackFailed(current.id) ? current : null
     }
 
     for (let offset = 1; offset <= queue.length; offset += 1) {
@@ -149,7 +172,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
       if (!wraps && (rawIndex < 0 || rawIndex >= queue.length)) return null
       const index = ((rawIndex % queue.length) + queue.length) % queue.length
       const candidate = queue[index]
-      if (candidate && !failedTrackIds.has(candidate.id)) return candidate
+      if (candidate && !isTrackFailed(candidate.id)) return candidate
     }
     return null
   }
@@ -158,7 +181,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     if (store.settings.playMode === 'shuffle') {
       return (
         store.queue.find(
-          (track) => track.id !== store.currentTrack?.id && !failedTrackIds.has(track.id),
+          (track) => track.id !== store.currentTrack?.id && !isTrackFailed(track.id),
         ) ?? null
       )
     }
@@ -176,7 +199,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     // 单一真相源：统一走 store.peekNext/peekPrevious，消除 shuffle 双抽样不一致
     const predicted = direction === 'next' ? store.peekNext(manual) : store.peekPrevious()
     if (!predicted) return null
-    if (failedTrackIds.has(predicted.id)) return findFallbackTrack(direction, manual)
+    if (isTrackFailed(predicted.id)) return findFallbackTrack(direction, manual)
     return predicted
   }
 
@@ -259,7 +282,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
       const handleError = () => {
         if (isPoolUnmounted.value || slot.track?.id !== track.id) return
         cleanup()
-        failedTrackIds.add(track.id)
+        markTrackFailed(track.id)
         preloadMessage.value = `预加载歌曲暂时无法播放，当前播放不受影响`
         slot.track = null
         slot.ready = null
@@ -332,6 +355,9 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     preloadSlots,
     preloadMessage,
     failedTrackIds,
+    markTrackFailed,
+    clearFailedTrack,
+    isTrackFailed,
     predictNextTrack,
     predictPreviousTrack,
     clearPreloads,
