@@ -1,4 +1,6 @@
 import { CSRF_CONSTANTS } from '../../shared/constants'
+import { getTokenVersion } from './admin-auth-store'
+import type { Env } from './types'
 
 const CSRF_MAX_AGE_MS = CSRF_CONSTANTS.MAX_AGE
 
@@ -12,13 +14,17 @@ function hexToBytes(hex: string): Uint8Array {
 
 /**
  * 生成带签名的 CSRF token
- * 使用 HMAC-SHA256 签名确保 token 无法被伪造
+ * 使用 HMAC-SHA256 签名确保 token 无法被伪造;
+ * 签名输入混入当前 tokenVersion,改密码 bump 版本后旧 token 自动失效
  * @param secret 签名密钥
+ * @param env 环境变量,用于读取当前 tokenVersion;缺省时按版本 0 处理
  * @returns 格式为 "signature.timestamp" 的 token
  */
-export async function generateCsrfToken(secret: string): Promise<string> {
+export async function generateCsrfToken(secret: string, env?: Env): Promise<string> {
   const timestamp = Date.now()
   const timestampHex = timestamp.toString(16).padStart(16, '0')
+  const tokenVersion = env ? await getTokenVersion(env) : 0
+  const payload = `${tokenVersion}.${timestampHex}`
 
   const encoder = new TextEncoder()
   const key = await crypto.subtle.importKey(
@@ -29,7 +35,7 @@ export async function generateCsrfToken(secret: string): Promise<string> {
     ['sign'],
   )
 
-  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(timestampHex))
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(payload))
 
   const signatureHex = Array.from(new Uint8Array(signature))
     .map((b) => b.toString(16).padStart(2, '0'))
@@ -40,12 +46,14 @@ export async function generateCsrfToken(secret: string): Promise<string> {
 
 /**
  * 验证 CSRF token 是否有效
- * 使用 HMAC 签名验证确保 token 无法被伪造
+ * 使用 HMAC 签名验证确保 token 无法被伪造;
+ * 签名输入包含签发时的 tokenVersion,版本变更后旧 token 验证失败
  * @param token 需要验证的 token
  * @param secret 签名密钥
+ * @param env 环境变量,用于读取当前 tokenVersion;缺省时按版本 0 处理
  * @returns token 是否有效
  */
-export async function verifyCsrfToken(token: string, secret: string): Promise<boolean> {
+export async function verifyCsrfToken(token: string, secret: string, env?: Env): Promise<boolean> {
   if (!token || !secret) return false
 
   try {
@@ -71,7 +79,9 @@ export async function verifyCsrfToken(token: string, secret: string): Promise<bo
       return false
     }
 
-    // 验证签名
+    // 验证签名(签名输入与签发时一致:tokenVersion + 时间戳)
+    const tokenVersion = env ? await getTokenVersion(env) : 0
+    const payload = `${tokenVersion}.${receivedTimestamp}`
     const encoder = new TextEncoder()
     const key = await crypto.subtle.importKey(
       'raw',
@@ -85,7 +95,7 @@ export async function verifyCsrfToken(token: string, secret: string): Promise<bo
       'HMAC',
       key,
       hexToBytes(receivedSignature) as BufferSource,
-      encoder.encode(receivedTimestamp),
+      encoder.encode(payload),
     )
   } catch {
     return false
@@ -123,9 +133,14 @@ export function createCsrfHeaders(
  * 验证请求是否包含有效的 CSRF token
  * @param request HTTP 请求对象
  * @param secret 签名密钥
+ * @param env 环境变量,用于读取当前 tokenVersion
  * @returns 验证结果
  */
-export async function validateCsrfRequest(request: Request, secret: string): Promise<boolean> {
+export async function validateCsrfRequest(
+  request: Request,
+  secret: string,
+  env?: Env,
+): Promise<boolean> {
   // GET 请求不需要 CSRF 保护
   if (request.method === 'GET') return true
 
@@ -136,7 +151,7 @@ export async function validateCsrfRequest(request: Request, secret: string): Pro
   const token = await extractCsrfToken(request)
   if (!token) return false
 
-  return verifyCsrfToken(token, secret)
+  return verifyCsrfToken(token, secret, env)
 }
 
 /**

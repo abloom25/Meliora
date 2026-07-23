@@ -166,12 +166,12 @@ export function timingSafeEqual(a: string, b: string): boolean {
 /**
  * 创建包含 CSRF token 的登录成功响应头
  * @param token 认证 token
- * @param env 环境变量，用于获取签名密钥
+ * @param env 环境变量，用于获取签名密钥与当前 tokenVersion
  * @returns 响应头对象
  */
 export async function createLoginHeaders(token: string, env: Env): Promise<Record<string, string>> {
   const secret = await getSigningSecret(env)
-  const csrfToken = await generateCsrfToken(secret)
+  const csrfToken = await generateCsrfToken(secret, env)
   const cookieHeader = createCookieHeader(token)
   const csrfHeaders = createCsrfHeaders(csrfToken, {
     'Set-Cookie': cookieHeader,

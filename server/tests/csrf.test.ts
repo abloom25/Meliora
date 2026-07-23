@@ -6,12 +6,27 @@ import {
   validateCsrfRequest,
   verifyCsrfToken,
 } from '../core/csrf'
+import type { Env } from '../core/types'
+
+const tokenVersionState = vi.hoisted(() => ({ value: 0 }))
+
+vi.mock('../core/admin-auth-store', () => ({
+  getTokenVersion: () => Promise.resolve(tokenVersionState.value),
+}))
 
 const SECRET = 'csrf-test-secret-with-sufficient-entropy'
+const ENV: Env = {
+  GH_TOKEN: 'placeholder',
+  GH_REPO: 'owner/repo',
+  GH_BRANCH: 'main',
+  CONFIG_ENCRYPTION_KEY: '',
+  DEVELOPMENT: 'true',
+}
 
 describe('CSRF tokens', () => {
   afterEach(() => {
     vi.useRealTimers()
+    tokenVersionState.value = 0
   })
 
   it('accepts a freshly generated token', async () => {
@@ -50,5 +65,27 @@ describe('CSRF tokens', () => {
 
     expect(extractCsrfToken(request)).toBeNull()
     await expect(validateCsrfRequest(request, SECRET)).resolves.toBe(false)
+  })
+
+  it('invalidates previously issued tokens when the token version changes', async () => {
+    tokenVersionState.value = 1
+    const token = await generateCsrfToken(SECRET, ENV)
+    const requestWithToken = () =>
+      new Request('https://example.com/api/config', {
+        method: 'PUT',
+        headers: { 'X-CSRF-Token': token },
+      })
+
+    await expect(verifyCsrfToken(token, SECRET, ENV)).resolves.toBe(true)
+    await expect(validateCsrfRequest(requestWithToken(), SECRET, ENV)).resolves.toBe(true)
+
+    // 改密码 bump tokenVersion 后,旧 CSRF token 立即失效
+    tokenVersionState.value = 2
+    await expect(verifyCsrfToken(token, SECRET, ENV)).resolves.toBe(false)
+    await expect(validateCsrfRequest(requestWithToken(), SECRET, ENV)).resolves.toBe(false)
+
+    // 新版本签发的 token 不受影响
+    const freshToken = await generateCsrfToken(SECRET, ENV)
+    await expect(verifyCsrfToken(freshToken, SECRET, ENV)).resolves.toBe(true)
   })
 })

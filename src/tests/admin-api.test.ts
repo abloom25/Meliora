@@ -27,6 +27,8 @@ describe('admin-api', () => {
   it('marks admin auth as expired when config loading receives 401', async () => {
     const fetchMock = vi
       .fn()
+      // 登录前内存无 token,fetchWithCsrf 先通过 /api/auth 尝试获取
+      .mockResolvedValueOnce(jsonResponse({ authenticated: false }))
       .mockResolvedValueOnce(jsonResponse({ success: true }))
       .mockResolvedValueOnce(jsonResponse({ error: '未授权' }, { status: 401 }))
     vi.stubGlobal('fetch', fetchMock)
@@ -44,17 +46,18 @@ describe('admin-api', () => {
     expect(auth.checking.value).toBe(false)
   })
 
-  it('marks admin auth as expired when protected mutations receive 401 or 403', async () => {
+  it('marks admin auth as expired when protected mutations receive 401', async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse({ success: true }))
+      .mockResolvedValueOnce(jsonResponse({ authenticated: false }))
+      .mockResolvedValueOnce(
+        jsonResponse({ success: true }, { headers: { 'X-CSRF-Token': 'login-token' } }),
+      )
       .mockResolvedValueOnce(jsonResponse({ error: '未授权' }, { status: 401 }))
-      .mockResolvedValueOnce(jsonResponse({ success: true }))
-      .mockResolvedValueOnce(jsonResponse({ error: '未授权' }, { status: 403 }))
     vi.stubGlobal('fetch', fetchMock)
 
     const { useAdminAuth } = await import('../admin/composables/useAdminAuth')
-    const { saveConfig, uploadFile } = await import('../admin/services/admin-api')
+    const { saveConfig } = await import('../admin/services/admin-api')
     const auth = useAdminAuth()
 
     await expect(auth.login('password')).resolves.toBe(true)
@@ -64,20 +67,101 @@ describe('admin-api', () => {
       error: '登录已过期,请重新登录',
     })
     expect(auth.authenticated.value).toBe(false)
+  })
+
+  it('refreshes the in-memory CSRF token and retries once on 403', async () => {
+    const fetchMock = vi
+      .fn()
+      // 登录前 ensureCsrfToken 的 /api/auth
+      .mockResolvedValueOnce(jsonResponse({ authenticated: false }))
+      // 登录,响应头下发初始 CSRF token
+      .mockResolvedValueOnce(
+        jsonResponse({ success: true }, { headers: { 'X-CSRF-Token': 'stale-token' } }),
+      )
+      // 第一次保存:旧 token 已被服务端吊销
+      .mockResolvedValueOnce(jsonResponse({ error: 'CSRF 令牌无效或已过期' }, { status: 403 }))
+      // 重试前重新获取,下发新 token
+      .mockResolvedValueOnce(
+        jsonResponse({ authenticated: true }, { headers: { 'X-CSRF-Token': 'fresh-token' } }),
+      )
+      // 重试成功
+      .mockResolvedValueOnce(jsonResponse({ sha: 'commit-next' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { useAdminAuth } = await import('../admin/composables/useAdminAuth')
+    const { saveConfig } = await import('../admin/services/admin-api')
+    const auth = useAdminAuth()
 
     await expect(auth.login('password')).resolves.toBe(true)
+    const result = await saveConfig(validConfig())
+
+    expect(result.ok).toBe(true)
+    // 403 不再视为登录过期
     expect(auth.authenticated.value).toBe(true)
-    await expect(uploadFile('public/music/a/audio.mp3', 'base64')).resolves.toMatchObject({
-      ok: false,
-      error: '登录已过期,请重新登录',
-    })
-    expect(auth.authenticated.value).toBe(false)
+
+    const reAuthCall = fetchMock.mock.calls[3]
+    expect(reAuthCall[0]).toBe('/api/auth')
+    const retryCall = fetchMock.mock.calls[4]
+    expect(retryCall[0]).toBe('/api/config')
+    expect(retryCall[1]?.headers).toMatchObject({ 'X-CSRF-Token': 'fresh-token' })
+    // token 只存内存,不落 localStorage
+    expect(localStorage.getItem('meliora_csrf')).toBeNull()
+  })
+
+  it('surfaces the backend error when the retry after 403 still fails', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ authenticated: false }))
+      .mockResolvedValueOnce(
+        jsonResponse({ success: true }, { headers: { 'X-CSRF-Token': 'stale-token' } }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ error: 'CSRF 令牌无效或已过期' }, { status: 403 }))
+      .mockResolvedValueOnce(
+        jsonResponse({ authenticated: true }, { headers: { 'X-CSRF-Token': 'fresh-token' } }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ error: 'CSRF 令牌无效或已过期' }, { status: 403 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { useAdminAuth } = await import('../admin/composables/useAdminAuth')
+    const { saveConfig } = await import('../admin/services/admin-api')
+    const auth = useAdminAuth()
+
+    await expect(auth.login('password')).resolves.toBe(true)
+    const result = await saveConfig(validConfig())
+
+    expect(result).toMatchObject({ ok: false, error: 'CSRF 令牌无效或已过期' })
+    expect(auth.authenticated.value).toBe(true)
+  })
+
+  it('ignores any CSRF token planted in localStorage by older versions', async () => {
+    localStorage.setItem('meliora_csrf', 'planted-token')
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ authenticated: true }))
+      .mockResolvedValueOnce(
+        jsonResponse({ path: 'public/music/a/audio.mp3', blobSha: 'a'.repeat(40) }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { uploadFile } = await import('../admin/services/admin-api')
+    const result = await uploadFile('public/music/a/audio.mp3', 'base64')
+
+    expect(result.ok).toBe(true)
+    const uploadCall = fetchMock.mock.calls.find((call) => call[0] === '/api/upload')
+    expect(uploadCall?.[1]?.headers).not.toHaveProperty('X-CSRF-Token')
   })
 
   it('can check updates passively without marking admin auth as expired on 403', async () => {
     const fetchMock = vi
       .fn()
+      // 登录前 ensureCsrfToken 的 /api/auth
+      .mockResolvedValueOnce(jsonResponse({ authenticated: false }))
       .mockResolvedValueOnce(jsonResponse({ success: true }))
+      // check-update 前 ensureCsrfToken 的 /api/auth
+      .mockResolvedValueOnce(jsonResponse({ authenticated: true }))
+      .mockResolvedValueOnce(jsonResponse({ error: '未授权' }, { status: 403 }))
+      // 403 后清除 token 重试:再次 /api/auth + 重试仍 403
+      .mockResolvedValueOnce(jsonResponse({ authenticated: true }))
       .mockResolvedValueOnce(jsonResponse({ error: '未授权' }, { status: 403 }))
     vi.stubGlobal('fetch', fetchMock)
 
@@ -152,6 +236,8 @@ describe('admin-api', () => {
   it('checks updates with POST JSON and forwards backend detail errors', async () => {
     const fetchMock = vi
       .fn()
+      // 首次写请求前 ensureCsrfToken 的 /api/auth
+      .mockResolvedValueOnce(jsonResponse({ authenticated: false }))
       .mockResolvedValueOnce(
         jsonResponse(
           { error: '触发失败: 403', detail: 'Resource not accessible' },
@@ -180,13 +266,17 @@ describe('admin-api', () => {
   })
 
   it('returns triggeredAt from update trigger responses', async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(
-      jsonResponse({
-        message: '已触发',
-        triggeredAt: '2026-06-30T10:00:00.000Z',
-        triggerId: 'dispatch-123',
-      }),
-    )
+    const fetchMock = vi
+      .fn()
+      // 首次写请求前 ensureCsrfToken 的 /api/auth
+      .mockResolvedValueOnce(jsonResponse({ authenticated: false }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          message: '已触发',
+          triggeredAt: '2026-06-30T10:00:00.000Z',
+          triggerId: 'dispatch-123',
+        }),
+      )
     vi.stubGlobal('fetch', fetchMock)
 
     const { triggerUpdate } = await import('../admin/services/admin-api')
@@ -198,7 +288,8 @@ describe('admin-api', () => {
       triggeredAt: '2026-06-30T10:00:00.000Z',
       triggerId: 'dispatch-123',
     })
-    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+    const updateCall = fetchMock.mock.calls.find((call) => call[0] === '/api/update')
+    expect(JSON.parse(String(updateCall?.[1]?.body))).toEqual({
       githubProxy: 'https://proxy.example/?url={url}',
       targetTag: 'v0.3.0',
       receivePrereleaseUpdates: true,

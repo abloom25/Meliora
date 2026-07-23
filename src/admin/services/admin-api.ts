@@ -1,7 +1,7 @@
 import type { MusicConfig } from '../../types/music'
 import { validateMusicConfig } from '../../../shared/config-schema'
 import { markAdminUnauthenticated } from '../composables/useAdminAuth'
-import { fetchWithCsrf } from '../utils/csrf'
+import { fetchWithCsrf, csrfManager } from '../utils/csrf'
 import { UPLOAD_LIMITS } from '../../../shared/constants'
 
 export interface SaveResult {
@@ -41,6 +41,10 @@ type AdminRequestResult<T> =
   | { ok: true; data: T }
   | { ok: false; data: Partial<T> & ApiErrorPayload; error: string }
 
+function resolveErrorMessage(data: ApiErrorPayload, fallback: string): string {
+  return data.details?.join('; ') || data.detail || data.error || data.message || fallback
+}
+
 async function requestAdminJson<T extends object>(
   url: string,
   init: RequestInit,
@@ -51,14 +55,21 @@ async function requestAdminJson<T extends object>(
   },
 ): Promise<AdminRequestResult<T>> {
   try {
-    const response = await fetchWithCsrf(url, { ...init, credentials: 'include' })
-    const data = (await response.json().catch(() => ({}))) as Partial<T> & ApiErrorPayload
+    let response = await fetchWithCsrf(url, { ...init, credentials: 'include' })
+    let data = (await response.json().catch(() => ({}))) as Partial<T> & ApiErrorPayload
+
+    // 403 多为 CSRF token 失效(如改密码 bump 版本后旧 token 被吊销):
+    // 清除内存 token 并重试一次,fetchWithCsrf 会在重试前自动重新获取 token
+    if (response.status === 403) {
+      csrfManager.clearToken()
+      response = await fetchWithCsrf(url, { ...init, credentials: 'include' })
+      data = (await response.json().catch(() => ({}))) as Partial<T> & ApiErrorPayload
+    }
+
     if (response.ok) return { ok: true, data: data as T }
 
-    if (
-      options.markUnauthenticated !== false &&
-      (response.status === 401 || response.status === 403)
-    ) {
+    // 仅 401 视为登录过期;403 重试仍失败时按服务端返回的错误提示
+    if (response.status === 401 && options.markUnauthenticated !== false) {
       markAdminUnauthenticated()
       return { ok: false, data, error: '登录已过期,请重新登录' }
     }
@@ -66,12 +77,7 @@ async function requestAdminJson<T extends object>(
     return {
       ok: false,
       data,
-      error:
-        data.details?.join('; ') ||
-        data.detail ||
-        data.error ||
-        data.message ||
-        options.fallbackError,
+      error: resolveErrorMessage(data, options.fallbackError),
     }
   } catch (error) {
     const message =

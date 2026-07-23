@@ -1,6 +1,7 @@
 /**
  * CSRF Token 管理器
  * 负责获取、存储和使用 CSRF token 进行安全请求
+ * token 仅保存在内存中(不落 localStorage),页面刷新后由 ensureCsrfToken 重新获取
  */
 
 class CsrfManager {
@@ -14,12 +15,6 @@ class CsrfManager {
     const csrfToken = response.headers.get('X-CSRF-Token')
     if (csrfToken) {
       this.token = csrfToken
-      // 也可以存储到 localStorage 作为备用
-      try {
-        localStorage.setItem(CSRF_CONSTANTS.STORAGE_KEY, csrfToken)
-      } catch {
-        // localStorage 不可用时忽略
-      }
     }
   }
 
@@ -28,22 +23,7 @@ class CsrfManager {
    * @returns CSRF token 或 null
    */
   public getToken(): string | null {
-    if (this.token) {
-      return this.token
-    }
-
-    // 尝试从 localStorage 获取
-    try {
-      const storedToken = localStorage.getItem(CSRF_CONSTANTS.STORAGE_KEY)
-      if (storedToken) {
-        this.token = storedToken
-        return storedToken
-      }
-    } catch {
-      // localStorage 不可用时忽略
-    }
-
-    return null
+    return this.token
   }
 
   /**
@@ -51,11 +31,6 @@ class CsrfManager {
    */
   public clearToken(): void {
     this.token = null
-    try {
-      localStorage.removeItem(CSRF_CONSTANTS.STORAGE_KEY)
-    } catch {
-      // localStorage 不可用时忽略
-    }
   }
 
   /**
@@ -82,7 +57,7 @@ class CsrfManager {
     const csrfHeaders = this.getRequestHeaders()
 
     // 如果是 POST/PUT/DELETE 请求，添加 CSRF token
-    if (options.method === 'POST' || options.method === 'PUT' || options.method === 'DELETE') {
+    if (requiresCsrfToken(options)) {
       return {
         ...options,
         headers: {
@@ -99,6 +74,38 @@ class CsrfManager {
 // 创建全局实例
 export const csrfManager = new CsrfManager()
 
+function requiresCsrfToken(options: RequestInit): boolean {
+  return options.method === 'POST' || options.method === 'PUT' || options.method === 'DELETE'
+}
+
+// 并发去重:多个写请求同时发现 token 为空时,只发起一次获取
+let pendingTokenRequest: Promise<string | null> | null = null
+
+/**
+ * 确保内存中有可用的 CSRF token
+ * 页面刷新后内存 token 丢失,利用仍有效的会话 Cookie 从 /api/auth 重新获取
+ * (服务端对已认证的 /api/auth 请求在响应头下发新 token,与登录下发流程一致)
+ * @returns 当前可用的 CSRF token 或 null
+ */
+export function ensureCsrfToken(): Promise<string | null> {
+  const existing = csrfManager.getToken()
+  if (existing) return Promise.resolve(existing)
+  if (!pendingTokenRequest) {
+    pendingTokenRequest = (async () => {
+      try {
+        const response = await fetch('/api/auth', { credentials: 'include' })
+        csrfManager.extractTokenFromResponse(response)
+      } catch {
+        // 获取失败时保持为空,由调用方按 403 重试/报错逻辑处理
+      }
+      return csrfManager.getToken()
+    })().finally(() => {
+      pendingTokenRequest = null
+    })
+  }
+  return pendingTokenRequest
+}
+
 /**
  * 包装 fetch 函数，自动处理 CSRF token
  * @param url 请求 URL
@@ -109,6 +116,11 @@ export async function fetchWithCsrf(
   url: string | URL,
   options: RequestInit = {},
 ): Promise<Response> {
+  // 写请求需要 token 而内存为空时(如页面刷新后),先重新获取再发请求
+  if (requiresCsrfToken(options) && !csrfManager.getToken()) {
+    await ensureCsrfToken()
+  }
+
   // 添加 CSRF token 到请求头
   const enrichedOptions = csrfManager.enrichFetchOptions(options)
 
@@ -127,4 +139,3 @@ export async function fetchWithCsrf(
 export function clearCsrfOnLogout(): void {
   csrfManager.clearToken()
 }
-import { CSRF_CONSTANTS } from '../../../shared/constants'

@@ -19,7 +19,12 @@ import { checkUpdate, getUpdateStatus, triggerUpdate } from './update-handler'
 import { testMusicApi } from './music-api-tester'
 import { consumeRateLimit, resetRateLimit, tryAcquireWorkSlot } from './rate-limit'
 import { renderEnvNotReadyPage, renderDisabledPage } from './status-pages'
-import { validateCsrfRequest, requiresCsrfProtection } from './csrf'
+import {
+  validateCsrfRequest,
+  requiresCsrfProtection,
+  generateCsrfToken,
+  createCsrfHeaders,
+} from './csrf'
 import { createErrorResponse, logSanitizedError } from './error-handler'
 import { isLoopbackOrigin } from '../../shared/utils/url-validation'
 import { UPLOAD_LIMITS } from '../../shared/constants'
@@ -145,7 +150,7 @@ function isJsonRequest(request: Request): boolean {
 async function csrfErrorResponse(request: Request, env: Env): Promise<Response | null> {
   if (!requiresCsrfProtection(request)) return null
   const secret = await getSigningSecret(env)
-  const isValidCsrf = await validateCsrfRequest(request, secret)
+  const isValidCsrf = await validateCsrfRequest(request, secret, env)
   if (isValidCsrf) return null
   return jsonResponse({ error: 'CSRF 令牌无效或已过期' }, 403)
 }
@@ -216,7 +221,12 @@ export async function handleRequest(
 
     if (path === '/api/auth' && request.method === 'GET') {
       const authenticated = await verifyAuth(request, env)
-      return jsonResponse({ authenticated }, 200)
+      if (!authenticated) return jsonResponse({ authenticated }, 200)
+      // 已认证会话附带下发新的 CSRF token:前端 token 仅存内存,页面刷新后丢失,
+      // 借此接口即可用仍有效的会话 Cookie 重新获取,无需重新登录(与登录下发流程一致)。
+      const secret = await getSigningSecret(env)
+      const csrfToken = await generateCsrfToken(secret, env)
+      return jsonResponse({ authenticated }, 200, createCsrfHeaders(csrfToken))
     }
 
     if (path === '/api/setup-status' && request.method === 'GET') {
