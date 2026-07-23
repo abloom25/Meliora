@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createCookieHeader, signToken } from '../core/auth'
+import { setupPassword } from '../core/admin-auth-store'
 import { handleRequest } from '../core/router'
 import type { Env } from '../core/types'
 import { generateCsrfToken } from '../core/csrf'
@@ -281,6 +282,89 @@ describe('router security gates', () => {
     expect(response.status).toBe(401)
     expect(data.error).toBe('未授权')
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('requires authentication before uploading files', async () => {
+    const response = await handleRequest(
+      new Request('https://example.com/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: 'https://example.com' },
+        body: JSON.stringify({ path: 'public/music/track.mp3', content: 'QUJD' }),
+      }),
+      ENV,
+    )
+    const data = (await response.json()) as { error?: string }
+
+    expect(response.status).toBe(401)
+    expect(data.error).toBe('未授权')
+  })
+
+  it('requires authentication before changing the password', async () => {
+    const response = await handleRequest(
+      new Request('https://example.com/api/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: 'https://example.com' },
+        body: JSON.stringify({ current: 'old-password', next: 'new-password' }),
+      }),
+      ENV,
+    )
+    const data = (await response.json()) as { error?: string }
+
+    expect(response.status).toBe(401)
+    expect(data.error).toBe('未授权')
+  })
+
+  it('requires authentication before testing the music api', async () => {
+    const response = await handleRequest(
+      new Request('https://example.com/api/test-music-api', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: 'https://example.com' },
+        body: JSON.stringify({ apiEndpoint: 'https://music-api.example' }),
+      }),
+      ENV,
+    )
+    const data = (await response.json()) as { error?: string }
+
+    expect(response.status).toBe(401)
+    expect(data.error).toBe('未授权')
+  })
+
+  it('rejects an authenticated same-origin write without a CSRF token', async () => {
+    const response = await handleRequest(
+      new Request('https://example.com/api/config', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://example.com',
+          Cookie: await authCookie(),
+        },
+        body: JSON.stringify({}),
+      }),
+      ENV,
+    )
+    const data = (await response.json()) as { error?: string }
+
+    expect(response.status).toBe(403)
+    expect(data.error).toBe('CSRF 令牌无效或已过期')
+  })
+
+  it('returns 409 for setup once the admin password is initialized', async () => {
+    // 开发模式走 admin-auth-store 内存路径,与 router 共享同一模块实例。
+    const setup = await setupPassword('router-security-init', ENV)
+    expect(setup.ok).toBe(true)
+
+    const response = await handleRequest(
+      new Request('https://example.com/api/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: 'https://example.com' },
+        body: JSON.stringify({ password: 'another-password' }),
+      }),
+      ENV,
+    )
+    const data = (await response.json()) as { error?: string }
+
+    expect(response.status).toBe(409)
+    expect(data.error).toBe('密码已初始化')
   })
 
   it('allows authenticated update status checks to call GitHub', async () => {
