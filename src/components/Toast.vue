@@ -15,6 +15,8 @@
         v-if="message"
         class="app-toast"
         :class="[type || 'info', position || 'top']"
+        :role="type === 'error' ? 'alert' : 'status'"
+        :aria-live="type === 'error' ? 'assertive' : 'polite'"
         @click="$emit('dismiss')"
       >
         {{ message }}

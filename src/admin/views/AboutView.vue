@@ -2,13 +2,8 @@
   import { onBeforeUnmount, onMounted, ref } from 'vue'
   import { GitFork, RefreshCw, ExternalLink, Check, AlertCircle, Loader2 } from '@lucide/vue'
   import { APP_VERSION } from '../../generated/app-version'
-  import {
-    checkUpdate,
-    fetchUpdateStatus,
-    triggerUpdate,
-    type UpdateInfo,
-    type UpdateStatusInfo,
-  } from '../services/admin-api'
+  import { checkUpdate, type UpdateInfo } from '../services/admin-api'
+  import { useUpdateStatus } from '../composables/useUpdateStatus'
   import type { MusicConfig } from '../../types/music'
   import ConfirmModal from '../components/ConfirmModal.vue'
 
@@ -19,31 +14,14 @@
     '基于 Vue 3、TypeScript、Pinia 和 SCSS 的沉浸式单页音乐播放器。所有远程歌单和本地音乐会合并为一个匿名曲库,页面不会显示歌单名称、平台或来源。'
 
   type CheckState = 'idle' | 'checking' | 'latest' | 'available' | 'error'
-  type UpdateRunState =
-    | 'idle'
-    | 'triggering'
-    | 'locating'
-    | 'queued'
-    | 'running'
-    | 'success'
-    | 'failed'
-    | 'cancelled'
-    | 'timed_out'
-    | 'error'
   const checkState = ref<CheckState>('idle')
-  const updateRunState = ref<UpdateRunState>('idle')
   const updateInfo = ref<UpdateInfo | null>(null)
-  const updateStatus = ref<UpdateStatusInfo | null>(null)
   const checkError = ref('')
   const showUpdateModal = ref(false)
   const updating = ref(false)
-  const updateMessage = ref('')
-  const triggeredAt = ref('')
-  const triggerId = ref('')
-  const statusErrorCount = ref(0)
+  const { updateRunState, updateStatus, updateMessage, startUpdate, resumeUpdatePolling } =
+    useUpdateStatus()
   let checkController: AbortController | null = null
-  let statusController: AbortController | null = null
-  let statusTimer: number | null = null
 
   async function handleCheckUpdate(openModalOnUpdate = true) {
     if (checkState.value === 'checking') return
@@ -76,27 +54,13 @@
   async function handleUpdate() {
     if (updating.value) return
     updating.value = true
-    updateRunState.value = 'triggering'
-    updateMessage.value = ''
-    clearStatusPolling()
-    const result = await triggerUpdate(
-      props.config.githubProxy,
-      updateInfo.value?.targetTag || updateInfo.value?.latestVersion || '',
-      props.config.receivePrereleaseUpdates === true,
-    )
+    const ok = await startUpdate({
+      githubProxy: props.config.githubProxy,
+      targetTag: updateInfo.value?.targetTag || updateInfo.value?.latestVersion || '',
+      receivePrereleaseUpdates: props.config.receivePrereleaseUpdates === true,
+    })
     updating.value = false
-    if (result.ok) {
-      showUpdateModal.value = false
-      triggeredAt.value = result.triggeredAt || new Date().toISOString()
-      triggerId.value = result.triggerId || ''
-      updateRunState.value = 'locating'
-      updateMessage.value = result.message || '已触发更新流程,正在等待执行状态'
-      statusErrorCount.value = 0
-      void pollUpdateStatus(0)
-    } else {
-      updateRunState.value = 'error'
-      updateMessage.value = result.error || '触发失败'
-    }
+    if (ok) showUpdateModal.value = false
   }
 
   function getUpdateButtonText() {
@@ -126,76 +90,15 @@
     return ''
   }
 
-  function clearStatusPolling() {
-    if (statusTimer !== null) {
-      window.clearTimeout(statusTimer)
-      statusTimer = null
-    }
-    statusController?.abort()
-    statusController = null
-  }
-
-  function scheduleStatusPolling(delayMs: number) {
-    if (!triggeredAt.value) return
-    statusTimer = window.setTimeout(() => {
-      void pollUpdateStatus()
-    }, delayMs)
-  }
-
-  function applyUpdateStatus(data: UpdateStatusInfo) {
-    updateStatus.value = data
-    if (!data.run) {
-      updateRunState.value = 'locating'
-      return
-    }
-    const status = data.run.displayStatus
-    updateRunState.value = status === 'unknown' ? 'error' : status
-    updateMessage.value = data.message
-  }
-
-  async function pollUpdateStatus(delayMs = 0) {
-    if (!triggeredAt.value) return
-    clearStatusPolling()
-    if (delayMs > 0) {
-      scheduleStatusPolling(delayMs)
-      return
-    }
-
-    statusController = new AbortController()
-    const controller = statusController
-    const result = await fetchUpdateStatus(triggeredAt.value, triggerId.value, controller.signal)
-    if (controller !== statusController) return
-    statusController = null
-
-    if (!result.ok || !result.data) {
-      statusErrorCount.value += 1
-      updateRunState.value = statusErrorCount.value >= 3 ? 'error' : updateRunState.value
-      updateMessage.value = result.error || '无法获取更新状态'
-      if (statusErrorCount.value < 3) scheduleStatusPolling(5000)
-      return
-    }
-
-    statusErrorCount.value = 0
-    applyUpdateStatus(result.data)
-    const retryDelayMs =
-      result.data.retryAfterSeconds && result.data.retryAfterSeconds > 0
-        ? result.data.retryAfterSeconds * 1000
-        : null
-    if (updateRunState.value === 'locating' || updateRunState.value === 'queued') {
-      scheduleStatusPolling(retryDelayMs ?? 3000)
-    } else if (updateRunState.value === 'running') {
-      scheduleStatusPolling(retryDelayMs ?? 5000)
-    }
-  }
-
   onMounted(() => {
+    // 组件可能被 Dashboard 切 tab 卸载过,若仍有未完成的更新则恢复轮询显示
+    resumeUpdatePolling()
     void handleCheckUpdate(false)
   })
 
   onBeforeUnmount(() => {
     checkController?.abort()
     checkController = null
-    clearStatusPolling()
   })
 </script>
 
