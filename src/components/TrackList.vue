@@ -23,6 +23,7 @@
 
   const { loadedCovers, failedCovers, markCoverLoaded, markCoverFailed } = useCoverCache()
   const isScrolling = ref(false)
+  // 与 .track-item 的 height 保持同步:虚拟化偏移按该值计算,断点样式不得覆盖高度。
   const ITEM_HEIGHT = 66
   const BUFFER_COUNT = 5
   const SEARCH_DEBOUNCE_MS = 180
@@ -450,6 +451,8 @@
   .track-item {
     display: grid;
     width: 100%;
+    /* 高度必须与 ITEM_HEIGHT(66) 一致,否则虚拟化偏移与真实行高漂移 */
+    height: 66px;
     grid-template-columns: 46px minmax(0, 1fr) 28px;
     align-items: center;
     gap: 11px;

@@ -36,6 +36,31 @@ describe('TrackList', () => {
     expect(wrapper.find('.track-virtual-spacer').attributes('style')).toContain('height: 7920px')
   })
 
+  it('positions virtual items at multiples of the fixed 66px item height', () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: vi.fn(),
+    })
+
+    const wrapper = mount(TrackList, {
+      props: {
+        tracks: makeTracks(120),
+        total: 120,
+        currentTrackId: null,
+        isPlaying: false,
+        loading: false,
+        query: '',
+        spectrumLevels: [0.1, 0.1, 0.1, 0.1],
+      },
+    })
+
+    const items = wrapper.findAll('.track-item')
+    expect(items.length).toBeGreaterThan(2)
+    items.forEach((item, index) => {
+      expect(item.attributes('style')).toContain(`top: ${index * 66}px`)
+    })
+  })
+
   it('does not render a full-height virtual spacer before the empty state', () => {
     const wrapper = mount(TrackList, {
       props: {
