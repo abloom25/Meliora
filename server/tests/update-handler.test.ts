@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { checkUpdate, getUpdateStatus, triggerUpdate } from '../core/update-handler'
+import {
+  checkUpdate,
+  getUpdateStatus,
+  triggerUpdate,
+  UPDATE_RESPONSE_MAX_BYTES,
+} from '../core/update-handler'
 import type { Env } from '../core/types'
 
 const ENV: Env = {
@@ -119,6 +124,25 @@ describe('server update handler', () => {
         headers: expect.not.objectContaining({ Authorization: expect.any(String) }),
       }),
     )
+  })
+
+  it('rejects oversized proxied responses during update checks', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response('{}', {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': String(UPDATE_RESPONSE_MAX_BYTES + 1),
+        },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await checkUpdate('0.2.0', ENV, 'https://proxy.example.com/?url={url}')
+    const data = (await response.json()) as { error?: string }
+
+    expect(response.status).toBe(502)
+    expect(data.error).toContain('过大')
   })
 
   it('uses semver ordering for tag fallback and ignores invalid tags', async () => {

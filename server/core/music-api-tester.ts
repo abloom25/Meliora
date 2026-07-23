@@ -2,6 +2,7 @@ import type { ConfigPayload } from './types'
 import { validateMusicConfig } from '../../shared/config-schema'
 import { CONFIG_LIMITS } from '../../shared/constants'
 import { jsonResponse } from './http'
+import { ResponseTooLargeError, readJsonWithLimit } from './read-json-with-limit'
 
 interface PlaylistApiCheck {
   server: string
@@ -23,8 +24,6 @@ interface MusicApiTestResult {
 const TEST_TIMEOUT_MS = 8000
 const PLAYLIST_CONCURRENCY = 3
 
-class ResponseTooLargeError extends Error {}
-
 async function fetchWithTimeout(url: string): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS)
@@ -33,47 +32,6 @@ async function fetchWithTimeout(url: string): Promise<Response> {
   } finally {
     clearTimeout(timer)
   }
-}
-
-async function readJsonWithLimit(response: Response, maxBytes: number): Promise<unknown> {
-  const contentLength = Number(response.headers.get('Content-Length'))
-  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    throw new ResponseTooLargeError('response body exceeds limit')
-  }
-
-  if (!response.body) {
-    const text = await response.text()
-    if (new TextEncoder().encode(text).byteLength > maxBytes) {
-      throw new ResponseTooLargeError('response body exceeds limit')
-    }
-    return JSON.parse(text)
-  }
-
-  const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
-  let receivedBytes = 0
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      receivedBytes += value.byteLength
-      if (receivedBytes > maxBytes) {
-        await reader.cancel('response body exceeds limit')
-        throw new ResponseTooLargeError('response body exceeds limit')
-      }
-      chunks.push(value)
-    }
-  } finally {
-    reader.releaseLock()
-  }
-
-  const bytes = new Uint8Array(receivedBytes)
-  let offset = 0
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return JSON.parse(new TextDecoder().decode(bytes))
 }
 
 async function runLimited<T, R>(

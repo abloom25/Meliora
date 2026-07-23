@@ -6,12 +6,15 @@ import {
 } from '../../shared/version'
 import { isDevelopmentMode, isPublicHttpsUrl, type Env } from './types'
 import { jsonResponse } from './http'
+import { ResponseTooLargeError, readJsonWithLimit } from './read-json-with-limit'
 
 const UPSTREAM_REPO = 'abloom25/Meliora'
 const UPDATE_WORKFLOW = 'update-from-upstream.yml'
 const GITHUB_API = 'https://api.github.com'
 const UPDATE_FETCH_TIMEOUT_MS = 8000
 const UPDATE_STATUS_CACHE_TTL_MS = 3000
+// 检查更新经代理拉取的响应必须限制体积,恶意/异常代理不得把超大 body 全量读入内存。
+export const UPDATE_RESPONSE_MAX_BYTES = 1024 * 1024
 
 interface UpdateInfo {
   hasUpdate: boolean
@@ -149,7 +152,7 @@ async function fetchLatestRelease(
     throw createGitHubError(`GitHub latest release failed: ${response.status}`, response.status)
   }
 
-  return (await response.json()) as GitHubRelease
+  return (await readJsonWithLimit(response, UPDATE_RESPONSE_MAX_BYTES)) as GitHubRelease
 }
 
 async function fetchReleaseByTag(
@@ -174,7 +177,7 @@ async function fetchReleaseByTag(
     throw createGitHubError(`GitHub tagged release failed: ${response.status}`, response.status)
   }
 
-  return (await response.json()) as GitHubRelease
+  return (await readJsonWithLimit(response, UPDATE_RESPONSE_MAX_BYTES)) as GitHubRelease
 }
 
 async function fetchLatestTag(
@@ -197,7 +200,7 @@ async function fetchLatestTag(
     throw createGitHubError(`GitHub tags failed: ${response.status}`, response.status)
   }
 
-  const tags = (await response.json()) as GitHubTag[]
+  const tags = (await readJsonWithLimit(response, UPDATE_RESPONSE_MAX_BYTES)) as GitHubTag[]
   return selectLatestVersion(tags, (tag) => tag.name, { includePrerelease })
 }
 
@@ -216,6 +219,9 @@ function isAbortError(error: unknown): boolean {
 
 function mapGitHubError(error: unknown): { error: string; status: number; detail?: string } {
   if (isAbortError(error)) return { error: '检查更新超时,请稍后重试', status: 504 }
+  if (error instanceof ResponseTooLargeError) {
+    return { error: 'GitHub 响应数据过大,请稍后重试', status: 502 }
+  }
 
   const status = (error as GitHubRequestError).status ?? 0
   const detail = error instanceof Error ? error.message : undefined
