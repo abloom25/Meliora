@@ -139,7 +139,9 @@ describe('admin consistency components', () => {
     await idInput.setValue('t2')
     const emittedTracks = wrapper.emitted('update:tracks')
     if (!emittedTracks) throw new Error('update:tracks was not emitted for the id change')
-    await wrapper.setProps({ tracks: emittedTracks[emittedTracks.length - 1]![0] })
+    await wrapper.setProps({
+      tracks: emittedTracks[emittedTracks.length - 1]![0] as (typeof track)[],
+    })
 
     // 上传完成:结果应被丢弃,不写回配置
     resolveUpload()
