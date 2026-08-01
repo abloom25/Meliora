@@ -520,11 +520,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     updateStore: () => void
   }
 
-  async function switchToTrack(
-    track: Track,
-    queue: Track[],
-    options: SwitchOptions,
-  ): Promise<boolean> {
+  async function switchToTrack(track: Track, options: SwitchOptions): Promise<boolean> {
     const { shouldPlay, direction, waitForReady, updateStore } = options
     if (playerState.value !== 'idle') return false
     playerState.value = 'switching'
@@ -719,7 +715,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   }
 
   async function selectAndPlay(track: Track, queue: Track[]): Promise<void> {
-    await switchToTrack(track, queue, {
+    await switchToTrack(track, {
       shouldPlay: true,
       direction: 'next',
       waitForReady: false,
@@ -734,7 +730,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       seek(0)
       return
     }
-    await switchToTrack(track, store.queue, {
+    await switchToTrack(track, {
       shouldPlay: isPlaying.value,
       direction: 'next',
       waitForReady: !manual,
@@ -755,7 +751,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       const index = (baseIndex - offset + queue.length) % queue.length
       const candidate = queue[index]
       if (!candidate || isTrackFailed(candidate.id)) continue
-      const switched = await switchToTrack(candidate, queue, {
+      const switched = await switchToTrack(candidate, {
         shouldPlay: isPlaying.value,
         direction: 'previous',
         waitForReady: false,
