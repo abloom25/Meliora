@@ -893,6 +893,10 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     }
     const onPause: EventListener = () => {
       if (audio === activeAudio && playerState.value === 'idle') {
+        // 自然播放到底时浏览器先派发 pause 再派发 ended:此处若把 isPlaying 置 false,
+        // ended 里的 next(false) 会以 shouldPlay=false 切歌但不播放。
+        // 手动暂停走 pause() 直接置位,不受该守卫影响。
+        if (audio.ended) return
         isPlaying.value = false
         stopBeatAnalysis()
       }

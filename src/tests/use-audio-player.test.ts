@@ -242,6 +242,49 @@ describe('useAudioPlayer', () => {
     }
   })
 
+  it('keeps playing through auto-advance when the browser fires pause before ended', async () => {
+    vi.useFakeTimers()
+    const createdAudios: HTMLAudioElement[] = []
+    const originalAudio = globalThis.Audio
+    vi.stubGlobal(
+      'Audio',
+      vi.fn(function AudioMock() {
+        const audio = document.createElement('audio')
+        createdAudios.push(audio)
+        return audio
+      }),
+    )
+    const restore = stubAudioPlay()
+    try {
+      const { player, store } = mountPlayer()
+      store.settings.playMode = 'loop'
+      store.settings.preloadNextTrack = false
+      store.settings.smoothTrackChange = false
+      store.selectTrack(tracks[0]!, tracks)
+      await player.play()
+
+      // 浏览器自然播完的事件序:先 pause(此时 audio.ended 已为 true)再 ended。
+      // 该 pause 不得改变播放状态,否则 ended 里的 next(false) 会以 shouldPlay=false
+      // 切歌但不播放(审核外实测确认的 Chrome 行为)。
+      const audio = createdAudios[0]!
+      Object.defineProperty(audio, 'ended', { configurable: true, value: true })
+      audio.dispatchEvent(new Event('pause'))
+      expect(store.isPlaying).toBe(true)
+      audio.dispatchEvent(new Event('ended'))
+      createdAudios.forEach((element) => element.dispatchEvent(new Event('canplay')))
+      await vi.advanceTimersByTimeAsync(0)
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(store.currentTrackId).toBe('2')
+      expect(store.isPlaying).toBe(true)
+    } finally {
+      restore()
+      vi.stubGlobal('Audio', originalAudio)
+      vi.useRealTimers()
+    }
+  })
+
   it('continues playing the next track when initial play fails and skipOnError is enabled', async () => {
     vi.useFakeTimers()
     const originalPlay = HTMLAudioElement.prototype.play
