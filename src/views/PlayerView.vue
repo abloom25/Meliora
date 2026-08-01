@@ -153,7 +153,7 @@
   // 移除 crossorigin 重新加载,保证封面显示(取色降级为默认色)。
   // 用 trackId + cover URL 持久记录已回退项,避免回切同一首歌时重复发起一次必失败的 CORS 请求。
   const coverCorsRetry = ref(new Set<string>())
-  const { chromeHidden, scheduleChromeHide, revealChrome, clearChromeTimer } = useChromeAutoHide({
+  const { chromeHidden, scheduleChromeHide, clearChromeTimer } = useChromeAutoHide({
     listOpen,
     settingsOpen,
     autoHideChrome: () => settings.value.autoHideChrome,
@@ -261,13 +261,16 @@
       ? lyricsVisible.value && mobileView.value === 'lyrics'
       : lyricsVisible.value,
   )
-  const backgroundImage = computed(() =>
-    settings.value.dynamicBackground &&
-    currentTrack.value?.cover &&
-    !failedCovers.value.has(currentTrack.value.id)
-      ? `url("${currentTrack.value.cover.replaceAll('"', '\\"')}")`
-      : 'none',
-  )
+  const backgroundImage = computed(() => {
+    const track = currentTrack.value
+    if (!settings.value.dynamicBackground || !track?.cover || failedCovers.value.has(track.id)) {
+      return 'none'
+    }
+    // CSS url("...") 字符串需同时转义反斜杠与双引号,且顺序不能反:
+    // 只转义引号时,URL 里的反斜杠会吞掉闭合引号,导致整条声明失效甚至解析异常。
+    const escapedCover = track.cover.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
+    return `url("${escapedCover}")`
+  })
   const mainCoverItems = computed(() => {
     const track = currentTrack.value
     if (!track?.cover || failedCovers.value.has(track.id)) return []
@@ -297,7 +300,6 @@
     '--beat-brightness': settings.value.beatBrightness.toFixed(2),
   }))
   let noticeTimer = 0
-  let panelsSoftenedTimer = 0
 
   function showNotice(message: string) {
     notice.value = message
@@ -343,7 +345,13 @@
     link.href = iconHref
   }
 
+  let loadTracksRequestId = 0
+
   async function loadTracks() {
+    // 并发防护:onMounted 与 TrackList 的 @reload(连点重试)可能并发触发,
+    // 用单调递增的请求序号保证只有最新一次的结果落地,
+    // 避免后完成的旧响应覆盖 store/品牌信息/failedSources 等新状态。
+    const requestId = ++loadTracksRequestId
     loading.value = true
     sourceWarning.value = ''
     loadFailed.value = false
@@ -354,6 +362,7 @@
       applySiteBrand(config)
       applySiteIntegrations(config)
       const result = await loadConfiguredTracks(config)
+      if (requestId !== loadTracksRequestId) return
       store.setTracks(result.tracks)
       const url = new URL(window.location.href)
       const sharedTrackId = url.searchParams.get('share')
@@ -374,10 +383,12 @@
         showNotice('暂无可播放歌曲,请在管理后台添加音乐')
       }
     } catch {
+      if (requestId !== loadTracksRequestId) return
       loadFailed.value = true
       showNotice('音乐列表载入失败,请稍后重试')
     } finally {
-      loading.value = false
+      // 只有最新一次请求才允许复位 loading;过期请求的 finally 不得触碰新请求的状态
+      if (requestId === loadTracksRequestId) loading.value = false
     }
   }
 
@@ -457,7 +468,6 @@
   }
 
   watch([listOpen, settingsOpen], ([libraryVisible, settingsVisible]) => {
-    window.clearTimeout(panelsSoftenedTimer)
     chromeHidden.value = false
     scheduleChromeHide()
     if (libraryVisible || settingsVisible) {
@@ -614,7 +624,6 @@
   })
   onBeforeUnmount(() => {
     window.clearTimeout(noticeTimer)
-    window.clearTimeout(panelsSoftenedTimer)
     window.removeEventListener('offline', showOfflineNotice)
     window.removeEventListener('online', showOnlineNotice)
   })
@@ -668,7 +677,6 @@
       'css-theme-transition': cssTransitionSupported,
     }"
     :style="beatStyle"
-    @mousemove="revealChrome"
   >
     <Transition name="artwork-bg-swap">
       <div
