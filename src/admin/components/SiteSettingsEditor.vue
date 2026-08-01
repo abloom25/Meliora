@@ -1,5 +1,5 @@
 <script setup lang="ts">
-  import { computed, onBeforeUnmount, ref } from 'vue'
+  import { computed, onBeforeUnmount, ref, watch } from 'vue'
   import { Check, Loader2, PlugZap, Upload, X } from '@lucide/vue'
   import type { MusicConfig } from '../../types/music'
   import BaseInput from '../../components/BaseInput.vue'
@@ -21,6 +21,18 @@
   }>()
 
   const iconUrlInput = ref(props.config.siteIcon || '')
+  // 记录输入框最后一次应用到 config 的值:prop 因撤销/导入等外部原因变化时
+  // 才回写输入框;用户正在输入(尚未 blur 应用)时不会被打断。
+  let lastAppliedIcon = props.config.siteIcon || ''
+  watch(
+    () => props.config.siteIcon,
+    (value) => {
+      const next = value || ''
+      if (next === lastAppliedIcon) return
+      lastAppliedIcon = next
+      iconUrlInput.value = next
+    },
+  )
   const uploadStatus = ref('')
   const iconUploading = ref(false)
   const uploadStatusTimer = ref<number | null>(null)
@@ -94,7 +106,8 @@
   }
 
   function setIcon(value: string | undefined) {
-    iconUrlInput.value = value || ''
+    lastAppliedIcon = value || ''
+    iconUrlInput.value = lastAppliedIcon
     emit('update:config', { ...props.config, siteIcon: value })
   }
 
