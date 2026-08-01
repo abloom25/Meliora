@@ -96,6 +96,8 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   let energyFloor = 0.08
   // 每个频谱段的慢速基线(自适应归一化用,0 表示未初始化)
   const bandBaselines = [0, 0, 0, 0, 0]
+  // 每段上一帧电平:帧间突变(鼓点/拨弦/咬字)瞬态直通,不等待基线拉开差距
+  const prevBandDbs = [0, 0, 0, 0, 0]
   // ---- 节拍检测状态(SuperFlux ODF + ACF 节拍跟踪)----
   // ODF 以固定 10ms 槽采样,与显示帧率解耦;6s 环形历史供速度/相位估计
   const ODF_SLOT_MS = 10
@@ -155,6 +157,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   function resetBeatTracking() {
     odfHistory.fill(0)
     bandBaselines.fill(0)
+    prevBandDbs.fill(0)
     odfSlotCount = 0
     currentSlotStartMs = 0
     currentSlotFlux = 0
@@ -511,17 +514,21 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       const db = bandAverage(data, binOf(def.from), binOf(def.to))
       // 自适应归一化:byte 频谱是 dB 压缩域,绝对电平动态范围很窄(直接映射
       // 不是顶满就是贴地)。改为跟踪每段自身的慢速基线,映射"相对近期的
-      // 抬升量"——基线系数贴近 1(0.96)+ 低增益分母(0.22)让小变化也有
-      // 大行程,gamma 0.85 进一步抬升小幅波动;不同响度/配器自动校准
+      // 抬升量",再围绕稳态点做对比拉伸——增益的是"变化"而不是电平本身:
+      // 稳态留在低位,向上/向下的偏离都被加倍放大
       let baseline = bandBaselines[band] ?? 0
       baseline = baseline === 0 ? db : baseline + (db - baseline) * smoothingAlpha(dt, 1.5)
       bandBaselines[band] = baseline
-      const dynamic = Math.pow(clamp((db - baseline * 0.96) / (baseline * 0.22 + 0.02), 0, 1), 0.85)
+      const relative = clamp((db - baseline * 0.96) / (baseline * 0.22 + 0.02), 0, 1)
+      const transient = clamp((db - (prevBandDbs[band] ?? db)) * 4, 0, 1) * 0.85
+      prevBandDbs[band] = db
+      const raw = Math.max(relative, transient)
+      const stretched = clamp(0.18 + (raw - 0.18) * 2.4, 0, 1)
       const idleHeight =
         (bandIdleBase[band] ?? 0.2) + (bandIdleAmp[band] ?? 0.18) * (idleWave[band] ?? 0)
       const pulseLift = beatLevel.value * (pulseWeights[band] ?? 0.1)
       const target = clamp(
-        idleHeight * (1 - audioGate) + (0.1 + dynamic * 0.88) * audioGate + pulseLift,
+        idleHeight * (1 - audioGate) + (0.08 + stretched * 0.9) * audioGate + pulseLift,
         0.08,
         0.98,
       )

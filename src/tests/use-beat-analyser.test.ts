@@ -296,10 +296,10 @@ describe('useBeatAnalyser beat detection', () => {
     for (let index = 1; index <= 200; index += 1) spectrum[index] = 200
     runFrames(200)
 
-    // 自适应归一化:稳态下既不顶满也不贴地
+    // 自适应归一化:稳态下既不顶满也不贴地(空段坐在 0.08 地板上)
     for (const level of analyser.spectrumLevels.value) {
       expect(level).toBeLessThan(0.75)
-      expect(level).toBeGreaterThan(0.1)
+      expect(level).toBeGreaterThan(0.07)
     }
   })
 
