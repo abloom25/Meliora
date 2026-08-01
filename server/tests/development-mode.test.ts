@@ -41,6 +41,31 @@ describe('isDevelopmentMode', () => {
     const env = makeEnv({ DEVELOPMENT: '' })
     expect(isDevelopmentMode(env)).toBe(false)
   })
+
+  it('ignores DEVELOPMENT on hosted production platforms (Vercel production)', () => {
+    const env = makeEnv({ DEVELOPMENT: 'true', VERCEL_ENV: 'production' })
+    expect(isDevelopmentMode(env)).toBe(false)
+  })
+
+  it('ignores DEVELOPMENT on hosted production platforms (Netlify production context)', () => {
+    const env = makeEnv({ DEVELOPMENT: 'true', CONTEXT: 'production' })
+    expect(isDevelopmentMode(env)).toBe(false)
+  })
+
+  it('ignores DEVELOPMENT on Cloudflare Pages deployments', () => {
+    const env = makeEnv({ DEVELOPMENT: 'true', CF_PAGES: '1' })
+    expect(isDevelopmentMode(env)).toBe(false)
+  })
+
+  it('still allows DEVELOPMENT in Vercel preview/development environments', () => {
+    expect(isDevelopmentMode(makeEnv({ DEVELOPMENT: 'true', VERCEL_ENV: 'preview' }))).toBe(true)
+    expect(isDevelopmentMode(makeEnv({ DEVELOPMENT: 'true', VERCEL_ENV: 'development' }))).toBe(
+      true,
+    )
+    expect(isDevelopmentMode(makeEnv({ DEVELOPMENT: 'true', CONTEXT: 'deploy-preview' }))).toBe(
+      true,
+    )
+  })
 })
 
 describe('truthy', () => {
@@ -145,6 +170,20 @@ describe('validateEnv', () => {
         GH_REPO,
       ).toBe(true)
     }
+  })
+
+  it('does not let DEVELOPMENT bypass production validation on hosted production platforms', () => {
+    const result = validateEnv(
+      makeEnv({
+        GH_TOKEN: '',
+        CONFIG_ENCRYPTION_KEY: '',
+        DEVELOPMENT: 'true',
+        VERCEL_ENV: 'production',
+      }),
+    )
+
+    expect(result.ok).toBe(false)
+    expect(result.errors.length).toBeGreaterThan(0)
   })
 })
 

@@ -8,6 +8,12 @@ export interface PublicEnvLike {
   VERCEL_GIT_REPO_OWNER?: string
   VERCEL_GIT_REPO_SLUG?: string
   VERCEL_GIT_COMMIT_REF?: string
+  /** Vercel 部署环境(production/preview/development) */
+  VERCEL_ENV?: string
+  /** Netlify 部署上下文(production/deploy-preview/branch-deploy/dev) */
+  CONTEXT?: string
+  /** Cloudflare Pages 运行时标识(部署环境恒为 "1") */
+  CF_PAGES?: string
 }
 
 export interface EnvValidation {
@@ -31,7 +37,18 @@ export function truthy(value: string | undefined): boolean {
   return v === 'true' || v === '1' || v === 'yes' || v === 'on'
 }
 
+// 托管生产平台标识:Vercel 生产部署 / Netlify 生产上下文 / 任意 Cloudflare Pages 部署。
+// 这些标记存在时 DEVELOPMENT 一律不生效——开发模式会把 Cookie 签名密钥、
+// 鉴权与配置加密全部降级,误带到公网部署即是安全事故
+export function isHostedProductionEnv(env: PublicEnvLike): boolean {
+  if ((env.VERCEL_ENV ?? '').trim().toLowerCase() === 'production') return true
+  if ((env.CONTEXT ?? '').trim().toLowerCase() === 'production') return true
+  if (truthy(env.CF_PAGES)) return true
+  return false
+}
+
 export function isDevelopmentMode(env: PublicEnvLike): boolean {
+  if (isHostedProductionEnv(env)) return false
   return truthy(env.DEVELOPMENT)
 }
 

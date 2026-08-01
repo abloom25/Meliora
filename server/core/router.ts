@@ -160,6 +160,23 @@ export async function handleRequest(
   env: Env,
   context: RequestContext = {},
 ): Promise<Response> {
+  const response = await handleRequestInternal(request, env, context)
+  // 统一注入基础安全头:Cloudflare Pages 与 Netlify 的平台级 headers
+  // 不作用于 Function 响应,必须在代码层保证三平台一致
+  if (!response.headers.has('X-Content-Type-Options')) {
+    response.headers.set('X-Content-Type-Options', 'nosniff')
+  }
+  if (request.url.includes('/api/') && !response.headers.has('Cache-Control')) {
+    response.headers.set('Cache-Control', 'no-store')
+  }
+  return response
+}
+
+async function handleRequestInternal(
+  request: Request,
+  env: Env,
+  context: RequestContext = {},
+): Promise<Response> {
   if (request.method === 'OPTIONS') {
     // 管理后台 API 为同域调用(SameSite=Lax Cookie 鉴权),不需要跨域 CORS 支持。
     // 之前版本反射任意 Origin 并允许 Credentials 是危险的半成品:一旦补上响应 CORS 头,

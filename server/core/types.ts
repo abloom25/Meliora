@@ -15,8 +15,13 @@ export interface Env {
   GITHUB_PROXY?: string
   ADMIN_DISABLED?: string
   // 显式开发模式开关。设为 true/1/yes/on(大小写、首尾空格不敏感)时进入开发模式,
-  // 配置/密码不持久化、加密签名走明文降级。
+  // 配置/密码不持久化、加密签名走明文降级。托管生产平台
+  // (VERCEL_ENV=production / CONTEXT=production / CF_PAGES)下该开关不生效。
   DEVELOPMENT?: string
+  // 托管平台部署环境标识,用于禁止开发模式误入公网生产(见 shared/env-schema)
+  VERCEL_ENV?: string
+  CONTEXT?: string
+  CF_PAGES?: string
   // 必填的独立配置加密密钥。配置加密与 Cookie 签名均从它派生,
   // GH_TOKEN 仅用于 GitHub API 读写,可独立轮换而不影响已加密的配置。
   CONFIG_ENCRYPTION_KEY: string

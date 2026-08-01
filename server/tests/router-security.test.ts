@@ -31,6 +31,19 @@ describe('router security gates', () => {
     expect(data.error).toBe('未找到')
   }
 
+  it('injects baseline security headers into every API response', async () => {
+    const notFound = await handleRequest(new Request('https://example.com/api/nope'), ENV)
+    expect(notFound.headers.get('X-Content-Type-Options')).toBe('nosniff')
+    expect(notFound.headers.get('Cache-Control')).toBe('no-store')
+
+    const forbidden = await handleRequest(
+      new Request('https://example.com/api/config', { method: 'PUT' }),
+      { ...ENV, ADMIN_DISABLED: 'true' },
+    )
+    expect(forbidden.headers.get('X-Content-Type-Options')).toBe('nosniff')
+    expect(forbidden.headers.get('Cache-Control')).toBe('no-store')
+  })
+
   it('requires authentication before checking updates', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
