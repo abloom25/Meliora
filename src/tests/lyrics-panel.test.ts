@@ -526,6 +526,32 @@ describe('LyricsPanel scrolling alignment', () => {
     expect(activeIndex).toBeLessThan(10)
   })
 
+  it('caps lyric clock extrapolation during playback stalls', async () => {
+    const rapidLines: LyricLine[] = Array.from({ length: 100 }, (_, index) => ({
+      time: index * 0.3,
+      text: `Rapid ${index}`,
+    }))
+    mockedLoadTrackLyrics.mockResolvedValueOnce(rapidLines)
+    const { wrapper, store } = await mountLyricsPanel()
+    await flushVueUpdates()
+    setPanelLayout(wrapper)
+
+    store.isPlaying = true
+    await flushVueUpdates()
+
+    // timeupdate 停发(缓冲 stall)推进 5s:外推封顶 1s,
+    // 高亮最多走到 1.42s(第 4 行),不会一直超前于实际音频
+    vi.advanceTimersByTime(5000)
+    flushAnimationFrames()
+    await flushVueUpdates()
+
+    const activeIndex = wrapper
+      .findAll('.lyric-line')
+      .findIndex((line) => line.classes().includes('active'))
+    expect(activeIndex).toBeGreaterThanOrEqual(0)
+    expect(activeIndex).toBeLessThan(10)
+  })
+
   it('clears transient lyric visuals and cancels row animations when the track changes', async () => {
     mockedSupportsWebAnimations.mockReturnValue(true)
     const animateSpy = installElementAnimateMock()

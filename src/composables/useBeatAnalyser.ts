@@ -648,7 +648,12 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
         options.onEqFiltersReady?.(eqFilters)
       }
       if (audioContext.state === 'suspended') await audioContext.resume()
-      if (isUnmounted) return
+      if (isUnmounted) {
+        // resume 挂起期间组件已卸载:onBeforeUnmount 的 suspend 先结算时,
+        // 本 resume 后结算会让上下文在无消费者状态下保持 running,补一次 suspend
+        void audioContext.suspend()
+        return
+      }
       if (prefersReducedMotion) {
         pauseBeatAnalysis()
         return

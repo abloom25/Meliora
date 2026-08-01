@@ -346,7 +346,15 @@
         return
       }
       window.cancelAnimationFrame(scrollRaf)
-      scrollRaf = window.requestAnimationFrame(() => scrollToIndex(index, onComplete, options))
+      scrollRaf = window.requestAnimationFrame(() => {
+        // 元素未就绪的重试不受 realignRequestId 保护:若等待期间目标行已变化,
+        // 放弃本次旧目标(新的 realign 会接管),避免向旧行多滚一次
+        if (targetIndex.value !== index) {
+          onComplete?.()
+          return
+        }
+        scrollToIndex(index, onComplete, options)
+      })
       return
     }
     const target = Math.max(
@@ -550,7 +558,10 @@
 
   function tickLyricClock() {
     clockRaf = 0
-    lyricClock.value = clockAnchorTime + (performance.now() - clockAnchorStamp) / 1000
+    // 外推增量封顶 1s:缓冲 stall 期间 timeupdate 停发但 isPlaying 仍为 true,
+    // 不封顶的话歌词会一直超前于实际音频,恢复后整体回跳
+    const extrapolated = clockAnchorTime + (performance.now() - clockAnchorStamp) / 1000
+    lyricClock.value = Math.min(extrapolated, clockAnchorTime + 1)
     // 密集段落持续外推;回到稀疏段落后停转,等下一次 timeupdate 重新评估
     if (needsHighRateClock()) clockRaf = window.requestAnimationFrame(tickLyricClock)
   }

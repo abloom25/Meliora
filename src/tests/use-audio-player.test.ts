@@ -20,7 +20,7 @@ vi.mock('../utils/browser', async (importOriginal) => {
 vi.mock('../composables/useBeatAnalyser', () => ({
   useBeatAnalyser: vi.fn(() => ({
     beatLevel: { value: 0 },
-    spectrumLevels: { value: [0.1, 0.1, 0.1, 0.1] },
+    spectrumLevels: { value: [0.1, 0.1, 0.1, 0.1, 0.1] },
     startBeatAnalysis: startBeatAnalysisMock,
     stopBeatAnalysis: vi.fn(),
   })),
