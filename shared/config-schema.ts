@@ -22,6 +22,12 @@ export interface MusicConfigValidationOptions {
   maxLocalTracks?: number
 }
 
+/**
+ * 本地曲目 ID 白名单:id 会直接拼接进上传路径(public/music/<id>/...)和播放 URL,
+ * 只允许字母、数字、连字符、下划线,避免路径分隔符、空格、# 等导致路径与引用不一致。
+ */
+export const LOCAL_TRACK_ID_PATTERN = /^[A-Za-z0-9_-]+$/
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
@@ -190,7 +196,9 @@ export function validateMusicConfig(
         errors.push(`localTracks[${index}].id 必须是非空字符串`)
       } else {
         const normalizedId = track.id.trim()
-        if (localTrackIds.has(normalizedId)) {
+        if (!LOCAL_TRACK_ID_PATTERN.test(normalizedId)) {
+          errors.push(`localTracks[${index}].id 只能包含字母、数字、连字符(-)和下划线(_)`)
+        } else if (localTrackIds.has(normalizedId)) {
           errors.push(`localTracks[${index}].id 与已有歌曲重复`)
         } else {
           localTrackIds.add(normalizedId)

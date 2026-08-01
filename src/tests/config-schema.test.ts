@@ -142,6 +142,34 @@ describe('validateMusicConfig', () => {
     expect(result.errors).toContain('localTracks[1].id 与已有歌曲重复')
   })
 
+  it('accepts local track IDs within the path-safe whitelist', () => {
+    const result = validateMusicConfig({
+      ...validConfig,
+      localTracks: [
+        { id: 'Track_A-01', title: 'Song', artist: 'Artist', audio: '/music/Track_A-01/a.mp3' },
+      ],
+    })
+
+    expect(result.valid).toBe(true)
+  })
+
+  it('rejects local track IDs that are unsafe for upload paths and URLs', () => {
+    const unsafeIds = ['a b', 'a#b', 'a/b', 'a\\b', '..', 'a?b', '曲目']
+
+    for (const id of unsafeIds) {
+      const result = validateMusicConfig({
+        ...validConfig,
+        localTracks: [{ id, title: 'Song', artist: 'Artist', audio: '/music/x.mp3' }],
+      })
+
+      expect(result.valid, id).toBe(false)
+      expect(
+        result.errors.some((e) => e.includes('只能包含字母、数字、连字符')),
+        id,
+      ).toBe(true)
+    }
+  })
+
   it('rejects null input', () => {
     const result = validateMusicConfig(null)
     expect(result.valid).toBe(false)
