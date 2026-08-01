@@ -39,6 +39,7 @@
   let focusTimer = 0
   let searchTimer = 0
   let scrollFrame = 0
+  let scrollHandlerFrame = 0
   let pendingScrollAnimation = false
   let resizeObserver: ResizeObserver | null = null
 
@@ -72,15 +73,11 @@
     const start = Math.max(0, Math.floor(scrollTop.value / ITEM_HEIGHT) - BUFFER_COUNT)
     const visibleCount = Math.ceil(height / ITEM_HEIGHT) + BUFFER_COUNT * 2
     const end = Math.min(total, start + visibleCount)
-    const topOffset = start * ITEM_HEIGHT
-    const bottomOffset = Math.max(0, (total - end) * ITEM_HEIGHT)
     return {
       items: displayList.value.slice(start, end).map((item, i) => ({
         ...item,
         offset: (start + i) * ITEM_HEIGHT,
       })),
-      topOffset,
-      bottomOffset,
       totalHeight: total * ITEM_HEIGHT,
       total,
     }
@@ -88,12 +85,17 @@
 
   function handleScroll(e: Event) {
     const target = e.target as HTMLElement
-    scrollTop.value = target.scrollTop
-    isScrolling.value = true
-    window.clearTimeout(scrollTimer)
-    scrollTimer = window.setTimeout(() => {
-      isScrolling.value = false
-    }, 850)
+    // rAF 节流:一帧内的多次 scroll 事件只取最新 scrollTop 更新一次
+    if (scrollHandlerFrame) return
+    scrollHandlerFrame = window.requestAnimationFrame(() => {
+      scrollHandlerFrame = 0
+      scrollTop.value = target.scrollTop
+      isScrolling.value = true
+      window.clearTimeout(scrollTimer)
+      scrollTimer = window.setTimeout(() => {
+        isScrolling.value = false
+      }, 850)
+    })
   }
 
   function handleSearchInput(value: string) {
@@ -175,11 +177,21 @@
   watch(debouncedQuery, (value) => {
     handleSearchInput(value)
   })
+  // 父组件从外部重置 query(如清空搜索)时同步回输入框,避免显示过期文本
+  watch(
+    () => props.query,
+    (value) => {
+      if (value === debouncedQuery.value) return
+      window.clearTimeout(searchTimer)
+      debouncedQuery.value = value
+    },
+  )
   onBeforeUnmount(() => {
     window.clearTimeout(scrollTimer)
     window.clearTimeout(focusTimer)
     window.clearTimeout(searchTimer)
     if (scrollFrame) window.cancelAnimationFrame(scrollFrame)
+    if (scrollHandlerFrame) window.cancelAnimationFrame(scrollHandlerFrame)
     resizeObserver?.disconnect()
     resizeObserver = null
   })
@@ -198,8 +210,8 @@
       <div class="search-row">
         <label class="search-box">
           <Search :size="16" />
-          <input v-model="debouncedQuery" type="search" placeholder="搜索" />
-          <button v-if="query" aria-label="清空搜索" @click="clearSearch">
+          <input v-model="debouncedQuery" type="search" aria-label="搜索歌曲" placeholder="搜索" />
+          <button v-if="debouncedQuery" aria-label="清空搜索" @click="clearSearch">
             <X :size="14" />
           </button>
         </label>

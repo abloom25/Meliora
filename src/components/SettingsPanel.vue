@@ -49,13 +49,14 @@
     <div class="settings-section">
       <h3 class="settings-section-title">播放</h3>
       <div class="setting-group">
-        <label
-          ><span><SlidersHorizontal :size="17" /><strong>音量</strong></span
-          ><strong>{{ Math.round(settings.volume * 100) }}%</strong></label
-        >
+        <div class="setting-group-label">
+          <span id="setting-volume-label"
+            ><SlidersHorizontal :size="17" /><strong>音量</strong></span
+          ><strong>{{ Math.round(settings.volume * 100) }}%</strong>
+        </div>
         <SettingRange
           v-model="settings.volume"
-          aria-label="音量"
+          aria-labelledby="setting-volume-label"
           :aria-value-text="`${Math.round(settings.volume * 100)}%`"
           :min="0"
           :max="1"
@@ -121,13 +122,13 @@
         />
       </div>
       <div class="setting-group">
-        <label
-          ><span><strong>歌词字号</strong></span
-          ><strong>{{ settings.lyricFontSize }}px</strong></label
-        >
+        <div class="setting-group-label">
+          <span id="setting-lyric-font-size-label"><strong>歌词字号</strong></span
+          ><strong>{{ settings.lyricFontSize }}px</strong>
+        </div>
         <SettingRange
           v-model="settings.lyricFontSize"
-          aria-label="歌词字号"
+          aria-labelledby="setting-lyric-font-size-label"
           :aria-value-text="`${settings.lyricFontSize}px`"
           :min="15"
           :max="30"
@@ -190,13 +191,13 @@
         <ToggleSwitch v-model="settings.dynamicBackground" aria-label="动态封面背景" />
       </div>
       <div class="setting-group">
-        <label
-          ><span><strong>背景模糊</strong></span
-          ><strong>{{ settings.backgroundBlur }}px</strong></label
-        >
+        <div class="setting-group-label">
+          <span id="setting-background-blur-label"><strong>背景模糊</strong></span
+          ><strong>{{ settings.backgroundBlur }}px</strong>
+        </div>
         <SettingRange
           v-model="settings.backgroundBlur"
-          aria-label="背景模糊"
+          aria-labelledby="setting-background-blur-label"
           :aria-value-text="`${settings.backgroundBlur}px`"
           :min="45"
           :max="130"
@@ -204,13 +205,13 @@
         />
       </div>
       <div class="setting-group">
-        <label
-          ><span><strong>背景饱和度</strong></span
-          ><strong>{{ Math.round(settings.backgroundSaturation * 100) }}%</strong></label
-        >
+        <div class="setting-group-label">
+          <span id="setting-background-saturation-label"><strong>背景饱和度</strong></span
+          ><strong>{{ Math.round(settings.backgroundSaturation * 100) }}%</strong>
+        </div>
         <SettingRange
           v-model="settings.backgroundSaturation"
-          aria-label="背景饱和度"
+          aria-labelledby="setting-background-saturation-label"
           :aria-value-text="`${Math.round(settings.backgroundSaturation * 100)}%`"
           :min="0.7"
           :max="1.8"
@@ -218,13 +219,13 @@
         />
       </div>
       <div class="setting-group">
-        <label
-          ><span><strong>节奏亮度</strong></span
-          ><strong>{{ Math.round(settings.beatBrightness * 100) }}%</strong></label
-        >
+        <div class="setting-group-label">
+          <span id="setting-beat-brightness-label"><strong>节奏亮度</strong></span
+          ><strong>{{ Math.round(settings.beatBrightness * 100) }}%</strong>
+        </div>
         <SettingRange
           v-model="settings.beatBrightness"
-          aria-label="节奏亮度"
+          aria-labelledby="setting-beat-brightness-label"
           :aria-value-text="`${Math.round(settings.beatBrightness * 100)}%`"
           :min="0"
           :max="0.65"
@@ -347,6 +348,7 @@
     transform: scale(0.98);
   }
   .setting-group label,
+  .setting-group .setting-group-label,
   .setting-row {
     display: flex;
     align-items: center;
@@ -354,12 +356,14 @@
     gap: 20px;
   }
   .setting-group label > span,
+  .setting-group .setting-group-label > span,
   .setting-row > span {
     display: flex;
     flex-direction: column;
     gap: 4px;
   }
-  .setting-group label > span {
+  .setting-group label > span,
+  .setting-group .setting-group-label > span {
     flex-direction: row;
     align-items: center;
     gap: 7px;
@@ -448,6 +452,7 @@
       padding: 13px 12px;
     }
     .setting-group label,
+    .setting-group .setting-group-label,
     .setting-row {
       gap: 14px;
     }

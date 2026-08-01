@@ -14,6 +14,9 @@
     input: [value: number]
     change: [value: number]
   }>()
+
+  // 定时关闭的最大分钟数,滑块上限与刻度定位共用
+  const SLEEP_TIMER_MAX_MINUTES = 90
 </script>
 
 <template>
@@ -26,22 +29,19 @@
       class="sleep-range"
       :model-value="displayMinutes"
       :min="0"
-      :max="90"
+      :max="SLEEP_TIMER_MAX_MINUTES"
       :step="1"
       aria-label="定时关闭"
       :aria-value-text="displayMinutes ? `${Math.round(displayMinutes)} 分钟` : '关闭'"
       @update:model-value="emit('input', $event)"
       @change="emit('change', $event)"
     />
-    <datalist id="sleep-timer-marks">
-      <option v-for="mark in options" :key="mark" :value="mark" />
-    </datalist>
     <div class="sleep-ticks" aria-hidden="true">
       <span
         v-for="mark in options"
         :key="mark"
         :class="{ active: minutes === mark }"
-        :style="{ '--tick-position': `${(mark / 90) * 100}%` }"
+        :style="{ '--tick-position': `${(mark / SLEEP_TIMER_MAX_MINUTES) * 100}%` }"
       >
         {{ mark || '关' }}
       </span>

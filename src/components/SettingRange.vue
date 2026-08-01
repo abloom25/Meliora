@@ -22,6 +22,8 @@
   const dragging = ref(false)
   let dragTarget: HTMLElement | null = null
   let dragPointerId: number | null = null
+  // 拖动开始时的值,取消拖动(失焦/pointercancel/禁用/卸载)时回滚到它
+  let dragStartValue = 0
 
   const normalizedModelValue = computed(() => normalizeValue(props.modelValue))
   const progress = computed(() => {
@@ -79,8 +81,11 @@
     if (options.emitChange) emit('change', normalized)
   }
 
-  function cancelDragWithCurrentValue() {
-    finishDrag(props.modelValue, { emitChange: true })
+  // 取消路径(pointercancel/窗口失焦/拖动中被禁用/组件卸载):回滚到拖动前的值,
+  // 不派发 change——change 只代表用户确认提交,中断不算确认
+  function cancelDragAndRestore() {
+    if (!dragging.value) return
+    finishDrag(dragStartValue, { emitChange: false })
   }
 
   function handleWindowPointerUp(event: PointerEvent) {
@@ -91,11 +96,11 @@
 
   function handleWindowPointerCancel(event: PointerEvent) {
     if (!isActivePointer(event)) return
-    cancelDragWithCurrentValue()
+    cancelDragAndRestore()
   }
 
   function handleWindowBlur() {
-    cancelDragWithCurrentValue()
+    cancelDragAndRestore()
   }
 
   function beginDrag(event: PointerEvent) {
@@ -105,6 +110,7 @@
     dragging.value = true
     dragTarget = track
     dragPointerId = event.pointerId
+    dragStartValue = normalizedModelValue.value
     track.setPointerCapture?.(event.pointerId)
     window.addEventListener('pointerup', handleWindowPointerUp)
     window.addEventListener('pointercancel', handleWindowPointerCancel)
@@ -127,7 +133,7 @@
 
   function cancelDrag(event: PointerEvent) {
     if (!isActivePointer(event)) return
-    cancelDragWithCurrentValue()
+    cancelDragAndRestore()
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -157,12 +163,12 @@
   watch(
     () => props.disabled,
     (disabled) => {
-      if (disabled && dragging.value) cancelDragWithCurrentValue()
+      if (disabled && dragging.value) cancelDragAndRestore()
     },
   )
 
   onBeforeUnmount(() => {
-    if (dragging.value) cancelDragWithCurrentValue()
+    if (dragging.value) cancelDragAndRestore()
     removeGlobalDragListeners()
   })
 </script>

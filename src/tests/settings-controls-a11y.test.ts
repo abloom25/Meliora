@@ -130,7 +130,7 @@ describe('settings form controls accessibility', () => {
     expect(wrapper.emitted('change')?.at(-1)).toEqual([7])
   })
 
-  it('commits the current draft when a range drag is canceled', async () => {
+  it('rolls back to the pre-drag value without emitting change when a range drag is canceled', async () => {
     const wrapper = mount(SettingRange, {
       props: {
         modelValue: 4,
@@ -148,7 +148,9 @@ describe('settings form controls accessibility', () => {
     await nextTick()
 
     expect(slider.classes()).not.toContain('is-dragging')
-    expect(wrapper.emitted('change')?.at(-1)).toEqual([3])
+    // 取消不派发 change,并把值回滚到拖动前的 4
+    expect(wrapper.emitted('change')).toBeUndefined()
+    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([4])
   })
 
   it('supports keyboard control for custom ranges', async () => {

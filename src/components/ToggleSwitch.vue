@@ -57,6 +57,11 @@
     background: color-mix(in srgb, var(--accent) 64%, rgba(255, 255, 255, 0.18));
   }
 
+  .toggle-switch input:focus-visible + i {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
   .toggle-switch input:checked + i::after {
     transform: translateX(18px);
   }

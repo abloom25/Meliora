@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { computed } from 'vue'
   import {
     EQ_BAND_LABELS,
     EQ_PRESET_LIST,
@@ -25,6 +26,9 @@
 
   const { triggerHaptic } = useHaptic()
 
+  // 旧配置里 bands 可能短于 EQ_BAND_LABELS,渲染前统一按频段数归一化,缺省按 0dB
+  const normalizedBands = computed(() => EQ_BAND_LABELS.map((_, index) => props.bands[index] ?? 0))
+
   function selectPreset(preset: EqPresetId) {
     triggerHaptic('selection')
     if (preset === 'custom') {
@@ -36,7 +40,7 @@
   }
 
   function updateBand(index: number, value: number) {
-    const bands = [...props.bands]
+    const bands = [...normalizedBands.value]
     bands[index] = clampGain(value)
     emit('update:bands', bands)
     emit('update:preset', detectPreset(bands))
@@ -79,17 +83,17 @@
         <span class="eq-band-label">{{ label }}</span>
         <SettingRange
           class="eq-band-range"
-          :model-value="bands[index] ?? 0"
+          :model-value="normalizedBands[index] ?? 0"
           :min="-12"
           :max="12"
           :step="1"
           :disabled="!enabled"
           :aria-label="`${label} 增益`"
-          :aria-value-text="`${(bands[index] ?? 0) > 0 ? '+' : ''}${bands[index] ?? 0}dB`"
+          :aria-value-text="`${(normalizedBands[index] ?? 0) > 0 ? '+' : ''}${normalizedBands[index] ?? 0}dB`"
           @update:model-value="updateBand(index, $event)"
         />
         <strong class="eq-band-value">
-          {{ bands[index] > 0 ? '+' : '' }}{{ bands[index] }}dB
+          {{ (normalizedBands[index] ?? 0) > 0 ? '+' : '' }}{{ normalizedBands[index] ?? 0 }}dB
         </strong>
       </label>
     </div>

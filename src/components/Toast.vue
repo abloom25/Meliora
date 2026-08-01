@@ -17,7 +17,10 @@
         :class="[type || 'info', position || 'top']"
         :role="type === 'error' ? 'alert' : 'status'"
         :aria-live="type === 'error' ? 'assertive' : 'polite'"
+        tabindex="0"
         @click="$emit('dismiss')"
+        @keydown.enter.prevent="$emit('dismiss')"
+        @keydown.space.prevent="$emit('dismiss')"
       >
         {{ message }}
       </div>
@@ -46,6 +49,11 @@
     box-shadow:
       0 14px 44px rgba(0, 0, 0, 0.22),
       inset 0 1px rgba(255, 255, 255, 0.08);
+  }
+
+  .app-toast:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
   }
 
   .app-toast.top {
