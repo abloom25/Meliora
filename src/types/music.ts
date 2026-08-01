@@ -80,6 +80,8 @@ export interface LyricsSnapshot {
   lines: LyricLine[]
   activeIndex: number
   status: LyricStatus
+  /** 快节奏歌词下的动画压缩系数(1 = 完整节奏,0 = 瞬切),缺省按 1 处理 */
+  tempoScale?: number
 }
 
 export interface EqualizerSettings {

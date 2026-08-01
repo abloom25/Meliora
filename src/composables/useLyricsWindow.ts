@@ -37,7 +37,7 @@ const popupStyles = `
   p { margin-top: 4px; color: rgba(255,255,255,.56); font-size: 12px; }
   .lyrics { display: flex; min-height: 0; flex: 1; flex-direction: column; justify-content: center; padding-top: 18px; }
   .lyrics-lines { display: flex; min-height: 0; flex-direction: column; justify-content: center; gap: 13px; }
-  .line { color: rgba(255,255,255,.27); font-size: clamp(21px,5.4vw,31px); font-weight: 690; line-height: 1.16; letter-spacing: -.035em; transition: opacity .45s ease,color .45s ease,text-shadow .45s ease; }
+  .line { color: rgba(255,255,255,.27); font-size: clamp(21px,5.4vw,31px); font-weight: 690; line-height: 1.16; letter-spacing: -.035em; transition: opacity calc(.45s * var(--lyric-tempo,1)) ease,color calc(.45s * var(--lyric-tempo,1)) ease,text-shadow calc(.45s * var(--lyric-tempo,1)) ease; }
   .line.active { color: #fff; text-shadow: 0 0 20px rgba(255,255,255,.18); }
   .translation { display: block; margin-top: .2em; font-size: .68em; opacity: .72; }
   .state { margin: auto 0; color: rgba(255,255,255,.5); font-size: 18px; font-weight: 620; }
@@ -276,6 +276,11 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     state.textContent = ''
 
     const active = snapshot.value.activeIndex
+    // 与主面板共享快节奏动画压缩系数,缺省按完整节奏处理
+    const tempoScale = String(snapshot.value.tempoScale ?? 1)
+    if (lyricsContainer.style.getPropertyValue('--lyric-tempo') !== tempoScale) {
+      lyricsContainer.style.setProperty('--lyric-tempo', tempoScale)
+    }
     const hasActiveLine = active >= 0 && active < lines.length
     const start = hasActiveLine ? Math.max(0, active - 1) : 0
     const end = hasActiveLine ? Math.min(lines.length, active + 3) : Math.min(lines.length, 4)

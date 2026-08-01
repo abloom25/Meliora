@@ -166,17 +166,21 @@ function setPanelLayout(wrapper: VueWrapper, offsets: number[] = [0, 90, 180, 27
   wrapper.findAll<HTMLButtonElement>('.lyric-line').forEach((line, index) => {
     defineReadonlyNumber(line.element, 'offsetTop', offsets[index] ?? index * 90)
     defineReadonlyNumber(line.element, 'clientHeight', 40)
-    line.element.getBoundingClientRect = vi.fn(() => ({
-      x: 0,
-      y: offsets[index] ?? index * 90,
-      top: offsets[index] ?? index * 90,
-      left: 0,
-      right: 320,
-      bottom: (offsets[index] ?? index * 90) + 40,
-      width: 320,
-      height: 40,
-      toJSON: () => ({}),
-    }))
+    // rect 随 scrollTop 变化,贴近真实浏览器行为(scrollToIndex 会二次测量视觉位移)
+    line.element.getBoundingClientRect = vi.fn(() => {
+      const top = (offsets[index] ?? index * 90) - scroller.scrollTop
+      return {
+        x: 0,
+        y: top,
+        top,
+        left: 0,
+        right: 320,
+        bottom: top + 40,
+        width: 320,
+        height: 40,
+        toJSON: () => ({}),
+      }
+    })
   })
 
   return scroller
@@ -383,7 +387,7 @@ describe('LyricsPanel scrolling alignment', () => {
     expect(animateSpy).toHaveBeenCalledTimes(12)
   })
 
-  it('defers the next one-line realign until the current lyric animation finishes', async () => {
+  it('retargets the in-flight lyric animation when the next line arrives early', async () => {
     mockedSupportsWebAnimations.mockReturnValue(true)
     const animateSpy = installElementAnimateMock()
     const { wrapper, store } = await mountLyricsPanel()
@@ -392,20 +396,104 @@ describe('LyricsPanel scrolling alignment', () => {
 
     await moveTo(store, wrapper, 10)
     clearAnimationFrames()
+    const inFlight = animateSpy.mock.results[0]?.value as Animation | undefined
+    const cancelSpy = inFlight?.cancel ? vi.mocked(inFlight.cancel) : null
     animateSpy.mockClear()
 
+    // 上一段动画(mock 中永不结束)仍在进行时切换到下一行:
+    // 旧动画应立即被取消,新动画立即从当前视觉位置重定向,不再挂起等待
     store.currentTime = 16
     await flushVueUpdates()
     setPanelLayout(wrapper)
     await flushRealignFrame()
 
     expect(wrapper.findAll('.lyric-line')[3]?.classes()).toContain('active')
-    expect(animateSpy).not.toHaveBeenCalled()
-
-    vi.advanceTimersByTime(1300)
-    await flushRealignFrame()
-
+    expect(cancelSpy).toHaveBeenCalled()
     expect(animateSpy).toHaveBeenCalled()
+  })
+
+  it('keeps the lyric clock event-driven while lyrics are sparse', async () => {
+    const { wrapper, store } = await mountLyricsPanel()
+    await flushVueUpdates()
+    setPanelLayout(wrapper)
+    clearAnimationFrames()
+
+    // 默认歌词行间隔 5s,远大于阈值:播放中也不应启动 rAF 外推
+    store.isPlaying = true
+    await flushVueUpdates()
+
+    expect(rafCallbacks).toHaveLength(0)
+  })
+
+  it('compresses the realign animation when lyric lines arrive faster than the base duration', async () => {
+    mockedSupportsWebAnimations.mockReturnValue(true)
+    const animateSpy = installElementAnimateMock()
+    const fastLines: LyricLine[] = Array.from({ length: 10 }, (_, index) => ({
+      time: index * 0.8,
+      text: `Fast ${index}`,
+    }))
+    mockedLoadTrackLyrics.mockResolvedValueOnce(fastLines)
+    const { wrapper, store } = await mountLyricsPanel()
+    await flushVueUpdates()
+    setPanelLayout(wrapper)
+    clearAnimationFrames()
+    animateSpy.mockClear()
+
+    await moveTo(store, wrapper, 0.5)
+
+    expect(wrapper.findAll('.lyric-line')[1]?.classes()).toContain('active')
+    expect(animateSpy).toHaveBeenCalled()
+    const firstCall = animateSpy.mock.calls[0] as unknown as [unknown, KeyframeAnimationOptions]
+    expect(firstCall[1].duration).toBeLessThan(980)
+    const style = wrapper.get('.lyrics-panel').attributes('style') ?? ''
+    const tempo = Number(/--lyric-tempo:\s*([\d.]+)/.exec(style)?.[1])
+    expect(tempo).toBeGreaterThan(0)
+    expect(tempo).toBeLessThan(1)
+  })
+
+  it('snaps instantly instead of animating when the next lyric line is imminent', async () => {
+    mockedSupportsWebAnimations.mockReturnValue(true)
+    const animateSpy = installElementAnimateMock()
+    const rapidLines: LyricLine[] = Array.from({ length: 10 }, (_, index) => ({
+      time: index * 0.3,
+      text: `Rapid ${index}`,
+    }))
+    mockedLoadTrackLyrics.mockResolvedValueOnce(rapidLines)
+    const { wrapper, store } = await mountLyricsPanel()
+    await flushVueUpdates()
+    const scroller = setPanelLayout(wrapper)
+    clearAnimationFrames()
+    animateSpy.mockClear()
+
+    await moveTo(store, wrapper, 0.35)
+
+    expect(wrapper.findAll('.lyric-line')[2]?.classes()).toContain('active')
+    expect(animateSpy).not.toHaveBeenCalled()
+    expect(scroller.scrollTop).toBe(100)
+    expect(wrapper.get('.lyrics-panel').attributes('style')).toContain('--lyric-tempo: 0')
+  })
+
+  it('extrapolates the lyric clock between timeupdate events while playing', async () => {
+    const rapidLines: LyricLine[] = Array.from({ length: 20 }, (_, index) => ({
+      time: index * 0.3,
+      text: `Rapid ${index}`,
+    }))
+    mockedLoadTrackLyrics.mockResolvedValueOnce(rapidLines)
+    const { wrapper, store } = await mountLyricsPanel()
+    await flushVueUpdates()
+    setPanelLayout(wrapper)
+
+    store.isPlaying = true
+    await flushVueUpdates()
+    expect(rafCallbacks.length).toBeGreaterThan(0)
+
+    // timeupdate 事件间隔内(锚点仍停在 currentTime=0)推进 900ms 真实时间:
+    // 外推时钟 0.9s + 0.42s 提前量 ≈ 1.32s,应落在第 4 行(1.2s)
+    vi.advanceTimersByTime(900)
+    flushAnimationFrames()
+    await flushVueUpdates()
+
+    expect(wrapper.findAll('.lyric-line')[4]?.classes()).toContain('active')
   })
 
   it('clears transient lyric visuals and cancels row animations when the track changes', async () => {

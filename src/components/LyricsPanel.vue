@@ -28,12 +28,29 @@
     },
   )
   const LYRIC_MOTION_LEAD = 0.42
+  // FLIP 滚动动画基准节奏:时长 980ms + 每行 48ms 交错延迟
+  const REALIGN_BASE_DURATION = 980
+  const REALIGN_BASE_DELAY_STEP = 48
+  // 距离下一行 realign 的剩余时间不足该预算时直接瞬移,避免动画刚开始就被下一行打断
+  const REALIGN_MIN_BUDGET_MS = 260
+  // scrollToIndex 参与位移动画的窗口最大为 min(prev,index)-5 .. max(prev,index)+7,即 13 行
+  const MAX_STAGGERED_LINES = 13
   const store = usePlayerStore()
-  const { currentTrack, currentTrackVersion, currentTime, settings } = storeToRefs(store)
+  const { currentTrack, currentTrackVersion, currentTime, isPlaying, settings } = storeToRefs(store)
+  // currentTime 仅由 timeupdate 事件驱动(约 4Hz),快节奏歌词(行间隔可达 10ms 级)
+  // 会成片跳行。这里以每次 currentTime 更新为锚点做 rAF 外推,得到 60fps 的同步时钟,
+  // 锚点每次更新会自动校正漂移;暂停时外推停止,时钟冻结在锚点。
+  const lyricClock = ref(currentTime.value)
+  let clockAnchorTime = currentTime.value
+  let clockAnchorStamp = performance.now()
+  let clockRaf = 0
   const lines = ref<LyricLine[]>([])
   const activeIndex = ref(-1)
   const targetIndex = ref(-1)
   const status = ref<LyricStatus>('idle')
+  // 快节奏歌词(行间隔短于整套动画时长)下的动画压缩系数,驱动 FLIP 时长、
+  // 高亮 CSS 过渡与 PiP 歌词窗;1 表示完整节奏,0 表示瞬切
+  const lyricTempo = ref(1)
   const panel = ref<HTMLElement>()
   const scroller = ref<HTMLElement>()
   const lyricsContent = ref<HTMLElement>()
@@ -60,8 +77,6 @@
   const lineAnimations = new Set<Animation>()
   let realignAnimationTimer = 0
   const realignAnimating = ref(false)
-  let realignAnimatingTargetIndex: number | null = null
-  let pendingAnimatedRealign: ScheduleRealignOptions | null = null
   let stopReducedMotionListener: (() => void) | null = null
   const reducedMotionQuery =
     typeof window !== 'undefined' && typeof window.matchMedia === 'function'
@@ -107,7 +122,27 @@
       lines: displayedLines.value,
       activeIndex: activeIndex.value,
       status: status.value,
+      tempoScale: lyricTempo.value,
     })
+  }
+
+  // 距离下一行 realign 的剩余时间(ms);下一行无时间戳(纯文本歌词/最后一行)时视为无限预算
+  function getRealignBudgetMs(index: number): number {
+    const nextLineTime = lines.value[index + 1]?.time
+    return nextLineTime === null || nextLineTime === undefined
+      ? Number.POSITIVE_INFINITY
+      : (nextLineTime - LYRIC_MOTION_LEAD - lyricClock.value) * 1000
+  }
+
+  // 快节奏歌词(如说唱)行间隔可能短于整套动画时长,不压缩的话滚动与高亮会一路落后于
+  // 播放位置。按剩余预算等比压缩;预算不足 REALIGN_MIN_BUDGET_MS 时返回 0,直接瞬切。
+  function computeTempoScale(index: number, staggeredLines: number): number {
+    if (index < 0) return 1
+    const budgetMs = getRealignBudgetMs(index)
+    if (budgetMs < REALIGN_MIN_BUDGET_MS) return 0
+    const baseTotal =
+      REALIGN_BASE_DURATION + Math.max(staggeredLines - 1, 0) * REALIGN_BASE_DELAY_STEP
+    return Math.min(1, budgetMs / baseTotal)
   }
 
   async function loadLyrics(track: Track | null) {
@@ -174,9 +209,18 @@
     markUserScrolling({ resetRestoreTimer: true })
   }
 
+  const SCROLL_INTENT_KEYS = new Set([
+    'ArrowDown',
+    'ArrowUp',
+    'End',
+    'Home',
+    'PageDown',
+    'PageUp',
+    ' ',
+  ])
+
   function handleKeydown(event: KeyboardEvent) {
-    const scrollKeys = new Set(['ArrowDown', 'ArrowUp', 'End', 'Home', 'PageDown', 'PageUp', ' '])
-    if (!scrollKeys.has(event.key)) return
+    if (!SCROLL_INTENT_KEYS.has(event.key)) return
     // 歌词行按钮上的 Space 由按钮自身处理(preventDefault 后触发 seek),
     // 不会滚动容器,因此不标记为用户滚动
     if (event.key === ' ' && (event.target as HTMLElement | null)?.closest('.lyric-line')) return
@@ -198,8 +242,6 @@
     lineAnimations.clear()
     window.clearTimeout(realignAnimationTimer)
     realignAnimating.value = false
-    realignAnimatingTargetIndex = null
-    pendingAnimatedRealign = null
   }
 
   function resetTransientLyrics() {
@@ -215,6 +257,7 @@
     userScrolling.value = false
     isProgrammaticScroll = false
     cancelLineAnimations()
+    lyricTempo.value = 1
     lines.value = []
     lineElements.value = []
     activeIndex.value = -1
@@ -230,26 +273,11 @@
 
   function scheduleRealign(options: ScheduleRealignOptions = {}) {
     if (!props.active || userScrolling.value || targetIndex.value < 0) return
-    if (realignAnimating.value && options.animate !== false) {
-      const targetDistance =
-        realignAnimatingTargetIndex === null
-          ? 0
-          : Math.abs(targetIndex.value - realignAnimatingTargetIndex)
-      if (targetDistance > 1) {
-        cancelLineAnimations()
-      } else {
-        pendingAnimatedRealign = {
-          animate: options.animate,
-          previousIndex: options.previousIndex,
-        }
-        return
-      }
-    }
+    // 动画进行中来了新 realign 不挂起:scrollToIndex 会从实时视觉位置无缝重定向,
+    // 避免高亮已切换而滚动还在等上一段动画播完的错位
     if (options.animate === false) {
       window.clearTimeout(realignAnimationTimer)
       realignAnimating.value = false
-      realignAnimatingTargetIndex = null
-      pendingAnimatedRealign = null
     }
     const id = ++realignRequestId
     window.cancelAnimationFrame(realignRaf)
@@ -272,7 +300,7 @@
   }
 
   function syncActiveLyric(options: SyncActiveLyricOptions = {}) {
-    const syncTime = currentTime.value + LYRIC_MOTION_LEAD
+    const syncTime = lyricClock.value + LYRIC_MOTION_LEAD
     const nextIndex =
       status.value === 'ready' || lines.value.length > 0
         ? findActiveLyricIndex(lines.value, syncTime)
@@ -284,6 +312,7 @@
     activeIndex.value = nextIndex
 
     if (changed) {
+      lyricTempo.value = computeTempoScale(nextIndex, MAX_STAGGERED_LINES)
       emitSnapshot()
     }
     const shouldRealign = options.realign ?? true
@@ -344,7 +373,15 @@
       return
     }
 
-    cancelLineAnimations()
+    // 快节奏歌词行间隔可能短于整套动画时长,预算不足时直接瞬移到位,
+    // 避免动画刚开始就被下一行打断(压缩逻辑见 computeTempoScale)
+    const realignBudgetMs = getRealignBudgetMs(index)
+    if (realignBudgetMs < REALIGN_MIN_BUDGET_MS) {
+      markProgrammaticScroll()
+      container.scrollTop = target
+      onComplete?.()
+      return
+    }
 
     const elements = lineElements.value
     const totalLines = elements.length
@@ -360,7 +397,6 @@
     interface VisibleLine {
       line: HTMLElement
       before: number
-      after: number
     }
     const visibleLines: VisibleLine[] = []
     for (let i = animationStart; i <= animationEnd; i += 1) {
@@ -368,23 +404,41 @@
       if (!line) continue
       visibleLines.push({
         line,
+        // 先测量再取消:进行中的动画(fill: both)仍作用于 rect,
+        // before 记录的是当前真实视觉位置,重定向时动画才能无缝衔接
         before: line.getBoundingClientRect().top,
-        after: 0,
       })
     }
 
     markProgrammaticScroll()
+    cancelLineAnimations()
     container.scrollTop = target
 
-    for (let i = 0; i < visibleLines.length; i += 1) {
-      visibleLines[i]!.after = visibleLines[i]!.line.getBoundingClientRect().top
+    // 第二遍测量拿到滚动后的布局位置,offset = 视觉位置与布局位置的实际差值。
+    // 无进行中动画时恒等于 movement;重定向时包含上一段动画的残余位移。
+    // 纯 scroll 不会触发 reflow,两次 rect 查询不引入额外的强制布局
+    interface MovingLine extends VisibleLine {
+      offset: number
     }
-    visibleLines.sort((left, right) => left.after - right.after)
+    const movingLines: MovingLine[] = []
+    for (const visible of visibleLines) {
+      const offset = visible.before - visible.line.getBoundingClientRect().top
+      if (Math.abs(offset) >= 1) movingLines.push({ ...visible, offset })
+    }
+    if (movingLines.length === 0) {
+      onComplete?.()
+      return
+    }
+    movingLines.sort((left, right) => left.before - right.before)
 
-    visibleLines.forEach(({ line, before: previousTop, after }, order) => {
-      const measuredOffset = previousTop - after
-      const offset = Math.abs(measuredOffset) >= 0.5 ? measuredOffset : movement
-      const delayOrder = movement > 0 ? order : visibleLines.length - order - 1
+    const baseTotal =
+      REALIGN_BASE_DURATION + Math.max(movingLines.length - 1, 0) * REALIGN_BASE_DELAY_STEP
+    const tempoScale = Math.min(1, realignBudgetMs / baseTotal)
+    const duration = REALIGN_BASE_DURATION * tempoScale
+    const delayStep = REALIGN_BASE_DELAY_STEP * tempoScale
+
+    movingLines.forEach(({ line, offset }, order) => {
+      const delayOrder = movement > 0 ? order : movingLines.length - order - 1
       const directionalLag =
         movement > 0 ? Math.min(delayOrder, 7) * 5 : -Math.min(delayOrder, 7) * 5
       const animation = line.animate(
@@ -401,8 +455,8 @@
           },
         ],
         {
-          duration: 980,
-          delay: delayOrder * 48,
+          duration,
+          delay: delayOrder * delayStep,
           easing: 'cubic-bezier(0.16, 0.76, 0.18, 1)',
           fill: 'both',
         },
@@ -416,22 +470,15 @@
       lineAnimations.add(animation)
     })
 
-    const longestDelay = Math.max(visibleLines.length - 1, 0) * 48
+    const longestDelay = Math.max(movingLines.length - 1, 0) * delayStep
     realignAnimating.value = true
-    realignAnimatingTargetIndex = index
     window.clearTimeout(realignAnimationTimer)
     realignAnimationTimer = window.setTimeout(
       () => {
         realignAnimating.value = false
-        realignAnimatingTargetIndex = null
-        const pending = pendingAnimatedRealign
-        pendingAnimatedRealign = null
         onComplete?.()
-        if (pending && props.active && !userScrolling.value && targetIndex.value >= 0) {
-          scheduleRealign(pending)
-        }
       },
-      980 + longestDelay + 40,
+      duration + longestDelay + 40,
     )
   }
 
@@ -441,6 +488,7 @@
 
   const lyricPanelStyle = computed(() => ({
     '--lyric-size': `${settings.value.lyricFontSize}px`,
+    '--lyric-tempo': lyricTempo.value,
   }))
 
   const displayedLines = computed(() => {
@@ -470,9 +518,48 @@
     () => void loadLyrics(currentTrack.value),
     { immediate: true },
   )
-  watch(currentTime, () => {
-    syncActiveLyric({ animate: true })
+  watch(currentTime, (value) => {
+    clockAnchorTime = value
+    clockAnchorStamp = performance.now()
+    lyricClock.value = value
   })
+  watch(lyricClock, () => {
+    syncActiveLyric({ animate: true })
+    ensureClockLoop()
+  })
+
+  // 距离下一次换行不足该阈值才启用 rAF 外推;稀疏段落 timeupdate(约 4Hz)已足够,
+  // 时钟保持事件驱动,避免慢歌整首空转 60fps。阈值需大于 timeupdate 间隔(约 250ms),
+  // 保证事件驱动的段落也能在下一次换行前及时接管
+  const CLOCK_HIGH_RATE_THRESHOLD_MS = 500
+
+  function needsHighRateClock(): boolean {
+    if (targetIndex.value < 0) return false
+    return getRealignBudgetMs(targetIndex.value) < CLOCK_HIGH_RATE_THRESHOLD_MS
+  }
+
+  function ensureClockLoop() {
+    if (!isPlaying.value || clockRaf || !needsHighRateClock()) return
+    clockRaf = window.requestAnimationFrame(tickLyricClock)
+  }
+
+  function tickLyricClock() {
+    clockRaf = 0
+    lyricClock.value = clockAnchorTime + (performance.now() - clockAnchorStamp) / 1000
+    // 密集段落持续外推;回到稀疏段落后停转,等下一次 timeupdate 重新评估
+    if (needsHighRateClock()) clockRaf = window.requestAnimationFrame(tickLyricClock)
+  }
+  watch(
+    isPlaying,
+    (playing) => {
+      if (clockRaf) {
+        window.cancelAnimationFrame(clockRaf)
+        clockRaf = 0
+      }
+      if (playing) ensureClockLoop()
+    },
+    { immediate: true },
+  )
   watch(
     () => settings.value.lyricFontSize,
     () => {
@@ -513,6 +600,8 @@
     window.clearTimeout(resizeRealignTimer)
     window.cancelAnimationFrame(scrollRaf)
     window.cancelAnimationFrame(realignRaf)
+    window.cancelAnimationFrame(clockRaf)
+    clockRaf = 0
     window.clearTimeout(programmaticScrollTimer)
     window.clearTimeout(realignAnimationTimer)
     lyricsController?.abort()
@@ -672,10 +761,10 @@
     translate: 0 0;
     transform-origin: left center;
     transition:
-      color 920ms cubic-bezier(0.22, 1, 0.36, 1),
-      opacity 920ms cubic-bezier(0.22, 1, 0.36, 1),
-      filter 920ms cubic-bezier(0.22, 1, 0.36, 1),
-      text-shadow 920ms cubic-bezier(0.22, 1, 0.36, 1);
+      color calc(920ms * var(--lyric-tempo, 1)) cubic-bezier(0.22, 1, 0.36, 1),
+      opacity calc(920ms * var(--lyric-tempo, 1)) cubic-bezier(0.22, 1, 0.36, 1),
+      filter calc(920ms * var(--lyric-tempo, 1)) cubic-bezier(0.22, 1, 0.36, 1),
+      text-shadow calc(920ms * var(--lyric-tempo, 1)) cubic-bezier(0.22, 1, 0.36, 1);
 
     &::before {
       position: absolute;
@@ -734,7 +823,7 @@
     display: block;
     scale: 1;
     transform-origin: left center;
-    transition: scale 920ms cubic-bezier(0.16, 1, 0.3, 1);
+    transition: scale calc(920ms * var(--lyric-tempo, 1)) cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .lyric-line.active .lyric-original,
