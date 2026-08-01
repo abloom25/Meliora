@@ -62,6 +62,9 @@
   const previewTranslation = computed(() => previewLine.value?.translation ?? '')
   let progressDragTarget: HTMLElement | null = null
   let progressDragPointerId: number | null = null
+  // 拖动开始时锁定的时长:拖动全程用它换算指针位置,
+  // 避免拖动中切歌导致松手时按新时长 seek 到错误位置
+  let dragLockedDuration: number | null = null
   let lastPreviewTime: number | null = null
   let previewFrame = 0
   let pendingPreviewEvent: {
@@ -89,11 +92,13 @@
   }
 
   function getProgressTime(track: HTMLElement, clientX: number): number | null {
-    if (!Number.isFinite(duration.value) || duration.value <= 0) return null
+    const effectiveDuration =
+      draftTime.value !== null && dragLockedDuration !== null ? dragLockedDuration : duration.value
+    if (!Number.isFinite(effectiveDuration) || effectiveDuration <= 0) return null
     const rect = track.getBoundingClientRect()
     if (rect.width <= 0) return null
     const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
-    return ratio * duration.value
+    return ratio * effectiveDuration
   }
 
   function releaseProgressPointerCapture() {
@@ -118,6 +123,7 @@
     if (draftTime.value === null) return
     const committedTime = nextTime ?? draftTime.value
     draftTime.value = null
+    dragLockedDuration = null
     releaseProgressPointerCapture()
     removeGlobalProgressListeners()
     if (options.seek) props.onSeek(committedTime)
@@ -145,6 +151,7 @@
     const nextTime = getProgressTime(track, event.clientX)
     if (nextTime === null) return
     draftTime.value = nextTime
+    dragLockedDuration = duration.value
     progressDragTarget = track
     progressDragPointerId = event.pointerId
     track.setPointerCapture?.(event.pointerId)
@@ -362,9 +369,6 @@
     })
   }
 
-  watch(currentTime, () => {
-    if (draftTime.value !== null && !Number.isFinite(draftTime.value)) draftTime.value = null
-  })
   watch(
     () => props.lyricPreview,
     () => {
@@ -438,8 +442,6 @@
       @pointerup="commitProgress"
       @pointercancel="cancelProgressDrag"
       @keydown="seekByKeyboard"
-      @touchstart.stop
-      @touchmove.stop
     >
       <span class="range-track" aria-hidden="true">
         <span class="progress-fill" />
@@ -460,8 +462,7 @@
         class="lyric-preview-bubble"
         :class="`scroll-${previewScrollDirection}`"
         :style="previewStyle"
-        role="status"
-        aria-live="polite"
+        aria-hidden="true"
       >
         <div ref="previewContent" class="lyric-preview-content">
           <span class="lyric-preview-time">{{ formatTime(previewTime ?? 0) }}</span>
