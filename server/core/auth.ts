@@ -129,17 +129,22 @@ export async function verifyToken(
   }
 }
 
-export function createCookieHeader(token: string): string {
-  return `${COOKIE_NAME}=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800`
+export function createCookieHeader(token: string, options: { secure?: boolean } = {}): string {
+  const secure = options.secure ?? true
+  const secureAttr = secure ? '; Secure' : ''
+  return `${COOKIE_NAME}=${token}; HttpOnly${secureAttr}; SameSite=Lax; Path=/; Max-Age=604800`
 }
 
-export function createClearCookieHeader(): string {
-  return `${COOKIE_NAME}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`
+export function createClearCookieHeader(options: { secure?: boolean } = {}): string {
+  const secure = options.secure ?? true
+  const secureAttr = secure ? '; Secure' : ''
+  return `${COOKIE_NAME}=; HttpOnly${secureAttr}; SameSite=Lax; Path=/; Max-Age=0`
 }
 
 export function parseCookies(cookieHeader: string | null): string | null {
   if (!cookieHeader) return null
-  const match = cookieHeader.match(new RegExp(`${COOKIE_NAME}=([^;]+)`))
+  // 锚定 Cookie 名边界,避免匹配到 xxmeliora_admin= 或其他 Cookie 值中的同名片段
+  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([^;]+)`))
   return match ? match[1] : null
 }
 
@@ -172,7 +177,9 @@ export function timingSafeEqual(a: string, b: string): boolean {
 export async function createLoginHeaders(token: string, env: Env): Promise<Record<string, string>> {
   const secret = await getSigningSecret(env)
   const csrfToken = await generateCsrfToken(secret, env)
-  const cookieHeader = createCookieHeader(token)
+  // dev 模式(http localhost)下 Safari/WebKit 一律拒收 Secure Cookie,降级不带该属性;
+  // 生产环境恒带 Secure
+  const cookieHeader = createCookieHeader(token, { secure: !isDevelopmentMode(env) })
   const csrfHeaders = createCsrfHeaders(csrfToken, {
     'Set-Cookie': cookieHeader,
   })
@@ -184,8 +191,8 @@ export async function createLoginHeaders(token: string, env: Env): Promise<Recor
  * 创建登出响应头，清除认证和 CSRF cookie
  * @returns 响应头对象
  */
-export function createLogoutHeaders(): Record<string, string> {
+export function createLogoutHeaders(env?: Env): Record<string, string> {
   return {
-    'Set-Cookie': createClearCookieHeader(),
+    'Set-Cookie': createClearCookieHeader({ secure: !(env && isDevelopmentMode(env)) }),
   }
 }

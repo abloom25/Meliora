@@ -7,6 +7,7 @@ import {
 import { isDevelopmentMode, isPublicHttpsUrl, type Env } from './types'
 import { jsonResponse } from './http'
 import { ResponseTooLargeError, readJsonWithLimit } from './read-json-with-limit'
+import { logSanitizedError } from './error-handler'
 
 const UPSTREAM_REPO = 'abloom25/Meliora'
 const UPDATE_WORKFLOW = 'update-from-upstream.yml'
@@ -530,12 +531,13 @@ export async function getUpdateStatus(
     return response
   } catch (error) {
     const mapped = mapGitHubError(error)
+    // detail 仅进服务端日志:上游/内部原始错误文本不回传客户端
+    if (mapped.detail) logSanitizedError('getUpdateStatus', new Error(mapped.detail))
     return jsonResponse(
       {
         ok: false,
         error: mapped.error,
         message: mapped.error,
-        detail: mapped.detail,
       },
       mapped.status,
     )
@@ -607,7 +609,9 @@ export async function triggerUpdate(
 
     if (!response.ok) {
       const text = await response.text().catch(() => '')
-      return jsonResponse({ error: `触发失败: ${response.status}`, detail: text }, 502)
+      // 上游原始错误体仅进服务端日志,不回传客户端
+      logSanitizedError('triggerUpdate', new Error(`dispatch ${response.status}: ${text}`))
+      return jsonResponse({ error: `触发失败: ${response.status}` }, 502)
     }
 
     return jsonResponse(

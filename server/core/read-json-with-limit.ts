@@ -2,7 +2,11 @@ export class ResponseTooLargeError extends Error {}
 
 // 带字节上限的 JSON 读取:先查 Content-Length 快速拒绝,再按流式分块累计,
 // 超过 maxBytes 立即 cancel 并抛错,避免不可信上游把超大响应全量读入内存。
-export async function readJsonWithLimit(response: Response, maxBytes: number): Promise<unknown> {
+// 同时适用于上游 Response 与入站 Request(未认证端点的请求体 DoS 防护)。
+export async function readJsonWithLimit(
+  response: Response | Request,
+  maxBytes: number,
+): Promise<unknown> {
   const contentLength = Number(response.headers.get('Content-Length'))
   if (Number.isFinite(contentLength) && contentLength > maxBytes) {
     throw new ResponseTooLargeError('response body exceeds limit')

@@ -28,6 +28,7 @@ import {
 import { createErrorResponse, logSanitizedError } from './error-handler'
 import { isLoopbackOrigin } from '../../shared/utils/url-validation'
 import { UPLOAD_LIMITS } from '../../shared/constants'
+import { readJsonWithLimit, ResponseTooLargeError } from './read-json-with-limit'
 import { jsonResponse } from './http'
 
 export interface RequestContext {
@@ -84,6 +85,38 @@ const TEST_MUSIC_API_RATE_LIMIT = {
   limit: 10,
   windowMs: 10 * 60 * 1000,
   blockMs: 5 * 60 * 1000,
+}
+
+// 上传会创建 GitHub Blob,被盗会话可高频刷爆 GH API 配额,给宽松档限流。
+const UPLOAD_RATE_LIMIT = {
+  key: 'upload',
+  limit: 60,
+  windowMs: 10 * 60 * 1000,
+  blockMs: 10 * 60 * 1000,
+}
+
+// 请求体在 request.json() 全量解析前的字节上限:Content-Length 预检快速拒绝,
+// 无 Content-Length 时按流式累计超限即抛(见 read-json-with-limit)。
+const JSON_BODY_LIMITS: Record<string, number> = {
+  'POST /api/login': 64 * 1024,
+  'POST /api/setup': 64 * 1024,
+  'POST /api/change-password': 64 * 1024,
+  'POST /api/check-update': 64 * 1024,
+  'POST /api/update': 64 * 1024,
+  'POST /api/test-music-api': 64 * 1024,
+  'PUT /api/config': 4 * 1024 * 1024,
+  'POST /api/upload': UPLOAD_LIMITS.MAX_BASE64_LENGTH + 4096,
+}
+
+// JSON 解析失败返回 fallback;ResponseTooLargeError 继续上抛,由顶层 catch 映射 413
+async function parseJsonBody(request: Request, path: string, fallback: unknown): Promise<unknown> {
+  const limit = JSON_BODY_LIMITS[`${request.method} ${path}`]
+  try {
+    return limit ? await readJsonWithLimit(request, limit) : await request.json()
+  } catch (error) {
+    if (error instanceof ResponseTooLargeError) throw error
+    return fallback
+  }
 }
 
 const PASSWORD_WORK_CONCURRENCY = 2
@@ -212,7 +245,7 @@ async function handleRequestInternal(
         return rateLimitResponse(rateLimit.retryAfterSeconds)
       }
 
-      const body = (await request.json().catch(() => ({}))) as { password?: string }
+      const body = (await parseJsonBody(request, path, {})) as { password?: string }
       if (!body.password) {
         return jsonResponse({ error: '密码错误' }, 401)
       }
@@ -233,7 +266,7 @@ async function handleRequestInternal(
     }
 
     if (path === '/api/logout' && request.method === 'POST') {
-      return jsonResponse({ success: true }, 200, createLogoutHeaders())
+      return jsonResponse({ success: true }, 200, createLogoutHeaders(env))
     }
 
     if (path === '/api/auth' && request.method === 'GET') {
@@ -261,7 +294,7 @@ async function handleRequestInternal(
       if (initialized) {
         return jsonResponse({ error: '密码已初始化' }, 409)
       }
-      const body = (await request.json().catch(() => ({}))) as { password?: string }
+      const body = (await parseJsonBody(request, path, {})) as { password?: string }
       if (!body.password) {
         return jsonResponse({ error: '请输入密码' }, 400)
       }
@@ -294,7 +327,7 @@ async function handleRequestInternal(
       if (!rateLimit.allowed) {
         return rateLimitResponse(rateLimit.retryAfterSeconds)
       }
-      const body = (await request.json().catch(() => ({}))) as {
+      const body = (await parseJsonBody(request, path, {})) as {
         current?: string
         githubProxy?: string
         receivePrereleaseUpdates?: boolean
@@ -337,7 +370,7 @@ async function handleRequestInternal(
       if (!rateLimit.allowed) {
         return rateLimitResponse(rateLimit.retryAfterSeconds)
       }
-      const body = (await request.json().catch(() => ({}))) as {
+      const body = (await parseJsonBody(request, path, {})) as {
         githubProxy?: string
         targetTag?: string
         receivePrereleaseUpdates?: boolean
@@ -360,7 +393,7 @@ async function handleRequestInternal(
       if (!rateLimit.allowed) {
         return rateLimitResponse(rateLimit.retryAfterSeconds)
       }
-      const body = (await request.json().catch(() => ({}))) as {
+      const body = (await parseJsonBody(request, path, {})) as {
         current?: string
         next?: string
       }
@@ -390,7 +423,7 @@ async function handleRequestInternal(
       if (!rateLimit.allowed) {
         return rateLimitResponse(rateLimit.retryAfterSeconds)
       }
-      const body = await request.json().catch(() => null)
+      const body = await parseJsonBody(request, path, null)
       if (!body || typeof body !== 'object') {
         return jsonResponse({ error: '配置无效' }, 400)
       }
@@ -410,7 +443,7 @@ async function handleRequestInternal(
       }
       const csrfError = await csrfErrorResponse(request, env)
       if (csrfError) return csrfError
-      const body = await request.json().catch(() => null)
+      const body = await parseJsonBody(request, path, null)
       return putConfig(body, env)
     }
 
@@ -420,7 +453,11 @@ async function handleRequestInternal(
       }
       const csrfError = await csrfErrorResponse(request, env)
       if (csrfError) return csrfError
-      const body = (await request.json().catch(() => null)) as {
+      const rateLimit = consumeRateLimit(UPLOAD_RATE_LIMIT, context.clientIp)
+      if (!rateLimit.allowed) {
+        return rateLimitResponse(rateLimit.retryAfterSeconds)
+      }
+      const body = (await parseJsonBody(request, path, null)) as {
         path?: string
         content?: string
       } | null
@@ -437,6 +474,9 @@ async function handleRequestInternal(
 
     return jsonResponse({ error: '未找到' }, 404)
   } catch (error) {
+    if (error instanceof ResponseTooLargeError) {
+      return jsonResponse({ error: '请求体过大' }, 413)
+    }
     // 使用统一的错误处理，避免敏感信息泄露
     logSanitizedError('handleRequest', error)
     const errorResponse = createErrorResponse(error, 500)

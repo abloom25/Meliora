@@ -335,7 +335,8 @@ describe('server update handler', () => {
 
     expect(response.status).toBe(502)
     expect(data.error).toContain('GH_TOKEN')
-    expect(data.detail).toContain('Resource not accessible')
+    // 上游原始错误体仅进服务端日志,不回传客户端
+    expect(data.detail).toBeUndefined()
   })
 
   it('normalizes successful workflow run status', async () => {

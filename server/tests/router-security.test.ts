@@ -44,6 +44,41 @@ describe('router security gates', () => {
     expect(forbidden.headers.get('Cache-Control')).toBe('no-store')
   })
 
+  it('rejects oversized login bodies before parsing (Content-Length precheck)', async () => {
+    const response = await handleRequest(
+      new Request('https://example.com/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: 'x'.repeat(100 * 1024) }),
+      }),
+      ENV,
+    )
+
+    expect(response.status).toBe(413)
+  })
+
+  it('rejects oversized streaming bodies without Content-Length', async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`{"password":"${'x'.repeat(100 * 1024)}`))
+        controller.enqueue(new TextEncoder().encode('"}'))
+        controller.close()
+      },
+    })
+    const response = await handleRequest(
+      new Request('https://example.com/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: stream,
+        // undici 流式请求体需要声明 duplex
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' }),
+      ENV,
+    )
+
+    expect(response.status).toBe(413)
+  })
+
   it('requires authentication before checking updates', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)

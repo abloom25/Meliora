@@ -127,4 +127,14 @@ describe('admin-auth-store', () => {
     expect(result.ok).toBe(false)
     expect(githubMocks.writeFile).not.toHaveBeenCalled()
   })
+
+  it('rejects stored hashes with absurd PBKDF2 iteration counts (CPU DoS guard)', async () => {
+    const { verifyPassword } = await import('../core/admin-auth-store')
+
+    // 被篡改的 admin.json 可写入超大迭代数,必须快速拒绝而不是真去算
+    expect(await verifyPassword('pw', 'pbkdf2$99999999$c2FsdA==$aGFzaA==')).toBe(false)
+    expect(await verifyPassword('pw', 'pbkdf2$0$c2FsdA==$aGFzaA==')).toBe(false)
+    expect(await verifyPassword('pw', 'pbkdf2$-5$c2FsdA==$aGFzaA==')).toBe(false)
+    expect(await verifyPassword('pw', 'pbkdf2$abc$c2FsdA==$aGFzaA==')).toBe(false)
+  })
 })

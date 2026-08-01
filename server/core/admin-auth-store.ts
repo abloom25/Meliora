@@ -86,6 +86,10 @@ export async function verifyPassword(password: string, stored: string): Promise<
     const parts = stored.split('$')
     if (parts.length !== 4 || parts[0] !== 'pbkdf2') return false
     const iterations = parseInt(parts[1], 10)
+    // 迭代数取存储值但必须有上限:被篡改的 admin.json 可写入超大迭代数造成 CPU DoS
+    if (!Number.isFinite(iterations) || iterations < 1 || iterations > PBKDF2_ITERATIONS * 2) {
+      return false
+    }
     const salt = base64ToBytes(parts[2])
     const expectedHash = parts[3]
 

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { signToken, verifyToken, timingSafeEqual, getSigningSecret } from '../core/auth'
+import {
+  signToken,
+  verifyToken,
+  timingSafeEqual,
+  getSigningSecret,
+  parseCookies,
+  createCookieHeader,
+} from '../core/auth'
 import type { Env } from '../core/types'
 
 const TEST_ENV: Env = {
@@ -81,5 +88,19 @@ describe('admin auth', () => {
 
   it('timingSafeEqual returns false for different lengths', () => {
     expect(timingSafeEqual('short', 'longer-string')).toBe(false)
+  })
+
+  it('parseCookies anchors the cookie name boundary', () => {
+    expect(parseCookies('meliora_admin=tok123; other=x')).toBe('tok123')
+    expect(parseCookies('other=a; meliora_admin=tok456')).toBe('tok456')
+    // 名边界未锚定时会误匹配前缀变体与其他 Cookie 值中的同名片段
+    expect(parseCookies('xxmeliora_admin=evil')).toBeNull()
+    expect(parseCookies('other=meliora_admin=evil')).toBeNull()
+    expect(parseCookies(null)).toBeNull()
+  })
+
+  it('createCookieHeader can omit Secure for local dev (Safari rejects Secure over http)', () => {
+    expect(createCookieHeader('tok')).toContain('Secure')
+    expect(createCookieHeader('tok', { secure: false })).not.toContain('Secure')
   })
 })
