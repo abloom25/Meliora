@@ -313,6 +313,53 @@ describe('useAudioPlayer', () => {
     }
   })
 
+  it('pauses the audio left sounding by an aborted switch when switching again mid-flight', async () => {
+    const createdAudios: HTMLAudioElement[] = []
+    const originalAudio = globalThis.Audio
+    vi.stubGlobal(
+      'Audio',
+      vi.fn(function AudioMock() {
+        const audio = document.createElement('audio')
+        createdAudios.push(audio)
+        return audio
+      }),
+    )
+    const originalPlay = HTMLAudioElement.prototype.play
+    // 第一次切歌(目标元素 players[2])的 play() 永远 pending,
+    // 模拟新歌尚未 settle 就被下一次切歌 abort 的场景。
+    HTMLAudioElement.prototype.play = vi.fn(function playMock(this: HTMLAudioElement) {
+      if (createdAudios.length > 2 && this === createdAudios[2]) {
+        return new Promise<void>(() => {})
+      }
+      return Promise.resolve()
+    })
+    try {
+      const { player, store } = mountPlayer()
+      // 关闭预加载与淡入淡出,隔离出"被 abort 的切换遗留出声元素"这一条路径
+      store.settings.preloadNextTrack = false
+      store.settings.smoothTrackChange = false
+      store.selectTrack(tracks[0]!, tracks)
+      await player.play()
+      expect(store.isPlaying).toBe(true)
+
+      const staleAudio = createdAudios[0]!
+      const stalePauseSpy = vi.spyOn(staleAudio, 'pause')
+
+      // 切到 track2(play 挂起)→ 其 settle 前再切 track3,第一次切换被 abort
+      await player.selectAndPlay(tracks[1]!, tracks)
+      await player.selectAndPlay(tracks[2]!, tracks)
+      await nextTick()
+
+      expect(store.currentTrackId).toBe('3')
+      // 被 abort 的切换遗留的旧元素必须被 pause + 静音,否则会一直出声(双重播放)
+      expect(stalePauseSpy).toHaveBeenCalled()
+      expect(staleAudio.volume).toBe(0)
+    } finally {
+      HTMLAudioElement.prototype.play = originalPlay
+      vi.stubGlobal('Audio', originalAudio)
+    }
+  })
+
   it('retries a previously failed track after the failure TTL expires', async () => {
     vi.useFakeTimers()
     const originalPlay = HTMLAudioElement.prototype.play
@@ -352,6 +399,122 @@ describe('useAudioPlayer', () => {
     } finally {
       HTMLAudioElement.prototype.play = originalPlay
       vi.useRealTimers()
+    }
+  })
+
+  it('continues to the predicted successor when the auto-advance target fails to preload', async () => {
+    vi.useFakeTimers()
+    const createdAudios: HTMLAudioElement[] = []
+    const originalAudio = globalThis.Audio
+    vi.stubGlobal(
+      'Audio',
+      vi.fn(function AudioMock() {
+        const audio = document.createElement('audio')
+        createdAudios.push(audio)
+        return audio
+      }),
+    )
+    const restore = stubAudioPlay()
+    try {
+      const { player, store } = mountPlayer()
+      store.settings.playMode = 'loop'
+      store.settings.skipOnError = true
+      store.settings.preloadNextTrack = false
+      store.settings.smoothTrackChange = false
+      store.selectTrack(tracks[0]!, tracks)
+      await player.play()
+
+      // 自动切歌(waitForReady 路径):目标 track2 的预加载失败
+      createdAudios[0]!.dispatchEvent(new Event('ended'))
+      await vi.advanceTimersByTimeAsync(0)
+      createdAudios[2]!.dispatchEvent(new Event('error'))
+      await vi.advanceTimersByTimeAsync(0)
+
+      // 预测到实际后继 track3:提示"已跳过…继续播放"并调度 next(false)
+      expect(player.preloadMessage.value).toContain('已跳过')
+      await vi.advanceTimersByTimeAsync(100)
+
+      // track3 预加载就绪 → 完成切换
+      createdAudios[2]!.dispatchEvent(new Event('canplay'))
+      await vi.advanceTimersByTimeAsync(0)
+      await Promise.resolve()
+
+      expect(store.currentTrackId).toBe('3')
+      expect(store.isPlaying).toBe(true)
+    } finally {
+      restore()
+      vi.stubGlobal('Audio', originalAudio)
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not claim to continue when the failed auto-advance target has no successor', async () => {
+    vi.useFakeTimers()
+    const createdAudios: HTMLAudioElement[] = []
+    const originalAudio = globalThis.Audio
+    vi.stubGlobal(
+      'Audio',
+      vi.fn(function AudioMock() {
+        const audio = document.createElement('audio')
+        createdAudios.push(audio)
+        return audio
+      }),
+    )
+    const restore = stubAudioPlay()
+    try {
+      const { player, store } = mountPlayer()
+      store.settings.playMode = 'sequence'
+      store.settings.skipOnError = true
+      store.settings.preloadNextTrack = false
+      store.settings.smoothTrackChange = false
+      store.selectTrack(tracks[1]!, tracks)
+      await player.play()
+
+      // sequence 模式下自动切到队尾 track3,其预加载失败 → 之后无实际后继
+      createdAudios[0]!.dispatchEvent(new Event('ended'))
+      await vi.advanceTimersByTimeAsync(0)
+      createdAudios[2]!.dispatchEvent(new Event('error'))
+      await vi.advanceTimersByTimeAsync(200)
+
+      // 不提示"继续播放",也不调度 next(false);当前曲目不受影响继续播放
+      expect(player.preloadMessage.value).not.toContain('继续播放')
+      expect(store.currentTrackId).toBe('2')
+      expect(store.isPlaying).toBe(true)
+    } finally {
+      restore()
+      vi.stubGlobal('Audio', originalAudio)
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the restored track playing without a false continue message when play fails and no successor exists', async () => {
+    const originalPlay = HTMLAudioElement.prototype.play
+    const playMock = vi.fn().mockResolvedValue(undefined)
+    HTMLAudioElement.prototype.play = playMock
+    try {
+      const { player, store } = mountPlayer()
+      store.settings.playMode = 'sequence'
+      store.settings.skipOnError = true
+      store.settings.preloadNextTrack = false
+      store.settings.smoothTrackChange = false
+      store.selectTrack(tracks[1]!, tracks)
+      await player.play()
+      expect(store.isPlaying).toBe(true)
+
+      // 手动切到队尾 track3 时 play 失败:回退到 track2 后,sequence 下无实际后继
+      playMock.mockRejectedValueOnce(new DOMException('boom', 'NotSupportedError'))
+      await player.selectAndPlay(tracks[2]!, tracks)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // store/audio 回退到 track2 并继续播放;不提示"继续播放",
+      // 真实错误通过 preloadMessage 提示给用户
+      expect(store.currentTrackId).toBe('2')
+      expect(store.isPlaying).toBe(true)
+      expect(player.preloadMessage.value).not.toContain('继续播放')
+      expect(player.preloadMessage.value).toContain('音频')
+    } finally {
+      HTMLAudioElement.prototype.play = originalPlay
     }
   })
 })

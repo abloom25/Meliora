@@ -546,7 +546,10 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         if (!ready || isSwitchAborted(controller)) {
           if (!ready) {
             markTrackFailed(track.id)
-            if (shouldPlay && settings.value.skipOnError && queue.length > 1) {
+            // 与随后调度的 next(false) 走同一预测:先标记失败再 predictNextTrack(false),
+            // 无实际后继(如 sequence 播到队尾)时不提示"继续播放",
+            // 否则提示会与实际停止的行为不符。
+            if (shouldPlay && settings.value.skipOnError && predictNextTrack(false)) {
               preloadMessage.value = `已跳过暂时无法播放的歌曲，正在继续播放`
               schedulePlayerTimeout(() => void next(false), 80)
             }
@@ -577,6 +580,18 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
 
       const { oldAudio, oldTrack, newAudio } = replaceActiveWithSlot(slot, direction)
       mountActiveAudioForIOS()
+      // 统一收尾被 abort 的上一次切换遗留的出声元素:被 abort 切换的 .then 在
+      // isSwitchAborted 处提前 return,跳过了它负责的旧元素 pause();而本次开头的
+      // cancelGainAnimation 又会把该元素进行中的 fade-out 停在中间音量。
+      // 因此除本次 newAudio/oldAudio 外的所有元素立即静音暂停,
+      // 保证任何被 abort 的切换都不会留下出声元素(双重播放)。
+      for (const audio of players) {
+        if (audio === newAudio || audio === oldAudio) continue
+        cancelGainAnimation(audio)
+        audio.pause()
+        audio.currentTime = 0
+        audio.volume = 0
+      }
       // 仅在必要时重置 currentTime，避免对预加载 slot（已经是 0）做重复浏览器调用。
       if (newAudio.currentTime > 0.01) newAudio.currentTime = 0
       setPlayerVolume(newAudio, useCrossfade ? 0 : 1)
@@ -644,11 +659,17 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         .catch((error) => {
           if (isSwitchAborted(controller)) return
           markTrackFailed(track.id)
-          store.errorMessage = describePlaybackError(error, newAudio)
+          // 先算出错误描述:后面的 clearSlot 会清掉 newAudio.src,
+          // 事后再调用 describePlaybackError 会得到"没有可用的音频地址"这种不准确文案。
+          const errorDescription = describePlaybackError(error, newAudio)
+          store.errorMessage = errorDescription
           newAudio.pause()
-          if (settings.value.skipOnError && queue.length > 1) {
-            preloadMessage.value = `已跳过暂时无法播放的歌曲，正在继续播放`
+          if (settings.value.skipOnError) {
             activeAudio = oldAudio
+            // oldAudio 的 fade-out 可能已把音量压到 ~0(或仍在进行中),
+            // 回退期间会"在播但无声";取消其增益动画并恢复满音量。
+            cancelGainAnimation(oldAudio)
+            setPlayerVolume(oldAudio, 1)
             // 同步把 store 回退到旧曲目:audio 已回退,若 store 仍指向失败曲目,
             // 当 next(true) 找不到后继时会出现"UI 显示失败曲目、实际播放上一首"的错位。
             // previousTrack 只 setCurrentTrack、不 bump queueVersion,跳过语义不受影响。
@@ -659,8 +680,27 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
             reverseSlot.track = null
             reverseSlot.ready = null
             clearSlot(reverseSlot)
-            isPlaying.value = shouldPlay
-            schedulePlayerTimeout(() => void next(true), 0)
+            // 与随后调度的 next(true) 走同一预测:先标记失败、先把 store 回退到旧曲目,
+            // 再以 predictNextTrack(true) 判断是否存在实际后继,
+            // 保证"继续播放"的提示与实际调度的行为一致。
+            if (predictNextTrack(true)) {
+              preloadMessage.value = `已跳过暂时无法播放的歌曲，正在继续播放`
+              isPlaying.value = shouldPlay
+              schedulePlayerTimeout(() => void next(true), 0)
+            } else if (oldTrack) {
+              // 无实际后继但已回退到旧曲目:store 回退会触发 watch 重新加载并播放旧曲目,
+              // play() 成功后会清空 errorMessage,因此真实错误改走 preloadMessage 提示,
+              // 保证用户能看到"跳过失败"的原因,且不谎称"正在继续播放"。
+              preloadMessage.value = errorDescription
+              isPlaying.value = shouldPlay
+            } else {
+              // 无实际后继且无旧曲目可回退:干净地停止。
+              preloadMessage.value = ''
+              oldAudio.pause()
+              oldAudio.currentTime = 0
+              oldAudio.volume = 0
+              isPlaying.value = false
+            }
           } else {
             preloadMessage.value = ''
             oldAudio.pause()
@@ -708,8 +748,11 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       return
     }
     const queue = store.queue
+    // 无当前曲目时 currentIndex === -1:明确从队尾(-1 的上一首即队尾)开始往前找,
+    // 而不是沿用 (-1-1+len)%len = len-2 的怪异算术(会错误地跳到倒数第二首)。
+    const baseIndex = store.currentIndex < 0 ? queue.length : store.currentIndex
     for (let offset = 1; offset <= queue.length; offset += 1) {
-      const index = (store.currentIndex - offset + queue.length) % queue.length
+      const index = (baseIndex - offset + queue.length) % queue.length
       const candidate = queue[index]
       if (!candidate || isTrackFailed(candidate.id)) continue
       const switched = await switchToTrack(candidate, queue, {
@@ -730,7 +773,16 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         return
       }
       if (playerState.value !== 'idle') return
-      const resolvedUrl = new URL(track.audioUrl, window.location.href).href
+      let resolvedUrl: string
+      try {
+        resolvedUrl = new URL(track.audioUrl, window.location.href).href
+      } catch {
+        // 畸形 audioUrl:new URL 抛 TypeError,不能让 watch 回调中断整个 reactivity 链。
+        // 标记失败让后续 next/previous 自动跳过,并给出可见错误而不是静默卡住。
+        markTrackFailed(track.id)
+        store.errorMessage = '当前歌曲没有可用的音频地址'
+        return
+      }
       if (activeAudio.src === resolvedUrl) return
       mountActiveAudioForIOS()
       activeAudio.src = track.audioUrl
@@ -858,7 +910,6 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       const wasTransitioning = playerState.value !== 'idle'
       playerState.value = 'idle'
       automaticCrossfadeStarted = false
-      const willSkip = Boolean(failedTrack) && settings.value.skipOnError && store.queue.length > 1
       if (failedTrack) {
         markTrackFailed(failedTrack.id)
         if (wasTransitioning) {
@@ -871,6 +922,10 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       } else if (wasTransitioning) {
         console.warn('[useAudioPlayer] active audio error during transition', audio.error)
       }
+      // willSkip 必须与调度出去的 next(false) 的真实行为一致:先标记失败再预测后继。
+      // 否则单曲循环下 peekNext 会返回刚被拉黑的当前曲目,提示"正在继续播放"实际却停了。
+      const willSkip =
+        Boolean(failedTrack) && settings.value.skipOnError && Boolean(predictNextTrack(false))
       if (willSkip) {
         // 仅在真的会跳到下一首时提示"已跳过…继续播放",避免 skipOnError 关闭或
         // 单曲队列时误报"继续播放"而实际已停止。
