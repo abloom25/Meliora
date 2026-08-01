@@ -169,13 +169,18 @@ describe('useBeatAnalyser beat detection', () => {
   }
 
   async function mountBeatHarness(
-    options: { spectrumTarget?: HTMLElement } = {},
+    options: {
+      spectrumTarget?: HTMLElement
+      activeAudio?: HTMLAudioElement
+      onTainted?: (audio: HTMLAudioElement) => void
+    } = {},
   ): Promise<BeatHarness> {
     stubMatchMedia()
     vi.stubGlobal('AudioContext', AudioContextMock)
     installRafMock()
     // currentTime 恒为 0:不产生播放推进,CORS 全零检测不会误触发
-    const activeAudio = { paused: false, currentTime: 0 } as HTMLAudioElement
+    const activeAudio =
+      options.activeAudio ?? ({ paused: false, currentTime: 0 } as HTMLAudioElement)
     let analyserApi: ReturnType<typeof useBeatAnalyser> | null = null
     const Harness = defineComponent({
       setup() {
@@ -184,6 +189,7 @@ describe('useBeatAnalyser beat detection', () => {
           getActiveAudio: () => activeAudio,
           isPlaying: ref(true),
           getSpectrumTargets: options.spectrumTarget ? () => [options.spectrumTarget] : undefined,
+          onTainted: options.onTainted,
         })
         return () => h('div')
       },
@@ -315,5 +321,23 @@ describe('useBeatAnalyser beat detection', () => {
     const levels = analyser.spectrumLevels.value
     expect(levels[3]).toBeGreaterThan(levels[0] ?? 0)
     expect(levels[3]).toBeGreaterThan(levels[4] ?? 0)
+  })
+
+  it('does not accumulate tainted silence across a long hidden gap', async () => {
+    const activeAudio = { paused: false, currentTime: 0 } as HTMLAudioElement
+    const onTainted = vi.fn()
+    await mountBeatHarness({ activeAudio, onTainted })
+
+    // 播放推进 + 频谱全零(真实静音段),挂起 5 分钟后再跑一帧:
+    // 后台时长不得一次性计入 3s 污染宽限
+    runFrames(1)
+    activeAudio.currentTime = 1
+    vi.advanceTimersByTime(300000)
+    const callbacks = rafCallbacks
+    rafCallbacks = []
+    callbacks.forEach((callback) => callback(performance.now()))
+    runFrames(20)
+
+    expect(onTainted).not.toHaveBeenCalled()
   })
 })

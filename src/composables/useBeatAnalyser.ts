@@ -52,15 +52,26 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   const beatLevel = ref(0)
   const spectrumLevels = ref([0.1, 0.1, 0.1, 0.1, 0.1])
   // 记录最近一次写到 DOM 的字符串值，避免重复写入触发样式风暴。
+  // 去抖缓存同时绑定主目标元素:目标重挂载(抽屉开合/虚拟列表滚动)后
+  // 即使值未变化也必须重写一轮,否则新元素一直没有内联变量
   let lastBeatLevelCssValue = ''
+  let lastBeatTarget: HTMLElement | null = null
   let lastSpectrumCssValues: string[] = []
+  let lastSpectrumTarget: HTMLElement | null = null
 
   function writeBeatLevelToTargets(value: number) {
     if (!getBeatTargets) return
-    const next = value.toFixed(3)
-    if (next === lastBeatLevelCssValue) return
-    lastBeatLevelCssValue = next
     const targets = getBeatTargets()
+    const primary = targets.find((el) => el && el.isConnected) ?? null
+    if (!primary) {
+      lastBeatLevelCssValue = ''
+      lastBeatTarget = null
+      return
+    }
+    const next = value.toFixed(3)
+    if (primary === lastBeatTarget && next === lastBeatLevelCssValue) return
+    lastBeatLevelCssValue = next
+    lastBeatTarget = primary
     for (const el of targets) {
       // isConnected 守卫：组件卸载或 v-if 隐藏时跳过，避免脏写已脱离 DOM 的节点。
       if (el && el.isConnected) el.style.setProperty('--beat-level', next)
@@ -69,12 +80,24 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
 
   function writeSpectrumToTargets(levels: readonly number[]) {
     if (!getSpectrumTargets) return
+    const targets = getSpectrumTargets()
+    const primary = targets.find((el) => el && el.isConnected) ?? null
+    if (!primary) {
+      lastSpectrumCssValues = []
+      lastSpectrumTarget = null
+      return
+    }
     const nextValues = levels.map(
       (level) => `${(Math.max(0.08, Math.min(1, level)) * 100).toFixed(1)}%`,
     )
-    if (nextValues.every((value, index) => value === lastSpectrumCssValues[index])) return
+    if (
+      primary === lastSpectrumTarget &&
+      nextValues.every((value, index) => value === lastSpectrumCssValues[index])
+    ) {
+      return
+    }
     lastSpectrumCssValues = nextValues
-    const targets = getSpectrumTargets()
+    lastSpectrumTarget = primary
     for (const el of targets) {
       if (!el || !el.isConnected) continue
       nextValues.forEach((value, index) => {
@@ -110,6 +133,12 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   let odfPeak = 0.1
   let lastOnsetSlot = -1000
   let lastOnsetMs = 0
+  // 首次 onset 检出前不做置信度衰减:lastOnsetMs 初始为 0 时
+  // "2s 无 onset" 恒真,会把前奏噪声估出的垃圾 tempo 衰减掉(语义混淆)
+  let hasOnset = false
+  // pauseBeatAnalysis 会把上一帧频谱清零,恢复后首帧对零向量求差分会产生
+  // 全频谱伪 flux;该标志让恢复首帧跳过 ODF 采样(只更新上一帧基线)
+  let skipNextOdfSample = false
   // 节拍跟踪:ACF 估计周期(40–222 BPM),梳齿对齐相位,预测式调度节拍脉冲
   let tempoPeriodSlots = 0
   let tempoConfidence = 0
@@ -164,6 +193,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     odfPeak = 0.1
     lastOnsetSlot = -1000
     lastOnsetMs = 0
+    hasOnset = false
     tempoPeriodSlots = 0
     tempoConfidence = 0
     nextBeatAt = 0
@@ -192,6 +222,10 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     window.cancelAnimationFrame(beatFrame)
     beatFrame = 0
     if (previousFrequencyData) previousFrequencyData.fill(0)
+    skipNextOdfSample = true
+    // 重置污染检测计时,避免恢复后首帧把整段后台时长一次性累加
+    taintedSilenceMs = 0
+    lastBeatFrameAt = 0
     spectrumLevels.value = spectrumLevels.value.map((level) => Math.max(0.08, level * 0.82))
     writeSpectrumToTargets(spectrumLevels.value)
     writeBeatLevelToTargets(0)
@@ -312,6 +346,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     if (slot - lastOnsetSlot < 12) return
     lastOnsetSlot = slot
     lastOnsetMs = slotTime(slot)
+    hasOnset = true
     odfPeak = Math.max(cur, odfPeak * 0.995, 0.05)
     handleOnset(lastOnsetMs, clamp(cur / odfPeak, 0, 1))
   }
@@ -383,9 +418,9 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   }
 
   // 预测式节拍调度:到点即触发脉冲,而不是等 onset 出现再反应;
-  // 2s 无 onset 时置信度衰减,间奏不会机械地一直跳
+  // 首次 onset 后 2s 无新 onset 时置信度衰减,间奏不会机械地一直跳
   function scheduleBeats(now: number, dt: number) {
-    if (now - lastOnsetMs > 2000) tempoConfidence *= Math.exp(-dt / 1)
+    if (hasOnset && now - lastOnsetMs > 2000) tempoConfidence *= Math.exp(-dt / 1)
     if (tempoConfidence >= 0.3 && tempoPeriodSlots > 0 && nextBeatAt > 0) {
       const periodMs = tempoPeriodSlots * ODF_SLOT_MS
       let guard = 0
@@ -437,7 +472,9 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     if (!allZero) {
       taintedSilenceMs = 0
     } else if (progressed) {
-      taintedSilenceMs += lastBeatFrameAt ? now - lastBeatFrameAt : 0
+      // 单帧 delta 钳制:页面 hidden 期间 rAF 停转,恢复后首帧的
+      // now - lastBeatFrameAt 会包含整个后台时长,不得一次性累加
+      taintedSilenceMs += lastBeatFrameAt ? Math.min(now - lastBeatFrameAt, 100) : 0
       if (taintedSilenceMs >= TAINTED_SILENCE_GRACE_MS) {
         // 判定该源被 CORS 污染:通知调用方重建 audio(去 crossOrigin)并降级节拍分析
         taintedSilenceMs = 0
@@ -468,8 +505,10 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     energyFloor += (beatEnergy - energyFloor) * smoothingAlpha(dt, 1.1)
 
     // SuperFlux ODF 并入 10ms 槽(onset 评估在槽 finalize 时进行),
-    // 然后做预测式节拍调度与周期/相位重估
-    pushOdfSample(now, superFluxODF(data, binOf(8000)))
+    // 然后做预测式节拍调度与周期/相位重估;恢复首帧跳过采样避免伪 flux
+    const odfSample = skipNextOdfSample ? 0 : superFluxODF(data, binOf(8000))
+    skipNextOdfSample = false
+    pushOdfSample(now, odfSample)
     scheduleBeats(now, dt)
     if (now - lastTempoEstimateMs >= 500) {
       lastTempoEstimateMs = now
