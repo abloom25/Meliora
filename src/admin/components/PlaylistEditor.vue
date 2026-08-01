@@ -1,5 +1,5 @@
 <script setup lang="ts">
-  import { ref } from 'vue'
+  import { ref, toRaw } from 'vue'
   import { Plus, Trash2, Pencil, Check, X, ChevronDown } from '@lucide/vue'
   import type { MetingPlaylistConfig, MusicServer } from '../../types/music'
   import ToggleSwitch from '../../components/ToggleSwitch.vue'
@@ -13,6 +13,25 @@
   const editingIndex = ref<number | null>(null)
   const pendingRemoveIndex = ref<number | null>(null)
 
+  // 每条歌单的稳定内部标识:不随编辑内容变化,用作列表 key,
+  // 避免 index key 导致删除中间项时 TransitionGroup 动画错位。
+  // 撤销/导入整体替换数组时对象变更,会自然分配新 uid。
+  // 注意:props 经父级响应式状态传递,对象可能是 reactive proxy,
+  // 统一用 toRaw 取原始对象作为键。
+  const playlistUids = new WeakMap<MetingPlaylistConfig, string>()
+  let nextPlaylistUid = 0
+
+  function uidFor(playlist: MetingPlaylistConfig): string {
+    const raw = toRaw(playlist)
+    let uid = playlistUids.get(raw)
+    if (!uid) {
+      nextPlaylistUid += 1
+      uid = `playlist-uid-${nextPlaylistUid}`
+      playlistUids.set(raw, uid)
+    }
+    return uid
+  }
+
   const serverOptions: { value: MusicServer; label: string; color: string }[] = [
     { value: 'netease', label: '网易云', color: '#ff6b6b' },
     { value: 'tencent', label: 'QQ 音乐', color: '#ffb060' },
@@ -23,7 +42,14 @@
   }
 
   function update(index: number, patch: Partial<MetingPlaylistConfig>) {
-    const next = props.playlists.map((item, i) => (i === index ? { ...item, ...patch } : item))
+    const next = props.playlists.map((item, i) => {
+      if (i !== index) return item
+      const patched = { ...item, ...patch }
+      // patch 会创建新对象,把旧对象的 uid 转移过去,保持列表 key 稳定
+      const uid = playlistUids.get(toRaw(item))
+      if (uid) playlistUids.set(patched, uid)
+      return patched
+    })
     emit('update:playlists', next)
   }
 
@@ -97,7 +123,7 @@
     <TransitionGroup name="list" tag="div" class="playlist-list">
       <div
         v-for="(playlist, index) in playlists"
-        :key="`pl-${index}-${playlist.server}`"
+        :key="uidFor(playlist)"
         class="playlist-row"
         :class="{ disabled: playlist.enabled === false, editing: editingIndex === index }"
       >

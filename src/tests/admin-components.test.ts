@@ -83,6 +83,143 @@ describe('admin consistency components', () => {
     wrapper.unmount()
   })
 
+  it('discards the staged upload when the track id changes while uploading', async () => {
+    let resolveUpload!: () => void
+    adminApiMock.uploadFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveUpload = () =>
+          resolve({ ok: true, path: 'public/music/t1/audio.mp3', blobSha: 'a'.repeat(40) })
+      }),
+    )
+
+    class FakeFileReader {
+      static lastInstance: FakeFileReader | null = null
+
+      result: string | ArrayBuffer | null = null
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
+      onerror: ((event: ProgressEvent<FileReader>) => void) | null = null
+      onabort: ((event: ProgressEvent<FileReader>) => void) | null = null
+
+      constructor() {
+        FakeFileReader.lastInstance = this
+      }
+
+      readAsDataURL() {
+        // Test double: reading completes only when the test invokes onload.
+      }
+    }
+    vi.stubGlobal('FileReader', FakeFileReader)
+
+    const track = { id: 't1', title: 'Track 1', artist: 'Artist', audio: '' }
+    const wrapper = mount(LocalTrackEditor, {
+      attachTo: document.body,
+      props: { tracks: [track] },
+    })
+
+    // 展开卡片并触发音频上传,FileReader 完成后 uploadFile 挂起
+    await wrapper.find('.track-header').trigger('click')
+    const fileInput = wrapper.find<HTMLInputElement>('input[type="file"]')
+    const file = new File(['audio'], 'audio.mp3', { type: 'audio/mpeg' })
+    Object.defineProperty(fileInput.element, 'files', {
+      value: [file],
+      configurable: true,
+    })
+    const change = fileInput.trigger('change')
+    await nextTick()
+
+    const reader = FakeFileReader.lastInstance
+    if (!reader) throw new Error('FileReader was not created')
+    reader.result = 'data:audio/mpeg;base64,YXVkaW8='
+    reader.onload?.(new ProgressEvent('load') as ProgressEvent<FileReader>)
+    await flushPromises()
+    expect(adminApiMock.uploadFile).toHaveBeenCalledWith('public/music/t1/audio.mp3', 'YXVkaW8=')
+
+    // 上传在途期间用户把 id 从 t1 改成 t2(通过编辑器自身的输入,uid 会随 update 转移)
+    const idInput = wrapper.find<HTMLInputElement>('input[type="text"]')
+    await idInput.setValue('t2')
+    const emittedTracks = wrapper.emitted('update:tracks')
+    if (!emittedTracks) throw new Error('update:tracks was not emitted for the id change')
+    await wrapper.setProps({ tracks: emittedTracks[emittedTracks.length - 1]![0] })
+
+    // 上传完成:结果应被丢弃,不写回配置
+    resolveUpload()
+    await change
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('曲目 ID 已变更,请重新上传')
+    expect(wrapper.emitted('file-staged')).toBeUndefined()
+    const allEmitted = wrapper.emitted('update:tracks') ?? []
+    for (const [value] of allEmitted) {
+      expect((value as (typeof track)[])[0]?.audio).toBe('')
+    }
+
+    wrapper.unmount()
+  })
+
+  it('writes back the staged upload when the track id stays unchanged', async () => {
+    let resolveUpload!: () => void
+    adminApiMock.uploadFile.mockReturnValue(
+      new Promise((resolve) => {
+        resolveUpload = () =>
+          resolve({ ok: true, path: 'public/music/t1/audio.mp3', blobSha: 'a'.repeat(40) })
+      }),
+    )
+
+    class FakeFileReader {
+      static lastInstance: FakeFileReader | null = null
+
+      result: string | ArrayBuffer | null = null
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
+      onerror: ((event: ProgressEvent<FileReader>) => void) | null = null
+      onabort: ((event: ProgressEvent<FileReader>) => void) | null = null
+
+      constructor() {
+        FakeFileReader.lastInstance = this
+      }
+
+      readAsDataURL() {
+        // Test double: reading completes only when the test invokes onload.
+      }
+    }
+    vi.stubGlobal('FileReader', FakeFileReader)
+
+    const track = { id: 't1', title: 'Track 1', artist: 'Artist', audio: '' }
+    const wrapper = mount(LocalTrackEditor, {
+      attachTo: document.body,
+      props: { tracks: [track] },
+    })
+
+    await wrapper.find('.track-header').trigger('click')
+    const fileInput = wrapper.find<HTMLInputElement>('input[type="file"]')
+    const file = new File(['audio'], 'audio.mp3', { type: 'audio/mpeg' })
+    Object.defineProperty(fileInput.element, 'files', {
+      value: [file],
+      configurable: true,
+    })
+    const change = fileInput.trigger('change')
+    await nextTick()
+
+    const reader = FakeFileReader.lastInstance
+    if (!reader) throw new Error('FileReader was not created')
+    reader.result = 'data:audio/mpeg;base64,YXVkaW8='
+    reader.onload?.(new ProgressEvent('load') as ProgressEvent<FileReader>)
+    await flushPromises()
+
+    resolveUpload()
+    await change
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('已暂存，保存全部后生效')
+    expect(wrapper.emitted('file-staged')?.[0]).toEqual([
+      { path: 'public/music/t1/audio.mp3', blobSha: 'a'.repeat(40) },
+    ])
+    const allEmitted = wrapper.emitted('update:tracks') ?? []
+    const last = allEmitted[allEmitted.length - 1]![0] as (typeof track)[]
+    expect(last[0]?.audio).toBe('./music/t1/audio.mp3')
+
+    wrapper.unmount()
+  })
+
   it('waits for FileReader and upload before marking icon upload successful', async () => {
     let resolveUpload!: () => void
     adminApiMock.uploadFile.mockReturnValue(

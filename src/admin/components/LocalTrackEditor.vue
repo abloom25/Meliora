@@ -1,7 +1,8 @@
 <script setup lang="ts">
-  import { onBeforeUnmount, ref } from 'vue'
+  import { onBeforeUnmount, ref, toRaw } from 'vue'
   import { ChevronDown, Plus, Trash2, Upload } from '@lucide/vue'
   import type { LocalTrackConfig } from '../../types/music'
+  import { LOCAL_TRACK_ID_PATTERN } from '../../../shared/config-schema'
   import {
     MAX_UPLOAD_BYTES,
     MAX_UPLOAD_SIZE_LABEL,
@@ -26,6 +27,25 @@
   const statusTimers = new Map<string, number>()
   const { beginFileStaging } = useFileStagingState()
 
+  // 每首曲目的稳定内部标识:不随编辑内容(id 等)变化,
+  // 用作列表 key 和上传回调定位依据。WeakMap 以曲目对象为键,
+  // 撤销/导入整体替换曲目对象时会自然分配新 uid。
+  // 注意:props 经父级响应式状态传递,曲目对象可能是 reactive proxy,
+  // 统一用 toRaw 取原始对象作为键,否则每次 patch 后都会拿到新 proxy 而误判身份。
+  const trackUids = new WeakMap<LocalTrackConfig, string>()
+  let nextTrackUid = 0
+
+  function uidFor(track: LocalTrackConfig): string {
+    const raw = toRaw(track)
+    let uid = trackUids.get(raw)
+    if (!uid) {
+      nextTrackUid += 1
+      uid = `track-uid-${nextTrackUid}`
+      trackUids.set(raw, uid)
+    }
+    return uid
+  }
+
   onBeforeUnmount(() => {
     for (const timer of statusTimers.values()) window.clearTimeout(timer)
     statusTimers.clear()
@@ -35,12 +55,8 @@
     return uploadingKeys.value.has(key)
   }
 
-  function uploadKey(
-    track: LocalTrackConfig,
-    index: number,
-    role: 'audio' | 'cover' | 'lyrics',
-  ): string {
-    return `${track.id || `index-${index}`}-${role}`
+  function uploadKey(track: LocalTrackConfig, role: 'audio' | 'cover' | 'lyrics'): string {
+    return `${uidFor(track)}-${role}`
   }
 
   function setUploading(key: string, uploading: boolean) {
@@ -65,7 +81,14 @@
   }
 
   function update(index: number, patch: Partial<LocalTrackConfig>) {
-    const next = props.tracks.map((item, i) => (i === index ? { ...item, ...patch } : item))
+    const next = props.tracks.map((item, i) => {
+      if (i !== index) return item
+      const patched = { ...item, ...patch }
+      // patch 会创建新对象,把旧对象的 uid 转移过去,保持列表 key 稳定
+      const uid = trackUids.get(toRaw(item))
+      if (uid) trackUids.set(patched, uid)
+      return patched
+    })
     emit('update:tracks', next)
   }
 
@@ -100,8 +123,19 @@
     pendingRemoveIndex.value = null
   }
 
+  function getTrackIdError(track: LocalTrackConfig): string {
+    const id = track.id.trim()
+    if (!id) return ''
+    if (!LOCAL_TRACK_ID_PATTERN.test(id)) {
+      return 'ID 只能包含字母、数字、连字符(-)和下划线(_)'
+    }
+    return ''
+  }
+
   function getIncompleteReason(track: LocalTrackConfig): string {
     if (!track.id.trim()) return '请先填写曲目 ID'
+    const idError = getTrackIdError(track)
+    if (idError) return idError
     if (!track.title.trim()) return '请填写曲目标题'
     if (!track.artist.trim()) return '请填写艺术家'
     if (!track.audio.trim()) return '请上传音频文件'
@@ -136,7 +170,7 @@
       input.value = ''
       return
     }
-    const key = uploadKey(track, index, role)
+    const key = uploadKey(track, role)
     if (isUploading(key)) {
       input.value = ''
       return
@@ -155,24 +189,36 @@
       return
     }
 
+    // 上传开始时捕获稳定标识与当时的 id:回调里按 uid 定位曲目,
+    // 避免在途期间撤销/删除/改 id 导致把结果写到错误的曲目上。
+    const trackUid = uidFor(track)
+    const uploadedTrackId = track.id
+
     const finishFileStaging = beginFileStaging()
     setUploading(key, true)
     uploadStatus.value[key] = '正在暂存...'
     try {
       const base64 = await readFileAsBase64(file)
       const ext = getExt(file.name)
-      const path = `public/music/${track.id}/${role}.${ext}`
+      const path = `public/music/${uploadedTrackId}/${role}.${ext}`
       const result = await uploadFile(path, base64)
       if (result.ok && result.blobSha && result.path) {
         const currentIndex = props.tracks.findIndex(
-          (item) => item === track || item.id === track.id,
+          (item) => trackUids.get(toRaw(item)) === trackUid,
         )
         if (currentIndex < 0) {
+          // 曲目在上传在途期间被撤销/替换,丢弃结果,绝不写入猜测的曲目
           uploadStatus.value[key] = '曲目已被修改,暂存文件未加入配置'
           return
         }
+        if (props.tracks[currentIndex]?.id !== uploadedTrackId) {
+          // 上传在途期间 id 被修改:暂存文件路径按旧 id 生成,与新 id 不再对应,
+          // 丢弃结果,要求用户按新 id 重新上传
+          uploadStatus.value[key] = '曲目 ID 已变更,请重新上传'
+          return
+        }
         emit('file-staged', { path: result.path, blobSha: result.blobSha })
-        update(currentIndex, { [role]: `./music/${track.id}/${role}.${ext}` })
+        update(currentIndex, { [role]: `./music/${uploadedTrackId}/${role}.${ext}` })
         uploadStatus.value[key] = '已暂存，保存全部后生效'
       } else {
         uploadStatus.value[key] = result.error || '上传失败'
@@ -197,7 +243,7 @@
     <TransitionGroup name="list" tag="div" class="track-list">
       <Collapse
         v-for="(track, index) in tracks"
-        :key="track.id"
+        :key="uidFor(track)"
         class="track-card"
         :expanded="expanded === index"
         @update:expanded="(v) => (expanded = v ? index : null)"
@@ -223,10 +269,14 @@
             <span>ID(用作文件夹名)</span>
             <BaseInput
               :model-value="track.id"
+              :class="{ invalid: getTrackIdError(track) }"
               type="text"
               placeholder="track-id"
               @update:model-value="update(index, { id: $event })"
             />
+            <small v-if="getTrackIdError(track)" class="field-error">
+              {{ getTrackIdError(track) }}
+            </small>
           </label>
           <label class="field">
             <span>标题</span>
@@ -259,19 +309,19 @@
               <small v-if="track.audio">{{ track.audio }}</small>
               <label
                 class="upload-button"
-                :class="{ disabled: isUploading(uploadKey(track, index, 'audio')) }"
+                :class="{ disabled: isUploading(uploadKey(track, 'audio')) }"
               >
                 <Upload :size="13" />
                 <span>{{ track.audio ? '替换音频' : '上传音频' }}</span>
                 <input
                   type="file"
                   accept="audio/*"
-                  :disabled="isUploading(uploadKey(track, index, 'audio'))"
+                  :disabled="isUploading(uploadKey(track, 'audio'))"
                   @change="handleFile(index, 'audio', $event)"
                 />
               </label>
-              <small v-if="uploadStatus[uploadKey(track, index, 'audio')]" class="upload-status">
-                {{ uploadStatus[uploadKey(track, index, 'audio')] }}
+              <small v-if="uploadStatus[uploadKey(track, 'audio')]" class="upload-status">
+                {{ uploadStatus[uploadKey(track, 'audio')] }}
               </small>
             </div>
 
@@ -280,19 +330,19 @@
               <small v-if="track.cover">{{ track.cover }}</small>
               <label
                 class="upload-button"
-                :class="{ disabled: isUploading(uploadKey(track, index, 'cover')) }"
+                :class="{ disabled: isUploading(uploadKey(track, 'cover')) }"
               >
                 <Upload :size="13" />
                 <span>{{ track.cover ? '替换封面' : '上传封面' }}</span>
                 <input
                   type="file"
                   accept="image/*"
-                  :disabled="isUploading(uploadKey(track, index, 'cover'))"
+                  :disabled="isUploading(uploadKey(track, 'cover'))"
                   @change="handleFile(index, 'cover', $event)"
                 />
               </label>
-              <small v-if="uploadStatus[uploadKey(track, index, 'cover')]" class="upload-status">
-                {{ uploadStatus[uploadKey(track, index, 'cover')] }}
+              <small v-if="uploadStatus[uploadKey(track, 'cover')]" class="upload-status">
+                {{ uploadStatus[uploadKey(track, 'cover')] }}
               </small>
             </div>
 
@@ -301,19 +351,19 @@
               <small v-if="track.lyrics">{{ track.lyrics }}</small>
               <label
                 class="upload-button"
-                :class="{ disabled: isUploading(uploadKey(track, index, 'lyrics')) }"
+                :class="{ disabled: isUploading(uploadKey(track, 'lyrics')) }"
               >
                 <Upload :size="13" />
                 <span>{{ track.lyrics ? '替换歌词' : '上传歌词' }}</span>
                 <input
                   type="file"
                   accept=".lrc,text/plain"
-                  :disabled="isUploading(uploadKey(track, index, 'lyrics'))"
+                  :disabled="isUploading(uploadKey(track, 'lyrics'))"
                   @change="handleFile(index, 'lyrics', $event)"
                 />
               </label>
-              <small v-if="uploadStatus[uploadKey(track, index, 'lyrics')]" class="upload-status">
-                {{ uploadStatus[uploadKey(track, index, 'lyrics')] }}
+              <small v-if="uploadStatus[uploadKey(track, 'lyrics')]" class="upload-status">
+                {{ uploadStatus[uploadKey(track, 'lyrics')] }}
               </small>
             </div>
           </div>
@@ -474,6 +524,20 @@
       color: var(--text-subtle);
       font-size: 0.72rem;
     }
+  }
+
+  :deep(.base-input.invalid) {
+    border-color: #ff5a5a;
+
+    &:focus {
+      border-color: #ff7a7a;
+    }
+  }
+
+  .field-error {
+    color: #ff6b6b;
+    font-size: 0.68rem;
+    padding-left: 2px;
   }
 
   .track-warning {
