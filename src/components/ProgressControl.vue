@@ -209,8 +209,7 @@
     props.onSeek(nextTime)
   }
 
-  function getPreviewAnchorX(track: HTMLElement, clientX: number): number {
-    const rect = track.getBoundingClientRect()
+  function getPreviewAnchorX(rect: DOMRect, clientX: number): number {
     return Math.min(rect.right, Math.max(rect.left, clientX))
   }
 
@@ -267,7 +266,7 @@
     const availableRight = canFitInsideTrack ? trackRight : viewportRight
     const minCenterX = availableLeft + bubbleWidth / 2
     const maxCenterX = availableRight - bubbleWidth / 2
-    const preferredX = getPreviewAnchorX(track, clientX)
+    const preferredX = getPreviewAnchorX(rect, clientX)
     const centerX =
       minCenterX <= maxCenterX
         ? Math.min(maxCenterX, Math.max(minCenterX, preferredX))
@@ -326,7 +325,9 @@
     previewVisible.value = true
     updatePreviewPosition(clientX, clientY, track)
     void nextTick(() => {
-      updatePreviewSize()
+      // 尺寸只在未知(重新显示)时测量;内容变化的尺寸更新由 previewContentKey watcher 覆盖,
+      // hover 每帧只做位置更新,避免每帧强制同步布局
+      if (previewWidth.value === null) updatePreviewSize()
       if (previewVisible.value) updatePreviewPosition(clientX, clientY, track)
     })
   }
@@ -337,6 +338,7 @@
     previewWidth.value = null
     previewHeight.value = null
     previewScrollDirection.value = 'idle'
+    pendingPreviewDirection = 'idle'
     lastPreviewTime = null
   }
 
@@ -364,7 +366,7 @@
     previewVisible.value = true
     updatePreviewPosition(hover.clientX, hover.clientY, hover.track)
     void nextTick(() => {
-      updatePreviewSize()
+      if (previewWidth.value === null) updatePreviewSize()
       if (previewVisible.value) updatePreviewPosition(hover.clientX, hover.clientY, hover.track)
     })
   }
@@ -396,7 +398,12 @@
       }
     },
   )
+  let pendingPreviewDirection: 'forward' | 'backward' | 'idle' = 'idle'
+
   watch(previewContentKey, () => {
+    // 方向 class 只影响歌词文本切换的进出场方向,仅在真正换行(内容 key 变化)时应用,
+    // pointermove 期间只累积 pending 值,避免每帧触发气泡重渲染
+    previewScrollDirection.value = pendingPreviewDirection
     if (!previewVisible.value || !previewLine.value) return
     void nextTick(updatePreviewSize)
   })
@@ -404,14 +411,14 @@
   function updatePreviewScrollDirection(nextTime: number) {
     if (lastPreviewTime === null) {
       lastPreviewTime = nextTime
-      previewScrollDirection.value = 'idle'
+      pendingPreviewDirection = 'idle'
       return
     }
 
     const delta = nextTime - lastPreviewTime
     lastPreviewTime = nextTime
     if (Math.abs(delta) < 0.05) return
-    previewScrollDirection.value = delta > 0 ? 'forward' : 'backward'
+    pendingPreviewDirection = delta > 0 ? 'forward' : 'backward'
   }
 
   onBeforeUnmount(() => {
