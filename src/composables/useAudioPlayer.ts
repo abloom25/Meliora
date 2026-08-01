@@ -77,6 +77,9 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   // 等到 durationchange / loadedmetadata 后再真正写入 audio.currentTime。
   const pendingSeekTime = ref<number | null>(null)
   let beatAnalysisDegraded = false
+  // iOS 后台安全模式或 CORS 降级后没有节拍分析:队列小频谱应回退显示序号,
+  // 而不是一排静止的柱子
+  const spectrumAvailable = ref(!iosBackgroundSafeAudio)
   let degradationWarned = false
   let iosAudioHost: HTMLDivElement | null = null
   // 前向声明：onTainted 回调需在 usePreloadPool 之后才能绑定（依赖 preloadSlots）。
@@ -214,6 +217,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   function degradeBeatAnalysis() {
     if (beatAnalysisDegraded) return
     beatAnalysisDegraded = true
+    spectrumAvailable.value = false
     if (!degradationWarned) {
       console.warn(
         '[useAudioPlayer] 音频源不支持 CORS,节拍分析已降级(播放不受影响)',
@@ -1068,6 +1072,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   return {
     beatLevel,
     spectrumLevels,
+    spectrumAvailable,
     preloadMessage,
     play,
     pause,

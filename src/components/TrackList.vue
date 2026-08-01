@@ -13,15 +13,23 @@
   import type { Track } from '../types/music'
   import { useCoverCache } from '../composables/useCoverCache'
 
-  const props = defineProps<{
-    tracks: Track[]
-    total: number
-    currentTrackId: string | null
-    isPlaying: boolean
-    loading: boolean
-    query: string
-    loadFailed?: boolean
-  }>()
+  const props = withDefaults(
+    defineProps<{
+      tracks: Track[]
+      total: number
+      currentTrackId: string | null
+      isPlaying: boolean
+      loading: boolean
+      query: string
+      loadFailed?: boolean
+      /** 节拍分析不可用时(iOS 后台安全模式 / CORS 降级)回退显示序号而非静止频谱柱 */
+      spectrumAvailable?: boolean
+    }>(),
+    {
+      loadFailed: false,
+      spectrumAvailable: true,
+    },
+  )
 
   const emit = defineEmits<{
     'update:query': [value: string]
@@ -289,7 +297,7 @@
           </span>
           <span class="track-status">
             <span
-              v-if="track.id === currentTrackId && isPlaying"
+              v-if="track.id === currentTrackId && isPlaying && spectrumAvailable"
               :ref="setSpectrumMeter"
               class="spectrum-meter"
               aria-label="正在播放"

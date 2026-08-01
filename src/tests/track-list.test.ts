@@ -98,4 +98,27 @@ describe('TrackList', () => {
     const exposed = wrapper.vm as unknown as { spectrumMeter: HTMLElement | null }
     expect(exposed.spectrumMeter).toBe(meter.element)
   })
+
+  it('falls back to the track number when spectrum analysis is unavailable', () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: vi.fn(),
+    })
+
+    const wrapper = mount(TrackList, {
+      props: {
+        tracks: makeTracks(20),
+        total: 20,
+        currentTrackId: '2',
+        isPlaying: true,
+        loading: false,
+        query: '',
+        spectrumAvailable: false,
+      },
+    })
+
+    expect(wrapper.find('.spectrum-meter').exists()).toBe(false)
+    const rows = wrapper.findAll('.track-status')
+    expect(rows[1]?.text()).toBe('2')
+  })
 })

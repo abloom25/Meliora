@@ -65,10 +65,11 @@
   // 队列小频谱 meter 由 TrackList 暴露,--spectrum-level-N 同样走 RAF 直写
   const trackListRef = ref<InstanceType<typeof TrackList> | null>(null)
 
-  const { preloadMessage, toggle, pause, seek, next, previous, selectAndPlay } = useAudioPlayer({
-    getBeatTargets: () => [artworkBackgroundRef.value, backgroundOverlayRef.value],
-    getSpectrumTargets: () => [trackListRef.value?.spectrumMeter],
-  })
+  const { preloadMessage, spectrumAvailable, toggle, pause, seek, next, previous, selectAndPlay } =
+    useAudioPlayer({
+      getBeatTargets: () => [artworkBackgroundRef.value, backgroundOverlayRef.value],
+      getSpectrumTargets: () => [trackListRef.value?.spectrumMeter],
+    })
 
   const toggleWithHaptic = withHaptic(toggle)
   const previousWithHaptic = withHaptic(previous, 'selection')
@@ -930,6 +931,7 @@
           :loading="loading"
           :load-failed="loadFailed"
           :query="query"
+          :spectrum-available="spectrumAvailable"
           @update:query="query = $event"
           @select="selectTrack"
           @reload="loadTracks"
