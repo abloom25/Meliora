@@ -28,7 +28,9 @@ export interface BeatAnalyserOptions {
    */
   onEqFiltersReady?: (filters: BiquadFilterNode[]) => void
   /**
-   * 可选：当某 audio 元素因跨域污染(tainted)导致 createMediaElementSource 抛 SecurityError 时回调。
+   * 可选：当某 audio 元素因跨域污染(tainted)导致无法通过 Web Audio API 读取数据时回调。
+   * 触发途径有两种：createMediaElementSource 抛 SecurityError(少数浏览器)，
+   * 或播放推进期间 analyser 输出持续全零(多数浏览器对跨源媒体不抛错而是输出静音)。
    * 调用方应重建该 audio 为无 crossOrigin 元素，并降级节拍分析。
    */
   onTainted?: (audio: HTMLAudioElement) => void
@@ -69,6 +71,12 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   let spectrumTick = 0
   let visibilityListenerRegistered = false
   let isUnmounted = false
+  // CORS 污染检测状态:跨源媒体经 createMediaElementSource 通常不抛 SecurityError,
+  // 而是让 analyser 持续输出全零(静音)。这里累计"播放推进中但输出全零"的时长,
+  // 超过宽限即判定该源被污染并回调 onTainted 降级重建。
+  let taintedSilenceMs = 0
+  let lastBeatFrameAt = 0
+  let lastObservedCurrentTime = 0
 
   function disconnectAnalysisGraph() {
     for (const { source, target } of connectedSources) {
@@ -165,9 +173,15 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     return Math.sqrt(flux / Math.max(1, end - start))
   }
 
+  const TAINTED_SILENCE_GRACE_MS = 3000
+
   function updateBeatLevel() {
     const activeAudio = getActiveAudio()
     if (!analyser || !frequencyData || activeAudio.paused) {
+      // 暂停/无 analyser 时重置污染检测进度,恢复播放后重新累计
+      taintedSilenceMs = 0
+      lastBeatFrameAt = 0
+      lastObservedCurrentTime = activeAudio.currentTime
       beatLevel.value *= 0.88
       writeBeatLevelToTargets(beatLevel.value)
       spectrumLevels.value = spectrumLevels.value.map((level) => Math.max(0.08, level * 0.82))
@@ -177,6 +191,33 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     }
     analyser.getByteFrequencyData(frequencyData)
     const data = frequencyData
+    // CORS 污染检测:跨源媒体不抛错而是让 analyser 持续输出全零。
+    // 仅累计"currentTime 在前进(确实在出声)但频谱全零"的时长,
+    // 暂停与缓冲 stall(currentTime 不前进)不计入,避免误伤正常弱音/卡顿。
+    const now = performance.now()
+    let allZero = true
+    for (let index = 0; index < data.length; index += 1) {
+      if (data[index] !== 0) {
+        allZero = false
+        break
+      }
+    }
+    const progressed = activeAudio.currentTime > lastObservedCurrentTime + 0.001
+    lastObservedCurrentTime = activeAudio.currentTime
+    if (!allZero) {
+      taintedSilenceMs = 0
+    } else if (progressed) {
+      taintedSilenceMs += lastBeatFrameAt ? now - lastBeatFrameAt : 0
+      if (taintedSilenceMs >= TAINTED_SILENCE_GRACE_MS) {
+        // 判定该源被 CORS 污染:通知调用方重建 audio(去 crossOrigin)并降级节拍分析
+        taintedSilenceMs = 0
+        lastBeatFrameAt = 0
+        stopBeatAnalysis()
+        options.onTainted?.(activeAudio)
+        return
+      }
+    }
+    lastBeatFrameAt = now
     // 确保 previousFrequencyData 长度与 data 一致（在任何读操作之前执行，防止旧数据残留导致频谱计算异常）
     if (!previousFrequencyData || previousFrequencyData.length !== data.length) {
       previousFrequencyData = new Float32Array(data.length)
@@ -288,7 +329,8 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
               error instanceof DOMException &&
               (error.name === 'SecurityError' || error.name === 'InvalidStateError')
             if (isTainted) {
-              // 音频源被 CORS 污染，无法通过 Web Audio API 读取数据
+              // 少数浏览器对跨源媒体抛 SecurityError(多数不抛错而是输出静音,
+              // 由 updateBeatLevel 的全零检测兜底),无法通过 Web Audio API 读取数据。
               // 通知调用方降级重建 audio(去掉 crossOrigin)，牺牲节拍分析保播放
               taintedSourceDetected = true
               options.onTainted?.(audio)
