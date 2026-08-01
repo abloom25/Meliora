@@ -134,6 +134,9 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     // 需要轮询 closed 属性作为兜底。
     closedPollTimer = window.setInterval(() => {
       if (lyricsWindow !== target) {
+        // 窗口还在打开流程中(createDocument 是异步的,lyricsWindow 尚未赋值):
+        // 跳过本次检查但保留轮询,否则 Safari 标题栏关闭路径会失去兜底。
+        if (openingWindow === target) return
         window.clearInterval(closedPollTimer)
         closedPollTimer = 0
         return

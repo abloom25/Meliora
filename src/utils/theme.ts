@@ -8,6 +8,8 @@ const themeCache = new LruCache<string, ThemeColor | null>(64)
 const themeInFlight = new Map<string, Promise<ThemeColor | null>>()
 const SAMPLE_SIZE = 72
 const WORKER_TIMEOUT_MS = 1500
+// 图片既不 onload 也不 onerror(挂起)时的兜底,按失败路径处理
+const IMAGE_LOAD_TIMEOUT_MS = 4000
 
 // ===== Worker 单例（懒加载） =====
 let workerInstance: Worker | null = null
@@ -150,14 +152,21 @@ export function loadThemeColor(url: string): Promise<ThemeColor | null> {
   return new Promise((resolve) => {
     const image = new Image()
     image.crossOrigin = 'anonymous'
-    image.onload = async () => {
-      const theme = await extractThemeColor(image)
+    let settled = false
+    const finish = (theme: ThemeColor | null) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timer)
       themeCache.set(url, theme)
       resolve(theme)
     }
+    const timer = window.setTimeout(() => finish(null), IMAGE_LOAD_TIMEOUT_MS)
+    image.onload = async () => {
+      const theme = await extractThemeColor(image)
+      finish(theme)
+    }
     image.onerror = () => {
-      themeCache.set(url, null)
-      resolve(null)
+      finish(null)
     }
     image.src = url
   })

@@ -277,9 +277,14 @@ export function useDrawerSheet({
     const startOffset = state.startOffsetForDetent
     const currentOffset = startOffset + dragOffset.value
     const elapsed = Math.max(1, performance.now() - state.startTime)
-    const gestureOffset = Math.max(0, currentOffset - startOffset)
+    // 保留符号:向上拖动为负,向下为正。pickDetent 依赖负速度识别快速上甩回 full。
+    const gestureOffset = currentOffset - startOffset
     const averageVelocity = gestureOffset / elapsed
-    const velocity = Math.max(state.velocity, averageVelocity)
+    // 同一方向上取极值:向上甩取更负的值,向下甩取更大的值
+    const velocity =
+      state.velocity < 0
+        ? Math.min(state.velocity, averageVelocity)
+        : Math.max(state.velocity, averageVelocity)
     const target = pickDetent(currentOffset, velocity, state.startDetent, gestureOffset)
     settleTo(target)
   }

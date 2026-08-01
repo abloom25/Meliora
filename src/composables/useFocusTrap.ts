@@ -10,6 +10,10 @@ import {
 } from 'vue'
 import { getFocusableEdges } from '../utils/dom'
 
+// 模块级 trap 栈:多个 trap 同时 active 时(如叠层抽屉/弹窗),
+// 只有最后激活的栈顶 trap 响应 Escape 与 Tab,避免一次按键触发所有 onClose。
+const trapStack: symbol[] = []
+
 export function useFocusTrap(
   containerRef: Ref<HTMLElement | null>,
   active: Ref<boolean>,
@@ -17,8 +21,24 @@ export function useFocusTrap(
   options?: { autoFocus?: MaybeRefOrGetter<boolean> },
 ) {
   const triggerRef = ref<HTMLElement | null>(null)
+  const trapId = Symbol('focus-trap')
   let pendingActivation = false
   let focusTimer = 0
+
+  function isTopTrap(): boolean {
+    return trapStack[trapStack.length - 1] === trapId
+  }
+
+  function pushTrap() {
+    const index = trapStack.indexOf(trapId)
+    if (index >= 0) trapStack.splice(index, 1)
+    trapStack.push(trapId)
+  }
+
+  function removeTrap() {
+    const index = trapStack.indexOf(trapId)
+    if (index >= 0) trapStack.splice(index, 1)
+  }
 
   function handleTab(e: KeyboardEvent) {
     if (!containerRef.value || !active.value) return
@@ -26,13 +46,22 @@ export function useFocusTrap(
     const { first, last } = getFocusableEdges(containerRef.value)
     if (!first || !last) return
 
+    const activeElement = document.activeElement
+    if (!activeElement || !containerRef.value.contains(activeElement)) {
+      // focus 落在容器外(既非 first 也非 last):拉回容器,
+      // 按 shift 方向决定从头部还是尾部进入
+      e.preventDefault()
+      ;(e.shiftKey ? last : first).focus()
+      return
+    }
+
     if (e.shiftKey) {
-      if (document.activeElement === first) {
+      if (activeElement === first) {
         e.preventDefault()
         last.focus()
       }
     } else {
-      if (document.activeElement === last) {
+      if (activeElement === last) {
         e.preventDefault()
         first.focus()
       }
@@ -40,7 +69,9 @@ export function useFocusTrap(
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && active.value) {
+    if (!active.value || !isTopTrap()) return
+
+    if (e.key === 'Escape') {
       e.preventDefault()
       if (onClose) {
         onClose()
@@ -98,9 +129,11 @@ export function useFocusTrap(
     active,
     (isActive) => {
       if (isActive) {
+        pushTrap()
         if (toValue(options?.autoFocus) !== false) void activateTrap()
         else pendingActivation = false
       } else {
+        removeTrap()
         deactivateTrap()
       }
     },
@@ -131,6 +164,7 @@ export function useFocusTrap(
 
   onBeforeUnmount(() => {
     pendingActivation = false
+    removeTrap()
     document.removeEventListener('keydown', handleKeydown)
     if (focusTimer) {
       window.clearTimeout(focusTimer)
