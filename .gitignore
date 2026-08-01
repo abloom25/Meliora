@@ -39,6 +39,11 @@ src/generated/
 *.njsproj
 *.sln
 *.sw?
+.playwright-mcp
+.codex
+.claude
+.agents
+
 
 # Prettier
 .prettiercache
