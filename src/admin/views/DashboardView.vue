@@ -41,13 +41,15 @@
     const referencedPaths = collectManagedAssetPaths(config.value)
     return stagedUploads.value.filter((upload) => referencedPaths.has(upload.path))
   })
+  // savedConfig 在两次保存之间恒定,串化结果用 computed 缓存,
+  // 避免每次击键都对它做一次全量 stableStringify
+  const savedConfigSerialized = computed(() =>
+    savedConfig.value ? stableStringify(normalizeConfig(savedConfig.value)) : '',
+  )
   const hasUnsavedChanges = computed(() => {
     if (!config.value || !savedConfig.value) return false
     if (referencedStagedUploads.value.length > 0) return true
-    return (
-      stableStringify(normalizeConfig(config.value)) !==
-      stableStringify(normalizeConfig(savedConfig.value))
-    )
+    return stableStringify(normalizeConfig(config.value)) !== savedConfigSerialized.value
   })
   const pendingDeletionPaths = computed(() => {
     if (!config.value || !savedConfig.value) return []
