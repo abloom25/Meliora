@@ -15,6 +15,8 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https:; connect-src 'self' https:; manifest-src 'self'; worker-src 'self'; base-uri 'self'; form-action 'self'"
     />
+    <!-- 标准化 PWA 可安装声明;保留 apple- 前缀版本兼容旧版 iOS Safari -->
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Meliora" />
