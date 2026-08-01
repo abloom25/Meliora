@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-rc8] - 2026-08-01
+
 ### Added
 
+- **本地曲目 ID 白名单校验**:`shared/config-schema.ts` 前后端共用 `^[A-Za-z0-9_-]+$` 约束,后台编辑器对非法 ID 即时提示,杜绝上传路径与配置引用不一致
+- **Dropdown 完整菜单模式**:Esc 关闭、方向键/Home/End 循环导航、打开焦点进入菜单、关闭焦点还原触发元素,补齐 `role="menu"` 语义
+- **歌词面板键盘操作**:歌词行改为 roving tabindex,仅当前行可 Tab 聚焦,Space/Enter 直接 seek 且不再误触发滚动标记
 - **无密钥 CI 配置**:新增 `.github/ci-public-config.json` 与 `MELIORA_CONFIG_PATH` 构建入口,GitHub Actions 验证不再需要解密部署仓库的 `public/config.json`
 - **Vercel 仓库自动识别**:未显式配置 `GH_REPO` / `GH_BRANCH` 时,自动使用 `VERCEL_GIT_REPO_OWNER`、`VERCEL_GIT_REPO_SLUG` 与 `VERCEL_GIT_COMMIT_REF`
 
@@ -19,6 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **底栏进度条塌缩**:BEM 重命名遗留 `.is-progress` 旧选择器导致进度轨道宽度归零,更新为 `.controls--progress` 恢复显示
+- **快速切歌双重播放**:切换被中止时遗留的音频元素在下一次切换同步阶段统一静音暂停,不再持续出声
+- **skipOnError 提示与实际行为不一致**:三处错误分支统一按 `predictNextTrack` 预测真实后继,无后继时不再误报"正在继续播放"
+- **歌词加载超时卡死**:超时以可区分错误类型透出,不再被当作切歌取消,面板正确进入错误态而非永远显示"正在载入歌词"
+- **抽屉上甩手势失效**:手势速度符号被截断导致快速上滑永不命中,恢复 half 档位上甩回 full 档位
+- **触屏拖动进度条被中途隐藏**:移除阻断冒泡的 touch 修饰符,恢复全局活动追踪
+- **拖动中切歌 seek 错位**:拖动开始时锁定时长,松手不再按新曲目时长换算指针位置
+- **CORS 污染检测失效**:跨源媒体经 `createMediaElementSource` 不抛错而是输出静音,改为播放中频谱持续全零判定并触发降级重建
+- **编辑器 ID 输入与上传竞态**:曲目/歌单改用 `toRaw` + WeakMap 稳定 key,编辑 ID 不再重建组件丢焦点;上传在途期间 ID 变更则丢弃结果并提示重新上传
+- **站点图标输入写回旧值**:撤销/导入后输入框同步最新配置,blur 不再把旧 URL 静默写回
+- **dev 环境私网 URL 误拦**:前端校验与服务端开发模式对齐,`localhost` 等私网地址在 dev 下可正常保存
+- **403 重试修正**:已取消的请求不再重试,非幂等的 `/api/update` 不参与重试
+- **焦点陷阱缺陷**:多层 trap 仅栈顶响应 Esc/Tab,焦点落在容器外时 Tab 可拉回容器
+- **歌词弹窗状态卡住**:closed 轮询兜底不再因窗口尚未就绪而过早自清
+- **主题色加载挂起**:封面图片加载增加超时兜底,Promise 不再永不 settle
 - **配置与媒体文件原子提交**:后台上传先创建不挂载到分支的 Git Blob,保存时再将加密配置、暂存文件和不再引用的旧资源合并进同一个 Tree / Commit;撤销、离开或保存冲突不再提前覆盖或删除线上文件,并移除独立即时删除接口
 - **预发布说明缺失**:选择到 RC / prerelease Tag 后按 `/releases/tags/{tag}` 获取对应 Release,不再错误复用仅返回稳定版的 `/releases/latest`
 - **更新推送被 GitHub 拒绝**:自动同步不再尝试使用内置 `GITHUB_TOKEN` 修改 `.github/workflows/`,避免 `refusing to allow a GitHub App to create or update workflow` 失败
@@ -30,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **播放失败后状态错位**:skipOnError 且没有可跳曲目时,store 同步回退到上一首,避免界面与实际播放音频不一致
 - **预加载超时后带宽泄漏**:超时未就绪的预加载完整释放 slot 并中止下载
 - **搜索时列表强拉滚动**:仅在切歌或恢复上次定位时滚动到当前曲目,搜索输入不再打断浏览
+
+[0.2.0-rc8]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0-rc8
 
 ## [0.2.0-rc7] - 2026-07-10
 
