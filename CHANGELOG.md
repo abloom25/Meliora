@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-01
+
+0.2.0 正式版。相对 0.2.0-rc8 的变更如下:
+
+### Added
+
+- **节拍检测重写(SuperFlux + ACF 预测式节拍跟踪)**:onset 检测换为 SuperFlux(对数域频谱与最大值滤波后的上一帧求正向差分,抑制颤音/滑音伪 onset),ODF 以固定 10ms 槽采样与显示帧率解耦;节拍跟踪对 4–6s ODF 历史做自相关估计周期(40–222 BPM)并对齐相位,到点主动触发脉冲而不是听到鼓点再追,无稳定周期段落自动退回反应式触发;全部包络改为帧率无关形式,高刷新率屏幕呼吸速度一致
+- **快节奏歌词同步**:歌词面板新增 rAF 外推时钟(timeupdate 约 4Hz 采样率的密集歌词不再成片跳行,仅在临近换行时启用),FLIP 滚动动画与高亮过渡按距离下一行的剩余时间自适应压缩并同步到 PiP 歌词窗
+
+### Changed
+
+- **队列小频谱重做**:扩为五段(sub/low/mid/high/air)自适应归一化,柱高反映相对近期基线的变化而非绝对电平;改为 RAF 直写 DOM,播放队列不再随频谱 60fps 整列表重渲染
+- **歌词预览气泡性能**:尺寸仅在需要时测量,方向 class 仅在换行时应用,hover 每帧不再触发强制布局
+- **构建与 CI**:type-check 改用 `vue-tsc -b` 对齐构建期严格检查;GitHub Actions 升级至 v6/v7 消除 Node 20 弃用警告
+
+### Fixed
+
+- **自然播完自动切歌后不播放**:浏览器先派发 pause 再派发 ended 导致 `shouldPlay` 被置 false,onPause 改为忽略自然结束事件(顺序/随机均受影响)
+- **歌词面板暂停恢复跳行**:恢复播放时外推时钟跨越整个暂停时长跳到未来位置,恢复时重锚;瞬切路径补取消进行中的位移动画
+- **节拍分析后台恢复误判**:页面长时间 hidden 后恢复,CORS 污染检测不再把整段后台时长一次性累加而误判跨源污染;频谱/背景节点重挂载后强制重写 CSS 变量
+- **开发模式误入生产防护**:检测到 `VERCEL_ENV=production`、Netlify `CONTEXT=production` 或 Cloudflare Pages 时 `DEVELOPMENT` 不生效,防止鉴权/加密降级被误带到公网部署
+- **API 响应安全头**:路由出口统一注入 `X-Content-Type-Options: nosniff` 与 `Cache-Control: no-store`(Cloudflare Pages / Netlify 的平台级 headers 不作用于 Function 响应)
+- **PWA meta 弃用警告**:补充标准化 `mobile-web-app-capable` 标签
+
+[0.2.0]: https://github.com/abloom25/Meliora/releases/tag/v0.2.0
+
 ## [0.2.0-rc8] - 2026-08-01
 
 ### Added
