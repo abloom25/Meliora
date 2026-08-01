@@ -1,12 +1,76 @@
 import { reactive } from 'vue'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  LYRICS_TIMEOUT_ERROR_NAME,
   hasTrackLyricsSource,
+  loadLyricsText,
   loadTrackLyrics,
   mergeTrackLyricsProvider,
   registerTrackLyrics,
 } from '../services/lyrics'
 import type { LyricLine, Track } from '../types/music'
+
+describe('lyrics text cache timeout', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('rejects with LyricsTimeoutError instead of AbortError when the shared fetch times out', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          // 规范实现:以 signal.reason reject
+          init?.signal?.addEventListener('abort', () => {
+            reject(init.signal?.reason)
+          })
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const request = loadLyricsText('https://example.com/timeout.lrc')
+    const assertion = expect(request).rejects.toMatchObject({
+      name: LYRICS_TIMEOUT_ERROR_NAME,
+    })
+    await vi.advanceTimersByTimeAsync(8000)
+    await assertion
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('normalizes a plain AbortError from the cache-layer controller into LyricsTimeoutError', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          // 不透传 reason 的环境:只抛 DOMException AbortError
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'))
+          })
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const request = loadLyricsText('https://example.com/timeout-legacy.lrc')
+    const assertion = expect(request).rejects.toMatchObject({
+      name: LYRICS_TIMEOUT_ERROR_NAME,
+    })
+    await vi.advanceTimersByTimeAsync(8000)
+    await assertion
+  })
+
+  it('still propagates caller-side cancellation as the original abort reason', async () => {
+    const fetchMock = vi.fn(() => new Promise<Response>(() => {}))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const controller = new AbortController()
+    const request = loadLyricsText('https://example.com/caller-abort.lrc', controller.signal)
+    const reason = new DOMException('Caller aborted', 'AbortError')
+    controller.abort(reason)
+
+    await expect(request).rejects.toBe(reason)
+  })
+})
 
 describe('track lyrics service', () => {
   it('uses structured lyrics directly without parsing a lyrics url', async () => {

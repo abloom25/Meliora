@@ -24,6 +24,19 @@ const trackLyricsProviders = new WeakMap<Track, TrackLyricsProvider>()
 // 歌词请求的默认超时时间（毫秒）
 const LYRICS_FETCH_TIMEOUT_MS = 8000
 
+// 缓存层超时错误的标识 name,供调用方与真正的用户取消(AbortError)区分
+export const LYRICS_TIMEOUT_ERROR_NAME = 'LyricsTimeoutError'
+
+export function createLyricsTimeoutError(): Error {
+  const error = new Error(`Lyrics request timed out after ${LYRICS_FETCH_TIMEOUT_MS}ms`)
+  error.name = LYRICS_TIMEOUT_ERROR_NAME
+  return error
+}
+
+export function isLyricsTimeoutError(error: unknown): boolean {
+  return error instanceof Error && error.name === LYRICS_TIMEOUT_ERROR_NAME
+}
+
 export interface TrackLyricsProvider {
   cacheKey: string
   priority?: number
@@ -42,8 +55,12 @@ export function loadLyricsText(url: string, signal?: AbortSignal): Promise<strin
 
   // 本地 controller 只负责缓存层请求超时。调用方 abort 只取消自己的等待,
   // 不取消共享 fetch,避免快速切歌时把同 URL 的预加载/后续请求一起误伤。
+  // 超时通过 abort(reason) 标记为可区分的超时错误,不会以 AbortError 形式暴露给订阅者。
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), LYRICS_FETCH_TIMEOUT_MS)
+  const timer = setTimeout(
+    () => controller.abort(createLyricsTimeoutError()),
+    LYRICS_FETCH_TIMEOUT_MS,
+  )
 
   const entry: LyricsCacheEntry = {
     ready: false,
@@ -66,9 +83,19 @@ export function loadLyricsText(url: string, signal?: AbortSignal): Promise<strin
       return text
     })
     .catch((error) => {
-      // 超时或外部 abort 触发时，从 in-flight 缓存中移除该 URL，并把原始异常抛出
+      // 超时或外部 abort 触发时，从 in-flight 缓存中移除该 URL。
+      // 规范实现下 fetch 会以 signal.reason reject;不透传 reason 的环境里
+      // 本地 controller 中止只会产生 AbortError,这里统一归一为 abort 时记录的原因,
+      // 保证超时始终以 LyricsTimeoutError 而不是 AbortError 暴露给订阅者。
       lyricsCache.delete(url)
       cleanup()
+      if (
+        controller.signal.aborted &&
+        error instanceof DOMException &&
+        error.name === 'AbortError'
+      ) {
+        throw controller.signal.reason ?? error
+      }
       throw error
     })
 
