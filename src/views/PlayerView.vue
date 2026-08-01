@@ -1477,7 +1477,7 @@
   .bottom-progress :deep(.range:active) {
     --track-height: 14px;
   }
-  .bottom-progress :deep(.is-progress) {
+  .bottom-progress :deep(.controls--progress) {
     width: 100%;
   }
   .dock-actions {
