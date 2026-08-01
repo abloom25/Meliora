@@ -1,4 +1,4 @@
-import { computed, ref, watch } from 'vue'
+import { computed, onScopeDispose, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import type { PlayMode, PlayerSettings, Track } from '../types/music'
 import { transferTrackLyricsProvider } from '../services/lyrics'
@@ -230,6 +230,15 @@ export const usePlayerStore = defineStore('player', () => {
   function persistSettings() {
     safeStorage.setItem(SETTINGS_KEY, JSON.stringify(settings.value))
   }
+  // store 被 dispose(其 effect scope 销毁)时清理挂起的防抖定时器,
+  // 并立即落盘尚未写入的设置,避免丢失最后一次修改。
+  onScopeDispose(() => {
+    if (saveSettingsTimer) {
+      window.clearTimeout(saveSettingsTimer)
+      saveSettingsTimer = 0
+      persistSettings()
+    }
+  })
   watch(
     settings,
     () => {
