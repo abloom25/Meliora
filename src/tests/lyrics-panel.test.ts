@@ -301,6 +301,29 @@ describe('LyricsPanel scrolling alignment', () => {
     })
   })
 
+  it('marks lyrics as error instead of silently stuck on loading when loading times out', async () => {
+    const timeoutError = new Error('Lyrics request timed out after 8000ms')
+    timeoutError.name = 'LyricsTimeoutError'
+    mockedLoadTrackLyrics.mockRejectedValueOnce(timeoutError)
+    const { wrapper } = await mountLyricsPanel()
+    await flushVueUpdates()
+
+    const snapshot = wrapper.emitted('snapshot')?.at(-1)?.[0] as LyricsSnapshot | undefined
+    expect(snapshot?.status).toBe('error')
+    expect(wrapper.emitted('availability')?.at(-1)?.[0]).toBe('unavailable')
+  })
+
+  it('silently ignores abort errors caused by user-driven cancellation', async () => {
+    mockedLoadTrackLyrics.mockRejectedValueOnce(new DOMException('Aborted', 'AbortError'))
+    const { wrapper } = await mountLyricsPanel()
+    await flushVueUpdates()
+
+    const statuses = wrapper
+      .emitted('snapshot')
+      ?.map((event) => (event[0] as LyricsSnapshot).status)
+    expect(statuses).not.toContain('error')
+  })
+
   it('marks lyrics unavailable without requesting when the track has no provider', async () => {
     mockedHasTrackLyricsSource.mockReturnValueOnce(false)
     const { wrapper } = await mountLyricsPanel()

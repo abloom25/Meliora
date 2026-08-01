@@ -53,9 +53,13 @@
   let requestId = 0
   let lyricsController: AbortController | null = null
   let resizeObserver: ResizeObserver | null = null
+  // 视口尺寸监听只用单一事件源:支持 visualViewport 的平台(移动端)用它,
+  // 否则退回 window,避免双事件源重复调度 realign
+  const viewportResizeTarget: Window | VisualViewport | null =
+    typeof window !== 'undefined' ? (window.visualViewport ?? window) : null
   const lineAnimations = new Set<Animation>()
   let realignAnimationTimer = 0
-  let realignAnimating = false
+  const realignAnimating = ref(false)
   let realignAnimatingTargetIndex: number | null = null
   let pendingAnimatedRealign: ScheduleRealignOptions | null = null
   let stopReducedMotionListener: (() => void) | null = null
@@ -72,8 +76,7 @@
     if (reducedMotionQuery) {
       stopReducedMotionListener = listenMediaQuery(reducedMotionQuery, handleReducedMotionChange)
     }
-    window.addEventListener('resize', handleViewportResize, { passive: true })
-    window.visualViewport?.addEventListener('resize', handleViewportResize, { passive: true })
+    viewportResizeTarget?.addEventListener('resize', handleViewportResize, { passive: true })
     if (typeof ResizeObserver !== 'undefined') {
       resizeObserver = new ResizeObserver(() => {
         scheduleRealign({ animate: false })
@@ -135,6 +138,8 @@
       if (id !== requestId) return
       scheduleRealign()
     } catch (error) {
+      // 只有面板自己 abort(切歌/卸载)才静默返回;服务层的加载超时
+      // 已包装为 LyricsTimeoutError(见 services/lyrics),会落到 error 态
       if (error instanceof DOMException && error.name === 'AbortError') return
       if (id === requestId) updateStatus('error')
     }
@@ -171,7 +176,11 @@
 
   function handleKeydown(event: KeyboardEvent) {
     const scrollKeys = new Set(['ArrowDown', 'ArrowUp', 'End', 'Home', 'PageDown', 'PageUp', ' '])
-    if (scrollKeys.has(event.key)) handleScrollIntent()
+    if (!scrollKeys.has(event.key)) return
+    // 歌词行按钮上的 Space 由按钮自身处理(preventDefault 后触发 seek),
+    // 不会滚动容器,因此不标记为用户滚动
+    if (event.key === ' ' && (event.target as HTMLElement | null)?.closest('.lyric-line')) return
+    handleScrollIntent()
   }
 
   function handleViewportResize() {
@@ -188,7 +197,7 @@
     lineAnimations.forEach((animation) => animation.cancel())
     lineAnimations.clear()
     window.clearTimeout(realignAnimationTimer)
-    realignAnimating = false
+    realignAnimating.value = false
     realignAnimatingTargetIndex = null
     pendingAnimatedRealign = null
   }
@@ -221,7 +230,7 @@
 
   function scheduleRealign(options: ScheduleRealignOptions = {}) {
     if (!props.active || userScrolling.value || targetIndex.value < 0) return
-    if (realignAnimating && options.animate !== false) {
+    if (realignAnimating.value && options.animate !== false) {
       const targetDistance =
         realignAnimatingTargetIndex === null
           ? 0
@@ -238,7 +247,7 @@
     }
     if (options.animate === false) {
       window.clearTimeout(realignAnimationTimer)
-      realignAnimating = false
+      realignAnimating.value = false
       realignAnimatingTargetIndex = null
       pendingAnimatedRealign = null
     }
@@ -408,12 +417,12 @@
     })
 
     const longestDelay = Math.max(visibleLines.length - 1, 0) * 48
-    realignAnimating = true
+    realignAnimating.value = true
     realignAnimatingTargetIndex = index
     window.clearTimeout(realignAnimationTimer)
     realignAnimationTimer = window.setTimeout(
       () => {
-        realignAnimating = false
+        realignAnimating.value = false
         realignAnimatingTargetIndex = null
         const pending = pendingAnimatedRealign
         pendingAnimatedRealign = null
@@ -448,6 +457,13 @@
     const distance = activeIndex.value < 0 ? 0 : Math.min(Math.abs(index - activeIndex.value), 5)
     return `distance-${distance}`
   }
+
+  // roving tabindex:仅当前激活行(无激活行时退回第一个可 seek 的行)是 Tab 停靠点,
+  // 避免数百行歌词全部进入 Tab 序列
+  const keyboardFocusIndex = computed(() => {
+    if (activeIndex.value >= 0) return activeIndex.value
+    return displayedLines.value.findIndex((line) => line.time !== null)
+  })
 
   watch(
     () => [currentTrack.value?.id, currentTrackVersion.value] as const,
@@ -501,8 +517,7 @@
     window.clearTimeout(realignAnimationTimer)
     lyricsController?.abort()
     resizeObserver?.disconnect()
-    window.removeEventListener('resize', handleViewportResize)
-    window.visualViewport?.removeEventListener('resize', handleViewportResize)
+    viewportResizeTarget?.removeEventListener('resize', handleViewportResize)
     cancelLineAnimations()
     stopReducedMotionListener?.()
     stopReducedMotionListener = null
@@ -513,7 +528,11 @@
   <section
     ref="panel"
     class="lyrics-panel"
-    :class="{ browsing: userScrolling, 'animation-disabled': !settings.lyricAnimation }"
+    :class="{
+      browsing: userScrolling,
+      'animation-disabled': !settings.lyricAnimation,
+      'realign-animating': realignAnimating,
+    }"
     :style="lyricPanelStyle"
     aria-label="歌词"
   >
@@ -553,7 +572,11 @@
                 },
               ]"
               :disabled="line.time === null"
+              :tabindex="index === keyboardFocusIndex ? 0 : -1"
               @click="seekLine(line)"
+              @keydown.enter.prevent="seekLine(line)"
+              @keydown.space.prevent="seekLine(line)"
+              @keyup.space.prevent
             >
               <span class="lyric-original">{{ line.text }}</span>
               <Transition name="translation-toggle">
@@ -648,7 +671,6 @@
     cursor: default;
     translate: 0 0;
     transform-origin: left center;
-    will-change: translate;
     transition:
       color 920ms cubic-bezier(0.22, 1, 0.36, 1),
       opacity 920ms cubic-bezier(0.22, 1, 0.36, 1),
@@ -775,6 +797,11 @@
     }
   }
 
+  .lyrics-panel.realign-animating .lyric-line {
+    /* 只在 realign 位移动画期间临时提升合成层,避免数百行歌词常驻 will-change 的内存开销 */
+    will-change: translate;
+  }
+
   .lyrics-panel.animation-disabled {
     .lyric-state-change-enter-active,
     .lyric-state-change-leave-active,
@@ -785,10 +812,6 @@
     .lyric-translation {
       transition-duration: 0ms;
       animation-duration: 0ms;
-    }
-
-    .lyric-line {
-      will-change: auto;
     }
 
     .lyric-line.active .lyric-original,
