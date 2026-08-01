@@ -45,6 +45,11 @@ export interface UseAudioPlayerOptions {
    * 仅作为透传给 useBeatAnalyser 的 getBeatTargets。
    */
   getBeatTargets?: () => readonly (HTMLElement | null | undefined)[]
+  /**
+   * 可选：返回队列小频谱 meter 节点(`--spectrum-level-N` 写入目标)。
+   * 仅作为透传给 useBeatAnalyser 的 getSpectrumTargets。
+   */
+  getSpectrumTargets?: () => readonly (HTMLElement | null | undefined)[]
 }
 
 export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
@@ -122,6 +127,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     getActiveAudio: () => activeAudio,
     isPlaying,
     getBeatTargets: options.getBeatTargets,
+    getSpectrumTargets: options.getSpectrumTargets,
     onEqFiltersReady: bindEqFilters,
     onTainted: (audio) => taintedHandler?.(audio),
   })

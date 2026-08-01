@@ -62,11 +62,13 @@
   // useBeatAnalyser 会在 RAF 中直接 setProperty 到这些节点，跳过根 :style 的样式重算。
   const artworkBackgroundRef = ref<HTMLElement | null>(null)
   const backgroundOverlayRef = ref<HTMLElement | null>(null)
+  // 队列小频谱 meter 由 TrackList 暴露,--spectrum-level-N 同样走 RAF 直写
+  const trackListRef = ref<InstanceType<typeof TrackList> | null>(null)
 
-  const { spectrumLevels, preloadMessage, toggle, pause, seek, next, previous, selectAndPlay } =
-    useAudioPlayer({
-      getBeatTargets: () => [artworkBackgroundRef.value, backgroundOverlayRef.value],
-    })
+  const { preloadMessage, toggle, pause, seek, next, previous, selectAndPlay } = useAudioPlayer({
+    getBeatTargets: () => [artworkBackgroundRef.value, backgroundOverlayRef.value],
+    getSpectrumTargets: () => [trackListRef.value?.spectrumMeter],
+  })
 
   const toggleWithHaptic = withHaptic(toggle)
   const previousWithHaptic = withHaptic(previous, 'selection')
@@ -920,6 +922,7 @@
           role="presentation"
         />
         <TrackList
+          ref="trackListRef"
           :tracks="filteredTracks"
           :total="store.tracks.length"
           :current-track-id="currentTrackId"
@@ -927,7 +930,6 @@
           :loading="loading"
           :load-failed="loadFailed"
           :query="query"
-          :spectrum-levels="spectrumLevels"
           @update:query="query = $event"
           @select="selectTrack"
           @reload="loadTracks"

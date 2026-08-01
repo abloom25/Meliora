@@ -29,7 +29,6 @@ describe('TrackList', () => {
         isPlaying: false,
         loading: false,
         query: '',
-        spectrumLevels: [0.1, 0.1, 0.1, 0.1],
       },
     })
 
@@ -50,7 +49,6 @@ describe('TrackList', () => {
         isPlaying: false,
         loading: false,
         query: '',
-        spectrumLevels: [0.1, 0.1, 0.1, 0.1],
       },
     })
 
@@ -70,11 +68,34 @@ describe('TrackList', () => {
         isPlaying: false,
         loading: false,
         query: '',
-        spectrumLevels: [0.1, 0.1, 0.1, 0.1],
       },
     })
 
     expect(wrapper.find('.track-virtual-spacer').exists()).toBe(false)
     expect(wrapper.find('.list-state').text()).toContain('暂无歌曲')
+  })
+
+  it('renders five spectrum bars for the playing track and exposes the meter element', () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: vi.fn(),
+    })
+
+    const wrapper = mount(TrackList, {
+      props: {
+        tracks: makeTracks(20),
+        total: 20,
+        currentTrackId: '2',
+        isPlaying: true,
+        loading: false,
+        query: '',
+      },
+    })
+
+    const meter = wrapper.find('.spectrum-meter')
+    expect(meter.exists()).toBe(true)
+    expect(meter.findAll('i')).toHaveLength(5)
+    const exposed = wrapper.vm as unknown as { spectrumMeter: HTMLElement | null }
+    expect(exposed.spectrumMeter).toBe(meter.element)
   })
 })

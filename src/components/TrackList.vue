@@ -1,5 +1,14 @@
 <script setup lang="ts">
-  import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+  import {
+    computed,
+    nextTick,
+    onBeforeUnmount,
+    onMounted,
+    ref,
+    shallowRef,
+    watch,
+    type ComponentPublicInstance,
+  } from 'vue'
   import { Music, RefreshCw, Search, X } from '@lucide/vue'
   import type { Track } from '../types/music'
   import { useCoverCache } from '../composables/useCoverCache'
@@ -11,7 +20,6 @@
     isPlaying: boolean
     loading: boolean
     query: string
-    spectrumLevels: number[]
     loadFailed?: boolean
   }>()
 
@@ -22,6 +30,13 @@
   }>()
 
   const { loadedCovers, failedCovers, markCoverLoaded, markCoverFailed } = useCoverCache()
+  // 正在播放曲目右侧的小频谱 meter:元素暴露给父级,频谱值由 useBeatAnalyser
+  // 每帧直接写入 --spectrum-level-N,不经过 Vue 响应式(避免整个队列 60fps 重渲染)
+  const spectrumMeterEl = shallowRef<HTMLElement | null>(null)
+  function setSpectrumMeter(element: Element | ComponentPublicInstance | null) {
+    spectrumMeterEl.value = element instanceof HTMLElement ? element : null
+  }
+  defineExpose({ spectrumMeter: spectrumMeterEl })
   const isScrolling = ref(false)
   // 与 .track-item 的 height 保持同步:虚拟化偏移按该值计算,断点样式不得覆盖高度。
   const ITEM_HEIGHT = 66
@@ -275,14 +290,11 @@
           <span class="track-status">
             <span
               v-if="track.id === currentTrackId && isPlaying"
+              :ref="setSpectrumMeter"
               class="spectrum-meter"
               aria-label="正在播放"
             >
-              <i
-                v-for="(level, band) in spectrumLevels"
-                :key="band"
-                :style="{ '--spectrum-level': `${Math.max(0.08, Math.min(1, level)) * 100}%` }"
-              />
+              <i v-for="band in 5" :key="band" />
             </span>
             <span v-else>{{ index + 1 }}</span>
           </span>
@@ -609,17 +621,34 @@
     height: 13px;
     align-items: center;
     justify-content: center;
-    gap: 2.5px;
+    gap: 2px;
 
     i {
       width: 2px;
-      height: var(--spectrum-level);
+      height: 8%;
       min-height: 3px;
       max-height: 13px;
       border-radius: 999px;
       background: currentColor;
       opacity: 0.92;
-      transition: height 80ms linear;
+
+      /* 柱高由 useBeatAnalyser 每帧直写 --spectrum-level-N 驱动;
+         平滑在分析器的帧率无关包络里完成,这里不再叠加 CSS transition */
+      &:nth-child(1) {
+        height: var(--spectrum-level-0, 8%);
+      }
+      &:nth-child(2) {
+        height: var(--spectrum-level-1, 8%);
+      }
+      &:nth-child(3) {
+        height: var(--spectrum-level-2, 8%);
+      }
+      &:nth-child(4) {
+        height: var(--spectrum-level-3, 8%);
+      }
+      &:nth-child(5) {
+        height: var(--spectrum-level-4, 8%);
+      }
     }
   }
 
