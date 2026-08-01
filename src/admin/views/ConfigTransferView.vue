@@ -43,7 +43,7 @@
 
   function confirmExportPlainConfig() {
     showExportRiskConfirm.value = false
-    const validation = validateMusicConfig(props.config)
+    const validation = validateMusicConfig(props.config, { allowPrivateUrls: import.meta.env.DEV })
     if (!validation.valid || !validation.config) {
       emit('notify', `当前配置未通过校验:${validation.errors.join('; ')}`, 'error')
       return
@@ -71,7 +71,7 @@
       return
     }
 
-    const validation = validateMusicConfig(parsed)
+    const validation = validateMusicConfig(parsed, { allowPrivateUrls: import.meta.env.DEV })
     if (!validation.valid || !validation.config) {
       emit('notify', `导入失败:${validation.errors.join('; ')}`, 'error')
       return

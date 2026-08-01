@@ -52,6 +52,12 @@ async function requestAdminJson<T extends object>(
     fallbackError: string
     abortedError?: string
     markUnauthenticated?: boolean
+    /**
+     * 非幂等请求(如触发部署)置为 false。
+     * 重试安全的前提:服务端的 403 只发生在 CSRF/跨站校验阶段(见 server/core/router.ts),
+     * 此时业务 handler 尚未执行、没有任何副作用;幂等请求重试一次是安全的。
+     */
+    retryOn403?: boolean
   },
 ): Promise<AdminRequestResult<T>> {
   try {
@@ -59,8 +65,10 @@ async function requestAdminJson<T extends object>(
     let data = (await response.json().catch(() => ({}))) as Partial<T> & ApiErrorPayload
 
     // 403 多为 CSRF token 失效(如改密码 bump 版本后旧 token 被吊销):
-    // 清除内存 token 并重试一次,fetchWithCsrf 会在重试前自动重新获取 token
-    if (response.status === 403) {
+    // 清除内存 token 并重试一次,fetchWithCsrf 会在重试前自动重新获取 token。
+    // 已 abort 的请求不重试:复用的 init.signal 已中止,重试会立刻 AbortError,
+    // 把真实错误误报成"已取消"。
+    if (response.status === 403 && options.retryOn403 !== false && !init.signal?.aborted) {
       csrfManager.clearToken()
       response = await fetchWithCsrf(url, { ...init, credentials: 'include' })
       data = (await response.json().catch(() => ({}))) as Partial<T> & ApiErrorPayload
@@ -118,7 +126,9 @@ export async function saveConfig(
   config: MusicConfig,
   uploads: StagedUpload[] = [],
 ): Promise<SaveResult> {
-  const validation = validateMusicConfig(config)
+  // 与服务端开发模式一致(server/core/config-handler.ts):
+  // dev 下允许 http://localhost 等私网地址,避免前端误拦
+  const validation = validateMusicConfig(config, { allowPrivateUrls: import.meta.env.DEV })
   if (!validation.valid) {
     return { ok: false, error: validation.errors.join('; ') }
   }
@@ -321,7 +331,7 @@ export async function triggerUpdate(
         receivePrereleaseUpdates,
       }),
     },
-    { fallbackError: '触发失败' },
+    { fallbackError: '触发失败', retryOn403: false },
   )
   if (!result.ok) return { ok: false, error: result.error }
   return {
