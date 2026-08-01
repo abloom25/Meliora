@@ -168,6 +168,9 @@
       }
       lines.value = parsedLines
       syncActiveLyric({ realign: false })
+      // 歌词就绪后若开局就是密集段落,立即接管高频时钟,
+      // 不等第一个 timeupdate(最多 ~250ms)才启动
+      ensureClockLoop()
       updateStatus('ready')
       await nextTick()
       if (id !== requestId) return
@@ -362,6 +365,7 @@
 
     if (!shouldAnimate) {
       markProgrammaticScroll()
+      cancelLineAnimations()
       container.scrollTop = target
       onComplete?.()
       return
@@ -378,6 +382,7 @@
     const realignBudgetMs = getRealignBudgetMs(index)
     if (realignBudgetMs < REALIGN_MIN_BUDGET_MS) {
       markProgrammaticScroll()
+      cancelLineAnimations()
       container.scrollTop = target
       onComplete?.()
       return
@@ -551,12 +556,20 @@
   }
   watch(
     isPlaying,
-    (playing) => {
+    (playing, wasPlaying) => {
       if (clockRaf) {
         window.cancelAnimationFrame(clockRaf)
         clockRaf = 0
       }
-      if (playing) ensureClockLoop()
+      if (!playing) return
+      if (wasPlaying === false) {
+        // 暂停期间锚点持续老化,恢复时先以当前 currentTime 重锚,
+        // 避免首个外推帧跨越整个暂停时长跳到未来位置再弹回
+        clockAnchorTime = currentTime.value
+        clockAnchorStamp = performance.now()
+        lyricClock.value = clockAnchorTime
+      }
+      ensureClockLoop()
     },
     { immediate: true },
   )

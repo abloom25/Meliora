@@ -496,6 +496,36 @@ describe('LyricsPanel scrolling alignment', () => {
     expect(wrapper.findAll('.lyric-line')[4]?.classes()).toContain('active')
   })
 
+  it('re-anchors the lyric clock when resuming after a long pause', async () => {
+    const rapidLines: LyricLine[] = Array.from({ length: 400 }, (_, index) => ({
+      time: index * 0.3,
+      text: `Rapid ${index}`,
+    }))
+    mockedLoadTrackLyrics.mockResolvedValueOnce(rapidLines)
+    const { wrapper, store } = await mountLyricsPanel()
+    await flushVueUpdates()
+    setPanelLayout(wrapper)
+
+    store.isPlaying = true
+    await flushVueUpdates()
+    store.isPlaying = false
+    await flushVueUpdates()
+
+    // 暂停 60s 后恢复:若锚点未重置,首个外推帧会把时钟推到 60s 之后(第 200 行)
+    vi.advanceTimersByTime(60000)
+    store.isPlaying = true
+    await flushVueUpdates()
+    flushAnimationFrames()
+    await flushVueUpdates()
+
+    // currentTime 仍为 0,高亮应停在开头附近而非跳到未来
+    const activeIndex = wrapper
+      .findAll('.lyric-line')
+      .findIndex((line) => line.classes().includes('active'))
+    expect(activeIndex).toBeGreaterThanOrEqual(0)
+    expect(activeIndex).toBeLessThan(10)
+  })
+
   it('clears transient lyric visuals and cancels row animations when the track changes', async () => {
     mockedSupportsWebAnimations.mockReturnValue(true)
     const animateSpy = installElementAnimateMock()
