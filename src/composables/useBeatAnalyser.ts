@@ -248,8 +248,24 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       const ctx = createAudioContextCompatible()
       if (!ctx) throw new Error('AudioContext unavailable')
       sharedAudioContext = ctx
+      ensureGestureResume()
     }
     return sharedAudioContext
+  }
+
+  // Safari 的 AudioContext.resume() 必须发生在用户手势内:媒体元素事件
+  // ('play' 等)在 WebKit 不继承用户激活态,异步 resume 后上下文仍停在
+  // suspended,analyser 持续输出全零。在真实手势上兜底 resume,
+  // 保证 macOS Safari 的分析链路能起来(Chrome 走同一无害路径)
+  let gestureResumeRegistered = false
+  function handleGestureResume() {
+    if (sharedAudioContext?.state === 'suspended') void sharedAudioContext.resume()
+  }
+  function ensureGestureResume() {
+    if (gestureResumeRegistered || typeof document === 'undefined') return
+    gestureResumeRegistered = true
+    document.addEventListener('pointerdown', handleGestureResume, true)
+    document.addEventListener('keydown', handleGestureResume, true)
   }
 
   function bandEnergy(data: Uint8Array<ArrayBuffer>, from: number, to: number) {
@@ -458,8 +474,8 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     analyser.getByteFrequencyData(frequencyData)
     const data = frequencyData
     // CORS 污染检测:跨源媒体不抛错而是让 analyser 持续输出全零。
-    // 仅累计"currentTime 在前进(确实在出声)但频谱全零"的时长,
-    // 暂停与缓冲 stall(currentTime 不前进)不计入,避免误伤正常弱音/卡顿。
+    // 仅累计"currentTime 在前进(确实在出声)且上下文运行中但频谱全零"的时长,
+    // 暂停、缓冲 stall 与 AudioContext suspended(Safari 手势前)均不计入,避免误判。
     let allZero = true
     for (let index = 0; index < data.length; index += 1) {
       if (data[index] !== 0) {
@@ -471,7 +487,9 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     lastObservedCurrentTime = activeAudio.currentTime
     if (!allZero) {
       taintedSilenceMs = 0
-    } else if (progressed) {
+    } else if (progressed && audioContext?.state === 'running') {
+      // 仅在上下文运行时累计:AudioContext suspended(Safari 手势前)同样输出全零,
+      // 那不是跨源污染,不能误判(会错误重建 audio 并永久降级)
       // 单帧 delta 钳制:页面 hidden 期间 rAF 停转,恢复后首帧的
       // now - lastBeatFrameAt 会包含整个后台时长,不得一次性累加
       taintedSilenceMs += lastBeatFrameAt ? Math.min(now - lastBeatFrameAt, 100) : 0
@@ -654,6 +672,12 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
         void audioContext.suspend()
         return
       }
+      if (audioContext.state !== 'running') {
+        // Safari:媒体事件不继承用户激活态,本次 resume 未生效。
+        // 手势兜底监听已注册(ensureGestureResume),下一次真实手势会自动恢复;
+        // 此处不再反复重试,但继续调度 rAF 保持待命
+        console.warn('[useBeatAnalyser] AudioContext 仍处于 suspended,等待用户手势恢复')
+      }
       if (prefersReducedMotion) {
         pauseBeatAnalysis()
         return
@@ -663,7 +687,9 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
         visibilityListenerRegistered = true
       }
       if (!beatFrame) beatFrame = window.requestAnimationFrame(updateBeatLevel)
-    } catch {
+    } catch (error) {
+      // 启动失败不再静默:此前任何异常都会永久关闭分析且无任何线索
+      console.warn('[useBeatAnalyser] 启动节拍分析失败', error)
       stopBeatAnalysis()
     }
   }
@@ -676,6 +702,11 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     // 后续 startBeatAnalysis 可通过 resume() 恢复。
     if (sharedAudioContext?.state === 'running') {
       void sharedAudioContext.suspend()
+    }
+    if (gestureResumeRegistered) {
+      document.removeEventListener('pointerdown', handleGestureResume, true)
+      document.removeEventListener('keydown', handleGestureResume, true)
+      gestureResumeRegistered = false
     }
     audioContext = null
   })

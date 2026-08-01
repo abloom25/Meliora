@@ -340,4 +340,36 @@ describe('useBeatAnalyser beat detection', () => {
 
     expect(onTainted).not.toHaveBeenCalled()
   })
+
+  it('does not mistake a suspended AudioContext (Safari pre-gesture) for CORS taint', async () => {
+    const activeAudio = { paused: false, currentTime: 0 } as HTMLAudioElement
+    const onTainted = vi.fn()
+    await mountBeatHarness({ activeAudio, onTainted })
+    const context = AudioContextMock.instances.at(-1)
+    if (!context) throw new Error('context mock not found')
+    // Safari:媒体事件不继承用户激活态,resume 未生效,上下文停在 suspended,
+    // analyser 输出全零——这不是跨源污染,累计多久都不得触发降级重建
+    context.state = 'suspended'
+    try {
+      activeAudio.currentTime = 1
+      runFrames(250)
+      expect(onTainted).not.toHaveBeenCalled()
+    } finally {
+      context.state = 'running'
+    }
+  })
+
+  it('resumes a suspended AudioContext on the next real user gesture', async () => {
+    const activeAudio = { paused: false, currentTime: 0 } as HTMLAudioElement
+    await mountBeatHarness({ activeAudio })
+    const context = AudioContextMock.instances.at(-1)
+    if (!context) throw new Error('context mock not found')
+    context.state = 'suspended'
+    try {
+      document.dispatchEvent(new Event('pointerdown'))
+      expect(context.state).toBe('running')
+    } finally {
+      context.state = 'running'
+    }
+  })
 })
