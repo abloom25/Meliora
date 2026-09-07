@@ -110,4 +110,16 @@ describe('LruCache', () => {
     expect(cache.has(16)).toBe(true)
     expect(cache.get(79)).toBe(79)
   })
+
+  it('clear empties the cache', () => {
+    const cache = new LruCache<string, number>(4)
+    cache.set('a', 1)
+    cache.set('b', 2)
+    cache.clear()
+
+    expect(cache.size).toBe(0)
+    expect(cache.has('a')).toBe(false)
+    cache.set('c', 3)
+    expect(cache.get('c')).toBe(3)
+  })
 })
