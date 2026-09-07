@@ -33,10 +33,37 @@ describe('parseLyrics', () => {
     ])
   })
 
-  it('removes enhanced LRC inline word timestamps from rendered text', () => {
-    expect(parseLyrics('[00:01.00]<00:01.10>Hello <00:01.50>world')).toEqual([
+  it('parses enhanced LRC inline tags into a word timeline', () => {
+    const [line] = parseLyrics('[00:01.00]<00:01.10>Hello <00:01.50>world<00:01.92>')
+    expect(line).toMatchObject({
+      time: 1,
+      text: 'Hello world',
+      wordSource: 'native',
+      endTime: 1.92,
+    })
+    expect(line?.words?.map((word) => word.text)).toEqual(['Hello', 'world'])
+    expect(line?.words?.[0]?.trailingSpace).toBe(true)
+    // 每个音节的时长由下一个标签回填,最后一个用行结束标签兜底
+    expect(line?.words?.[0]?.time).toBeCloseTo(1.1, 5)
+    expect(line?.words?.[0]?.duration).toBeCloseTo(0.4, 5)
+    expect(line?.words?.[1]?.time).toBeCloseTo(1.5, 5)
+    expect(line?.words?.[1]?.duration).toBeCloseTo(0.42, 5)
+  })
+
+  it('ignores a lone inline tag instead of treating it as a word timeline', () => {
+    // 只有一个内联标签通常是复制行首时间戳的噪声,不构成逐字数据
+    expect(parseLyrics('[00:01.00]<00:01.00>Hello world')).toEqual([
       { time: 1, text: 'Hello world' },
     ])
+  })
+
+  it('shifts the word timeline for every timestamp of a repeated line', () => {
+    const lines = parseLyrics('[00:01.00][00:11.00]<00:01.00>Hey <00:01.50>you<00:02.00>')
+    expect(lines).toHaveLength(2)
+    expect(lines[0]?.words?.[0]).toMatchObject({ text: 'Hey', trailingSpace: true })
+    expect(lines[0]?.words?.[0]?.time).toBeCloseTo(1, 5)
+    expect(lines[1]?.words?.[0]?.time).toBeCloseTo(11, 5)
+    expect(lines[1]?.endTime).toBeCloseTo(12, 5)
   })
 
   it('merges same-timestamp bilingual lines into translation', () => {
