@@ -27,6 +27,35 @@
   initial-value: #a7e7e2;
 }
 
+// 歌词行的两种文字色:--lyric-fill 是已唱部分,--lyric-idle 是未唱部分。
+// 注册成 <color> 才能让"当前行高亮"这个状态切换走 CSS 原生过渡;
+// 不支持 @property 的浏览器会直接跳变,但行的 opacity/blur 过渡仍在
+@property --lyric-fill {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.3);
+}
+
+@property --lyric-idle {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.3);
+}
+
+// 逐字扫光进度(0…1),由 LyricsPanel 每帧写入当前行的音节节点。
+// 注册为 <number> 可以让渐变里的 calc() 走更快的插值路径,并避免未初始化时的无效值
+@property --lyric-word-fill {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 1;
+}
+
+@property --lyric-word-edge {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 0;
+}
+
 :root {
   // 当浏览器支持 @property 时，由 CSS 原生处理颜色过渡（GPU 加速）
   transition:
