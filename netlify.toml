@@ -15,13 +15,11 @@ command = "pnpm build"
 [context.deploy-preview]
 command = "pnpm build"
 
+# 所有非生产分支都不自动部署。ignore 命令返回 0 表示取消构建、返回 1 表示继续。
+# 分支部署会带上生产环境变量,而分支 URL 不受主域名的任何访问保护,
+# 那样 /admin 就能在一个无保护的地址上真实读写仓库
 [context.branch-deploy]
 command = "pnpm build"
-
-# preview 分支不自动部署。Netlify 的 ignore 命令返回 0 表示取消构建、返回 1 表示继续。
-# 分支部署会带上生产环境变量,而预览 URL 不受主域名的任何访问保护,
-# 那样 /admin 就能在一个无保护的地址上真实读写仓库
-[context.preview]
 ignore = "exit 0"
 
 [[headers]]

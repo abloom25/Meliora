@@ -6,7 +6,8 @@
   "outputDirectory": "dist",
   "git": {
     "deploymentEnabled": {
-      "preview": false
+      "preview": false,
+      "feat/beat-background-highlight": false
     }
   },
   "headers": [
