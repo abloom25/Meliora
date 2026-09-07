@@ -1,6 +1,8 @@
 import { onBeforeUnmount, ref, watch, type Ref } from 'vue'
-import type { LyricsSnapshot, Track } from '../types/music'
+import type { LyricLine, LyricWord, LyricsSnapshot, Track } from '../types/music'
 import { supportsDocumentPictureInPicture } from '../utils/browser'
+import { createLyricClock } from '../utils/lyric-clock'
+import { wordFillProgress } from '../utils/lyrics'
 
 interface DocumentPictureInPictureApi {
   requestWindow(options?: { width?: number; height?: number }): Promise<Window>
@@ -9,6 +11,8 @@ interface DocumentPictureInPictureApi {
 interface LyricsWindowOptions {
   currentTrack: Ref<Track | null>
   isPlaying: Ref<boolean>
+  /** 播放位置(秒)。小窗内的逐字扫光靠它驱动自己的外推时钟 */
+  currentTime: Ref<number>
 }
 
 interface CachedNodes {
@@ -19,7 +23,12 @@ interface CachedNodes {
   lyricsContainer: HTMLElement
   state: HTMLElement
   lineNodes: HTMLDivElement[]
+  mainNodes: HTMLSpanElement[]
   translationNodes: (HTMLSpanElement | null)[]
+  /** 每个槽位的音节节点,逐字扫光每帧只写这里 */
+  wordNodes: HTMLElement[][]
+  /** 每个槽位当前渲染的内容指纹,不变就不重建 DOM */
+  signatures: string[]
 }
 
 const popupStyles = `
@@ -37,8 +46,19 @@ const popupStyles = `
   p { margin-top: 4px; color: rgba(255,255,255,.56); font-size: 12px; }
   .lyrics { display: flex; min-height: 0; flex: 1; flex-direction: column; justify-content: center; padding-top: 18px; }
   .lyrics-lines { display: flex; min-height: 0; flex-direction: column; justify-content: center; gap: 13px; }
-  .line { color: rgba(255,255,255,.27); font-size: clamp(21px,5.4vw,31px); font-weight: 690; line-height: 1.16; letter-spacing: -.035em; transition: opacity calc(.45s * var(--lyric-tempo,1)) ease,color calc(.45s * var(--lyric-tempo,1)) ease,text-shadow calc(.45s * var(--lyric-tempo,1)) ease; }
-  .line.active { color: #fff; text-shadow: 0 0 20px rgba(255,255,255,.18); }
+  .line { --lyric-fill: rgba(255,255,255,.27); --lyric-idle: rgba(255,255,255,.27); color: var(--lyric-fill); font-size: clamp(21px,5.4vw,31px); font-weight: 690; line-height: 1.16; letter-spacing: -.035em; transition: opacity calc(.45s * var(--lyric-tempo,1)) ease,color calc(.45s * var(--lyric-tempo,1)) ease,text-shadow calc(.45s * var(--lyric-tempo,1)) ease; }
+  .line.active { --lyric-fill: #fff; --lyric-idle: rgba(255,255,255,.32); text-shadow: 0 0 20px rgba(255,255,255,.18); }
+  .main { display: block; }
+  /* 逐字扫光。弹窗文档里没有 @property 注册,var() 必须带兜底值,
+     否则未写入的音节会让整条 background-image 失效、文字变透明 */
+  /* padding 撑开背景绘制盒、负 margin 抵消排版影响:否则 background-clip: text 会把 g/y/p 的降部切掉 */
+  .word { display: inline-block; padding: .08em 0 .16em; margin: -.08em 0 -.16em; color: var(--lyric-fill); translate: 0 calc(var(--w,1) * -.05em); }
+  @supports (background-clip: text) or (-webkit-background-clip: text) {
+    /* --e 是前沿柔化宽度的缩放,进度为 0 或 1 时收到 0;
+       否则未唱词的左边缘会被画出一段亮色渐变 */
+    .word { color: transparent; -webkit-background-clip: text; background-clip: text; background-image: linear-gradient(90deg, var(--lyric-fill) 0%, var(--lyric-fill) calc(var(--w,1) * 100%), var(--lyric-idle) calc(var(--w,1) * 100% + .5em * var(--e,0)), var(--lyric-idle) 100%); }
+  }
+  .gap { white-space: pre-wrap; }
   .translation { display: block; margin-top: .2em; font-size: .68em; opacity: .72; }
   .state { margin: auto 0; color: rgba(255,255,255,.5); font-size: 18px; font-weight: 620; }
 `
@@ -56,7 +76,7 @@ function isWindowClosed(target: Window): boolean {
   }
 }
 
-export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions) {
+export function useLyricsWindow({ currentTrack, isPlaying, currentTime }: LyricsWindowOptions) {
   const snapshot = ref<LyricsSnapshot>({
     lines: [],
     activeIndex: -1,
@@ -72,6 +92,16 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
   let isToggling = false
   let isDisposed = false
   let windowCloseListeners: Array<() => void> = []
+  // 小窗自己维护一份外推时钟与 rAF 循环:主窗口在后台时 rAF 会被节流到约 1Hz,
+  // 扫光必须跑在小窗自己的帧循环上才能保持平滑
+  const clock = createLyricClock()
+  let karaokeFrame = 0
+  let activeSlot = -1
+  let activeWords: LyricWord[] | null = null
+  let karaokeSpans: HTMLElement[] = []
+  let karaokeWords: LyricWord[] = []
+  let karaokeLastFill: string[] = []
+  let karaokeLastEdge: string[] = []
 
   function setSnapshot(value: LyricsSnapshot) {
     snapshot.value = value
@@ -103,6 +133,10 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
       resolve?.()
     }
     if (lyricsWindow === target) {
+      stopKaraoke()
+      releaseKaraoke()
+      activeSlot = -1
+      activeWords = null
       lyricsWindow = null
       isOpen.value = false
       clearCache()
@@ -200,7 +234,10 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
         lyricsContainer,
         state,
         lineNodes: [],
+        mainNodes: [],
         translationNodes: [],
+        wordNodes: [],
+        signatures: [],
       }
     } else {
       cachedNodes = null
@@ -219,10 +256,137 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     let node = nodes.lineNodes[index]
     if (!node) {
       node = doc.createElement('div')
+      const main = doc.createElement('span')
+      main.className = 'main'
+      node.append(main)
       nodes.lineNodes[index] = node
+      nodes.mainNodes[index] = main
       nodes.translationNodes[index] = null
+      nodes.wordNodes[index] = []
+      nodes.signatures[index] = ''
     }
     return node
+  }
+
+  // 内容指纹:文本、音节数、译文都没变就不重建 DOM,
+  // 副歌里同一句反复出现时避免每次换行都扔掉重建一遍音节节点
+  function lineSignature(line: LyricLine): string {
+    return JSON.stringify([line.words?.length ?? 0, line.text, line.translation ?? ''])
+  }
+
+  function renderLineContent(doc: Document, slot: number, line: LyricLine) {
+    const nodes = cachedNodes!
+    const node = nodes.lineNodes[slot]!
+    const main = nodes.mainNodes[slot]!
+    const signature = lineSignature(line)
+    if (nodes.signatures[slot] === signature) return
+    nodes.signatures[slot] = signature
+
+    const spans: HTMLElement[] = []
+    if (line.words?.length) {
+      const fragment = doc.createDocumentFragment()
+      for (const word of line.words) {
+        const span = doc.createElement('span')
+        span.className = 'word'
+        span.textContent = word.text
+        fragment.append(span)
+        spans.push(span)
+        if (!word.trailingSpace) continue
+        // 音节之间必须有真实的空白文本节点,否则行内块之间没有换行机会
+        const gap = doc.createElement('span')
+        gap.className = 'gap'
+        gap.textContent = ' '
+        fragment.append(gap)
+      }
+      main.replaceChildren(fragment)
+    } else {
+      main.textContent = line.text
+    }
+    nodes.wordNodes[slot] = spans
+
+    let translationNode = nodes.translationNodes[slot]
+    if (line.translation) {
+      if (!translationNode) {
+        translationNode = doc.createElement('span')
+        translationNode.className = 'translation'
+        nodes.translationNodes[slot] = translationNode
+      }
+      if (translationNode.textContent !== line.translation) {
+        translationNode.textContent = line.translation
+      }
+      if (translationNode.parentNode !== node) node.append(translationNode)
+    } else if (translationNode?.parentNode) {
+      translationNode.remove()
+    }
+  }
+
+  function releaseKaraoke() {
+    for (const span of karaokeSpans) {
+      span.style.removeProperty('--w')
+      span.style.removeProperty('--e')
+    }
+    karaokeSpans = []
+    karaokeWords = []
+    karaokeLastFill = []
+    karaokeLastEdge = []
+  }
+
+  function bindKaraoke() {
+    releaseKaraoke()
+    if (!cachedNodes || activeSlot < 0 || !activeWords?.length) return
+    const spans = cachedNodes.wordNodes[activeSlot]
+    // 数量对不上说明 DOM 与快照不同步,这一轮先不接管,下一次 render 会重绑
+    if (!spans || spans.length !== activeWords.length) return
+    karaokeSpans = spans
+    karaokeWords = activeWords
+    karaokeLastFill = activeWords.map(() => '')
+    karaokeLastEdge = activeWords.map(() => '')
+  }
+
+  function writeKaraoke(time: number) {
+    for (let index = 0; index < karaokeSpans.length; index += 1) {
+      const span = karaokeSpans[index]!
+      const word = karaokeWords[index]!
+      const progress = wordFillProgress(time, word)
+      const fill = progress.toFixed(3)
+      if (fill !== karaokeLastFill[index]) {
+        karaokeLastFill[index] = fill
+        span.style.setProperty('--w', fill)
+      }
+      const edge = Math.max(0, Math.min(1, Math.min(progress, 1 - progress) * 8)).toFixed(3)
+      if (edge !== karaokeLastEdge[index]) {
+        karaokeLastEdge[index] = edge
+        span.style.setProperty('--e', edge)
+      }
+    }
+  }
+
+  function shouldRunKaraoke(): boolean {
+    return Boolean(lyricsWindow && isPlaying.value && karaokeSpans.length > 0)
+  }
+
+  function karaokeTick() {
+    karaokeFrame = 0
+    const target = lyricsWindow
+    if (!target || isWindowClosed(target)) return
+    writeKaraoke(clock.read(performance.now()))
+    if (shouldRunKaraoke()) karaokeFrame = target.requestAnimationFrame(karaokeTick)
+  }
+
+  function startKaraoke() {
+    const target = lyricsWindow
+    if (karaokeFrame || !target || !shouldRunKaraoke()) return
+    karaokeFrame = target.requestAnimationFrame(karaokeTick)
+  }
+
+  function stopKaraoke() {
+    if (!karaokeFrame) return
+    try {
+      lyricsWindow?.cancelAnimationFrame(karaokeFrame)
+    } catch {
+      // 窗口可能已销毁,句柄随之失效
+    }
+    karaokeFrame = 0
   }
 
   function render() {
@@ -258,9 +422,14 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     const ready = snapshot.value.status === 'ready' && lines.length > 0
 
     if (!ready) {
+      stopKaraoke()
+      releaseKaraoke()
+      activeSlot = -1
+      activeWords = null
       for (let i = 0; i < lineNodes.length; i += 1) {
         const node = lineNodes[i]
         if (node && node.parentNode) node.remove()
+        cachedNodes.signatures[i] = ''
       }
       state.hidden = false
       state.textContent =
@@ -282,6 +451,8 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
       lyricsContainer.style.setProperty('--lyric-tempo', tempoScale)
     }
     const hasActiveLine = active >= 0 && active < lines.length
+    activeSlot = -1
+    activeWords = null
     const start = hasActiveLine ? Math.max(0, active - 1) : 0
     const end = hasActiveLine ? Math.min(lines.length, active + 3) : Math.min(lines.length, 4)
     const visibleCount = end - start
@@ -303,31 +474,10 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
       const indexStr = String(lineIndex)
       if (node.dataset.index !== indexStr) node.dataset.index = indexStr
 
-      let translationNode = cachedNodes.translationNodes[slot]
-      if (line.translation) {
-        if (!translationNode) {
-          translationNode = doc.createElement('span')
-          translationNode.className = 'translation'
-          cachedNodes.translationNodes[slot] = translationNode
-        }
-        if (node.firstChild !== node.lastChild || node.firstChild?.nodeType !== Node.TEXT_NODE) {
-          node.textContent = line.text
-        } else if (node.firstChild.nodeValue !== line.text) {
-          node.firstChild.nodeValue = line.text
-        }
-        if (translationNode.textContent !== line.translation) {
-          translationNode.textContent = line.translation
-        }
-        if (translationNode.parentNode !== node) {
-          node.append(translationNode)
-        }
-      } else {
-        if (translationNode && translationNode.parentNode) {
-          translationNode.remove()
-        }
-        if (node.textContent !== line.text) {
-          node.textContent = line.text
-        }
+      renderLineContent(doc, slot, line)
+      if (lineIndex === active) {
+        activeSlot = slot
+        activeWords = line.words ?? null
       }
 
       if (node.parentNode !== lyricsContainer) {
@@ -344,6 +494,11 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
       const node = lineNodes[slot]
       if (node && node.parentNode) node.remove()
     }
+
+    // 行内容重建后旧的音节节点已失效,每轮 render 结束都重新绑定扫光目标
+    bindKaraoke()
+    writeKaraoke(clock.read(performance.now()))
+    startKaraoke()
   }
 
   async function openViaWindowOpen(): Promise<Window> {
@@ -417,6 +572,26 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
     }
   }
 
+  watch(currentTime, (value) => {
+    clock.anchor(value, performance.now())
+    // 循环没跑时(暂停 / 无逐字数据)靠 timeupdate 驱动一次写入
+    if (!karaokeFrame) writeKaraoke(clock.read(performance.now()))
+  })
+  watch(
+    isPlaying,
+    (playing) => {
+      if (!playing) {
+        clock.freeze()
+        stopKaraoke()
+        writeKaraoke(clock.read(performance.now()))
+        return
+      }
+      // 暂停期间锚点持续老化,恢复播放必须重锚,否则首帧会跳到未来位置
+      clock.resume(currentTime.value, performance.now())
+      startKaraoke()
+    },
+    { immediate: true },
+  )
   watch(
     [
       () => currentTrack.value?.id,
@@ -429,6 +604,7 @@ export function useLyricsWindow({ currentTrack, isPlaying }: LyricsWindowOptions
   )
   onBeforeUnmount(() => {
     isDisposed = true
+    stopKaraoke()
     if (openingWindow) {
       closeWindowQuietly(openingWindow)
       teardownWindow(openingWindow)

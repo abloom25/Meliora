@@ -83,6 +83,7 @@
   } = useLyricsWindow({
     currentTrack,
     isPlaying,
+    currentTime,
   })
   const { canInstall, isInstalled, install, iosInstallAvailable } = usePwaInstall()
 

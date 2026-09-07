@@ -14,11 +14,19 @@ function createPopupWindow(readyState: DocumentReadyState = 'complete'): Window 
     configurable: true,
     value: readyState,
   })
+  const frames: FrameRequestCallback[] = []
   return {
     closed: false,
     document: popupDocument,
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
+    // 小窗的扫光跑在它自己的帧循环上:主窗口后台时 rAF 会被节流到约 1Hz
+    frames,
+    requestAnimationFrame: vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    }),
+    cancelAnimationFrame: vi.fn(),
     close: vi.fn(function close(this: Window & { closed: boolean }) {
       this.closed = true
     }),
@@ -27,6 +35,8 @@ function createPopupWindow(readyState: DocumentReadyState = 'complete'): Window 
 
 function mountLyricsWindowHarness(popup = createPopupWindow()) {
   vi.spyOn(window, 'open').mockReturnValue(popup)
+  const isPlaying = ref(false)
+  const currentTime = ref(0)
 
   const track = reactive<Track>({
     id: 'track-1',
@@ -41,17 +51,23 @@ function mountLyricsWindowHarness(popup = createPopupWindow()) {
   const wrapper = mount(
     defineComponent({
       setup() {
-        api = useLyricsWindow({
-          currentTrack: ref(track),
-          isPlaying: ref(false),
-        })
+        api = useLyricsWindow({ currentTrack: ref(track), isPlaying, currentTime })
         return {}
       },
       template: '<div />',
     }),
   )
 
-  return { api, popup, track, wrapper }
+  return { api, popup, track, wrapper, isPlaying, currentTime }
+}
+
+function runPopupFrames(popup: Window, count: number, stepMs = 16) {
+  const host = popup as unknown as { frames: FrameRequestCallback[] }
+  for (let frame = 0; frame < count; frame += 1) {
+    vi.advanceTimersByTime(stepMs)
+    const callbacks = host.frames.splice(0, host.frames.length)
+    callbacks.forEach((callback) => callback(performance.now()))
+  }
 }
 
 describe('useLyricsWindow', () => {
@@ -149,5 +165,77 @@ describe('useLyricsWindow', () => {
     await opening
 
     expect(popup.close).toHaveBeenCalled()
+  })
+
+  it('renders syllable spans and fills only the active line', async () => {
+    const { api, popup, currentTime } = mountLyricsWindowHarness()
+    await api.toggleLyricsWindow()
+    await nextTick()
+
+    currentTime.value = 0.5
+    await nextTick()
+    api.setSnapshot({
+      status: 'ready',
+      activeIndex: 0,
+      lines: [
+        {
+          time: 0,
+          endTime: 2,
+          text: 'ze ro',
+          wordSource: 'native',
+          words: [
+            { time: 0, duration: 1, text: 'ze', trailingSpace: true },
+            { time: 1, duration: 1, text: 'ro' },
+          ],
+        },
+        {
+          time: 5,
+          endTime: 7,
+          text: 'one',
+          wordSource: 'native',
+          words: [{ time: 5, duration: 2, text: 'one' }],
+        },
+      ],
+    })
+
+    const words = popup.document.querySelectorAll<HTMLElement>('.line.active .word')
+    expect([...words].map((word) => word.textContent)).toEqual(['ze', 'ro'])
+    expect(popup.document.querySelectorAll('.line.active .gap')).toHaveLength(1)
+    expect(words[0]?.style.getPropertyValue('--w')).toBe('0.500')
+    expect(words[1]?.style.getPropertyValue('--w')).toBe('0.000')
+
+    // 非当前行不写内联值,CSS 的 var() 兜底把它们渲染成已唱完
+    const idle = popup.document.querySelector<HTMLElement>('.line:not(.active) .word')
+    expect(idle?.style.getPropertyValue('--w')).toBe('')
+  })
+
+  it('drives the fill from its own frame loop while playing', async () => {
+    const { api, popup, isPlaying, currentTime } = mountLyricsWindowHarness()
+    await api.toggleLyricsWindow()
+    await nextTick()
+
+    api.setSnapshot({
+      status: 'ready',
+      activeIndex: 0,
+      lines: [
+        {
+          time: 0,
+          endTime: 4,
+          text: 'long',
+          wordSource: 'native',
+          words: [{ time: 0, duration: 4, text: 'long' }],
+        },
+      ],
+    })
+
+    isPlaying.value = true
+    currentTime.value = 0
+    await nextTick()
+
+    const word = popup.document.querySelector<HTMLElement>('.line.active .word')!
+    const before = Number(word.style.getPropertyValue('--w'))
+    runPopupFrames(popup, 20)
+
+    expect(Number(word.style.getPropertyValue('--w'))).toBeGreaterThan(before)
   })
 })
