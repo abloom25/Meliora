@@ -4,13 +4,15 @@ on:
   push:
     branches:
       - main
+      - preview
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: main-validation
+  # 按 ref 分组:固定分组名会让 preview 的推送取消正在跑的 main 校验
+  group: main-validation-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
