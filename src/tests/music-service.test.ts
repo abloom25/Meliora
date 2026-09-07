@@ -247,9 +247,10 @@ describe('music service', () => {
     expect(track).not.toHaveProperty('lyricsUrl')
     expect(track).not.toHaveProperty('lyricsLoader')
     expect(hasTrackLyricsSource(track)).toBe(true)
-    await expect(loadTrackLyrics(track!)).resolves.toEqual([
-      { time: 1, text: 'Local line', translation: '本地翻译' },
-    ])
+    const localLines = await loadTrackLyrics(track!)
+    expect(localLines).toMatchObject([{ time: 1, text: 'Local line', translation: '本地翻译' }])
+    // 普通 LRC 没有字级时间轴,不合成音节,渲染层按整行高亮
+    expect(localLines[0]?.words).toBeUndefined()
     expect(fetchMock).toHaveBeenCalledWith(
       '/lyrics/local.lrc',
       expect.objectContaining({ cache: 'force-cache' }),
@@ -288,6 +289,8 @@ describe('music service', () => {
     expect(result.tracks).toHaveLength(1)
     expect(track?.id).toBe('local:first')
     expect(hasTrackLyricsSource(track)).toBe(true)
-    await expect(loadTrackLyrics(track!)).resolves.toEqual([{ time: 2, text: 'Merged lyric' }])
+    await expect(loadTrackLyrics(track!)).resolves.toMatchObject([
+      { time: 2, text: 'Merged lyric' },
+    ])
   })
 })

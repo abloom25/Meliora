@@ -1,7 +1,9 @@
 import { toRaw } from 'vue'
 import { LruCache } from '../utils/lru-cache'
 import type { LyricLine, Track } from '../types/music'
-import { hasMeaningfulLyrics, parseLyrics } from '../utils/lyrics'
+import { mergeLyricTranslations } from '../utils/lyrics'
+import { parseAnyLyrics } from '../utils/lyrics-source'
+import { loadWordLyrics, type WordLyricsQuery } from './lyrics-db'
 
 interface LyricsCacheEntry {
   promise: Promise<string>
@@ -198,8 +200,42 @@ export function hasCachedLyrics(url: string): boolean {
 
 export async function loadLrcLyrics(url: string, signal?: AbortSignal): Promise<LyricLine[]> {
   const text = await loadLyricsText(url, signal)
-  const lines = parseLyrics(text)
-  return hasMeaningfulLyrics(lines) ? lines : []
+  // 扩展名不代表内容:后台上传的 .lrc 可能是 QRC/TTML,Meting 也可能返回增强型 LRC。
+  // 统一按内容特征选解析器,并在这里补齐逐字时间轴(没有真实音节时按字符权重插值)
+  return parseAnyLyrics(text)
+}
+
+export interface CombinedLyricsOptions {
+  /** 普通歌词地址(LRC / 增强型 LRC / QRC 均可) */
+  lyricsUrl?: string
+  /** 逐字歌词库查询条件,命中时优先于 lyricsUrl */
+  wordQuery?: WordLyricsQuery
+}
+
+/**
+ * 逐字歌词库与普通歌词并行拉取,命中逐字数据时优先使用它,并把普通歌词里的
+ * 译文补回逐字行(TTML 不一定带译文)。逐字查询失败不影响普通歌词;
+ * 只有在逐字也没命中时,普通歌词的失败才会向上抛出为 error 态。
+ */
+export async function loadCombinedLyrics(
+  options: CombinedLyricsOptions,
+  signal?: AbortSignal,
+): Promise<LyricLine[]> {
+  const wordTask = options.wordQuery
+    ? loadWordLyrics(options.wordQuery, signal)
+    : Promise.resolve(null)
+  const lrcTask = options.lyricsUrl
+    ? loadLrcLyrics(options.lyricsUrl, signal)
+    : Promise.resolve<LyricLine[]>([])
+
+  // 单源失败不影响另一源,失败原因留到最后再决定是否抛出
+  const [wordResult, lrcResult] = await Promise.allSettled([wordTask, lrcTask])
+  const wordLines = wordResult.status === 'fulfilled' ? wordResult.value : null
+  const lrcLines = lrcResult.status === 'fulfilled' ? lrcResult.value : []
+
+  if (wordLines?.length) return mergeLyricTranslations(wordLines, lrcLines)
+  if (lrcResult.status === 'rejected') throw lrcResult.reason
+  return lrcLines
 }
 
 export function registerTrackLyrics(track: Track, provider: TrackLyricsProvider) {

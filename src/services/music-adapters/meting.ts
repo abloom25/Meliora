@@ -1,5 +1,5 @@
 import type { MetingPlaylistConfig, MetingTrack, Track } from '../../types/music'
-import { hasCachedLyrics, loadLrcLyrics, registerTrackLyrics } from '../lyrics'
+import { hasCachedLyrics, loadCombinedLyrics, registerTrackLyrics } from '../lyrics'
 import { mapMetingTrack } from '../../utils/tracks'
 import type { MusicProviderAdapter, MusicProviderContext } from './types'
 
@@ -18,6 +18,21 @@ function buildMetingPlaylistUrl(apiEndpoint: string, playlist: MetingPlaylistCon
 
   const pathname = apiEndpoint.startsWith('/') ? url.pathname : url.pathname.replace(/^\//, '')
   return `${pathname}${url.search}${url.hash}`
+}
+
+/**
+ * 从 Meting 资源地址中取出平台侧歌曲 ID(`?server=&type=&id=`)。
+ * 逐字歌词库按平台 ID 寻址,而 Meting 返回的曲目本身不带 ID 字段,
+ * 只能从 lrc / url 这类回链里反解。地址可能是相对路径,统一挂一个哨兵 base 再解析。
+ */
+export function extractMetingTrackId(resourceUrl: string): string | null {
+  try {
+    const url = new URL(resourceUrl, 'https://meliora.local')
+    const id = url.searchParams.get('id')?.trim()
+    return id || null
+  } catch {
+    return null
+  }
 }
 
 async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
@@ -49,11 +64,21 @@ export const metingMusicAdapter: MusicProviderAdapter<MetingPlaylistConfig> = {
         const mapped = mapMetingTrack(track, sourceKey, index)
         const lyricsUrl = track.lrc?.trim()
         if (mapped && lyricsUrl) {
+          // 逐字歌词库按平台歌曲 ID 查询,拿不到 ID 时退化为纯 LRC 加载
+          const platformId =
+            extractMetingTrackId(lyricsUrl) ?? extractMetingTrackId(track.url?.trim() ?? '')
           registerTrackLyrics(mapped, {
             cacheKey: `meting:${lyricsUrl}`,
             priority: 10,
             isCached: () => hasCachedLyrics(lyricsUrl),
-            load: (signal) => loadLrcLyrics(lyricsUrl, signal),
+            load: (signal) =>
+              loadCombinedLyrics(
+                {
+                  lyricsUrl,
+                  wordQuery: platformId ? { platform: playlist.server, id: platformId } : undefined,
+                },
+                signal,
+              ),
           })
         }
         return mapped
