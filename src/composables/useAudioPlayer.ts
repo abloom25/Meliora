@@ -1,4 +1,4 @@
-import { onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
 import type { Track } from '../types/music'
@@ -129,6 +129,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     players,
     getActiveAudio: () => activeAudio,
     isPlaying,
+    beatFlashRate: computed(() => settings.value.beatFlashRate),
+    beatVisualDelay: computed(() => settings.value.beatVisualDelay),
     getBeatTargets: options.getBeatTargets,
     getSpectrumTargets: options.getSpectrumTargets,
     onEqFiltersReady: bindEqFilters,

@@ -43,6 +43,8 @@ class AudioContextMock {
 
   state: AudioContextState = 'running'
   readonly sampleRate = 48000
+  baseLatency = 0
+  outputLatency = 0
   destination = new AudioNodeMock() as unknown as AudioDestinationNode
   sources: unknown[] = []
   lastAnalyser: AnalyserNodeMock | null = null
@@ -173,6 +175,7 @@ describe('useBeatAnalyser beat detection', () => {
       spectrumTarget?: HTMLElement
       activeAudio?: HTMLAudioElement
       onTainted?: (audio: HTMLAudioElement) => void
+      beatVisualDelay?: number
     } = {},
   ): Promise<BeatHarness> {
     stubMatchMedia()
@@ -190,6 +193,8 @@ describe('useBeatAnalyser beat detection', () => {
           isPlaying: ref(true),
           getSpectrumTargets: options.spectrumTarget ? () => [options.spectrumTarget] : undefined,
           onTainted: options.onTainted,
+          beatVisualDelay:
+            options.beatVisualDelay === undefined ? undefined : ref(options.beatVisualDelay),
         })
         return () => h('div')
       },
@@ -221,10 +226,11 @@ describe('useBeatAnalyser beat detection', () => {
     runFrames(10)
     expect(analyser.beatLevel.value).toBeLessThan(0.05)
 
-    // 底鼓 onset:30–130Hz(bin 1–6)瞬时能量
+    // 底鼓 onset:30–130Hz(bin 1–6)瞬时能量;包络一帧内到位,之后按拍长释放
     for (let index = 1; index <= 6; index += 1) spectrum[index] = 240
-    runFrames(6)
+    runFrames(2)
     expect(analyser.beatLevel.value).toBeGreaterThan(0.6)
+    runFrames(4)
 
     // 恢复静默后脉冲按时间常数衰减,背景回落
     spectrum.fill(0)
@@ -242,7 +248,7 @@ describe('useBeatAnalyser beat detection', () => {
     expect(analyser.beatLevel.value).toBeLessThan(0.2)
   })
 
-  it('locks onto a steady tempo and keeps predicting beats into a quiet gap', async () => {
+  it('pulses once per kick at a steady tempo and stays dark through a quiet gap', async () => {
     const { analyser, spectrum } = await mountBeatHarness()
     const kick = () => {
       for (let index = 1; index <= 6; index += 1) spectrum[index] = 240
@@ -278,9 +284,9 @@ describe('useBeatAnalyser beat detection', () => {
       expect(interval).toBeLessThan(600)
     }
 
-    // 静默段(9–10.5s)节拍表仍应按预测节奏触发
-    const predicted = pulseTimes.filter((time) => time >= 9000 && time < 10500)
-    expect(predicted.length).toBeGreaterThanOrEqual(2)
+    // 静默段(9.3s 起)没有击点就没有闪光:包络不会自己打拍子
+    const invented = pulseTimes.filter((time) => time >= 9300)
+    expect(invented).toHaveLength(0)
   })
 
   it('writes per-band spectrum CSS variables directly to the meter target', async () => {
@@ -321,6 +327,57 @@ describe('useBeatAnalyser beat detection', () => {
     const levels = analyser.spectrumLevels.value
     expect(levels[3]).toBeGreaterThan(levels[0] ?? 0)
     expect(levels[3]).toBeGreaterThan(levels[4] ?? 0)
+  })
+
+  it('ignores mid-band hits and lights up on a low percussive hit', async () => {
+    const { analyser, spectrum } = await mountBeatHarness()
+
+    // 持续的低音(bin 1–10 常亮)是谐波成分,不是击点;中频击点(bin 12–60)不在包络的频段里
+    for (let index = 1; index <= 10; index += 1) spectrum[index] = 210
+    runFrames(120)
+    let peak = 0
+    for (let hit = 0; hit < 6; hit += 1) {
+      for (let index = 12; index <= 60; index += 1) spectrum[index] = 200
+      runFrames(4)
+      peak = Math.max(peak, analyser.beatLevel.value)
+      for (let index = 12; index <= 60; index += 1) spectrum[index] = 0
+      runFrames(30)
+    }
+    expect(peak).toBeLessThan(0.15)
+
+    // 低频打击(30–150Hz,bin 1–6 突然抬升)立刻点亮
+    spectrum.fill(0)
+    runFrames(60)
+    for (let index = 1; index <= 6; index += 1) spectrum[index] = 245
+    runFrames(3)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0.5)
+  })
+
+  it('delays the visual by the audio output latency so the flash does not lead the sound', async () => {
+    const { analyser, spectrum } = await mountBeatHarness()
+    const context = AudioContextMock.instances.at(-1)
+    if (!context) throw new Error('context mock missing')
+    // 设备输出延迟 125ms,视觉链路自身约 25ms:画面应晚 100ms 左右再亮
+    context.outputLatency = 0.125
+    runFrames(30)
+    for (let index = 1; index <= 6; index += 1) spectrum[index] = 245
+    runFrames(3)
+    expect(analyser.beatLevel.value).toBeLessThan(0.1)
+    runFrames(6)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0.5)
+  })
+
+  it('adds the manual visual delay on top of the automatic compensation', async () => {
+    const { analyser, spectrum } = await mountBeatHarness({ beatVisualDelay: 100 })
+    // AudioContext 在模块级共享,清掉上一个用例设置的设备延迟,只看手动值
+    const context = AudioContextMock.instances.at(-1)
+    if (context) context.outputLatency = 0
+    runFrames(30)
+    for (let index = 1; index <= 6; index += 1) spectrum[index] = 245
+    runFrames(3)
+    expect(analyser.beatLevel.value).toBeLessThan(0.1)
+    runFrames(6)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0.5)
   })
 
   it('does not accumulate tainted silence across a long hidden gap', async () => {

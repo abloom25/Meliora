@@ -1,6 +1,9 @@
 import { onBeforeUnmount, ref, type Ref } from 'vue'
 import { EQ_BAND_FREQUENCIES, bandFilterType } from '../utils/equalizer'
 import { createAudioContextCompatible } from '../utils/browser'
+import { createBeatEnvelope, sanitizeBeatFlashRate } from '../utils/beat-envelope'
+import { createRealtimeHpss, type RealtimeHpss } from '../utils/hpss'
+import { createTempoRuler } from '../utils/tempo-ruler'
 
 // 模块级音频上下文与 source 缓存：
 // 浏览器对同一个 audio 节点只允许 createMediaElementSource 一次。
@@ -18,12 +21,22 @@ function smoothingAlpha(dtSeconds: number, tauSeconds: number) {
   return 1 - Math.exp(-dtSeconds / tauSeconds)
 }
 
+// byte 频谱(analyser 默认 -100…-30dB 映射到 0…255)到线性幅度的查表,供 HPSS 掩膜使用
+const LINEAR_MAGNITUDE_LUT = new Float32Array(256)
+for (let index = 0; index < 256; index += 1) {
+  LINEAR_MAGNITUDE_LUT[index] = Math.pow(10, (-100 + (index / 255) * 70) / 20)
+}
+
 export interface BeatAnalyserOptions {
   players: readonly HTMLAudioElement[]
   getActiveAudio: () => HTMLAudioElement
   isPlaying: Ref<boolean>
+  /** 可选:闪烁密度设置(每拍最多闪几次),非法值按 1 处理 */
+  beatFlashRate?: Ref<number>
+  /** 可选:闪光延迟微调(ms),叠加在自动输出延迟补偿之上,可为负 */
+  beatVisualDelay?: Ref<number>
   /**
-   * 可选：返回需要每帧同步 `--beat-level` CSS 变量的 DOM 节点列表。
+   * 可选：返回需要每帧同步 `--beat-level` / `--beat-sustain` CSS 变量的 DOM 节点列表。
    * 直接 setProperty 到这些节点可以避免根元素 :style 触发整棵子树样式重算，
    * 大幅降低 UpdateLayoutTree 频次。
    */
@@ -59,7 +72,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   let lastSpectrumCssValues: string[] = []
   let lastSpectrumTarget: HTMLElement | null = null
 
-  function writeBeatLevelToTargets(value: number) {
+  function writeBeatLevelToTargets(level: number, sustain = 0) {
     if (!getBeatTargets) return
     const targets = getBeatTargets()
     const primary = targets.find((el) => el && el.isConnected) ?? null
@@ -68,13 +81,17 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       lastBeatTarget = null
       return
     }
-    const next = value.toFixed(3)
+    const nextLevel = level.toFixed(3)
+    const nextSustain = sustain.toFixed(3)
+    const next = `${nextLevel}/${nextSustain}`
     if (primary === lastBeatTarget && next === lastBeatLevelCssValue) return
     lastBeatLevelCssValue = next
     lastBeatTarget = primary
     for (const el of targets) {
       // isConnected 守卫：组件卸载或 v-if 隐藏时跳过，避免脏写已脱离 DOM 的节点。
-      if (el && el.isConnected) el.style.setProperty('--beat-level', next)
+      if (!el || !el.isConnected) continue
+      el.style.setProperty('--beat-level', nextLevel)
+      el.style.setProperty('--beat-sustain', nextSustain)
     }
   }
 
@@ -109,7 +126,11 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   let audioContext: AudioContext | null = null
   let analyser: AnalyserNode | null = null
   let frequencyData: Uint8Array<ArrayBuffer> | null = null
-  let previousFrequencyData: Float32Array | null = null
+  // 实时 HPSS 给出每 bin 的打击掩膜;背景亮度只看打击成分在 30–150Hz 的线性功率
+  let hpss: RealtimeHpss | null = null
+  let linearMagnitude: Float32Array | null = null
+  // 速度尺子吃的是 dB 域(byte/255)打击成分低频正向通量,峰值拾取需要这个量纲
+  let prevPercussiveLow: Float32Array | null = null
   const connectedSources: Array<{
     source: MediaElementAudioSourceNode
     target: AudioNode
@@ -121,31 +142,25 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   const bandBaselines = [0, 0, 0, 0, 0]
   // 每段上一帧电平:帧间突变(鼓点/拨弦/咬字)瞬态直通,不等待基线拉开差距
   const prevBandDbs = [0, 0, 0, 0, 0]
-  // ---- 节拍检测状态(SuperFlux ODF + ACF 节拍跟踪)----
-  // ODF 以固定 10ms 槽采样,与显示帧率解耦;6s 环形历史供速度/相位估计
-  const ODF_SLOT_MS = 10
-  const ODF_HISTORY = 600
-  const odfHistory = new Float32Array(ODF_HISTORY)
-  let odfOriginMs = 0
-  let odfSlotCount = 0
-  let currentSlotStartMs = 0
-  let currentSlotFlux = 0
-  let odfPeak = 0.1
-  let lastOnsetSlot = -1000
-  let lastOnsetMs = 0
-  // 首次 onset 检出前不做置信度衰减:lastOnsetMs 初始为 0 时
-  // "2s 无 onset" 恒真,会把前奏噪声估出的垃圾 tempo 衰减掉(语义混淆)
-  let hasOnset = false
+  // ---- 节奏包络(实时 HPSS → 打击成分低频功率 → utils/beat-envelope)----
+  // 这是表现效果的驱动源:一条连续的快起慢落包络,不做击点判定、不选乐器。
+  // 真歌离线实验(9 首,EDM 到钢琴独奏)确认:有鼓的歌拍点覆盖约 90%,拍外误闪每秒 0.2 次左右
+  const envelope = createBeatEnvelope()
+  // 输出延迟补偿:analyser 读到的是送往声卡之前的信号,声音真正到耳朵还要再等
+  // baseLatency + outputLatency(Windows 共享模式 20–50ms,蓝牙耳机常在 100ms 以上)。
+  // 视觉链路自己只有约 25ms(FFT 窗中心 + 平滑 + 合成上屏),所以画面会先于声音。
+  // 把包络按差值延后再写入 CSS 变量;Safari 拿不到 outputLatency,按 0 处理即不延迟
+  // 用户还可以在设置里手动加减:设备报的 outputLatency 不一定准(蓝牙编解码延迟往往不在里面)
+  const VISUAL_PIPELINE_MS = 25
+  const MAX_VISUAL_DELAY_MS = 600
+  const levelHistory: Array<{ at: number; level: number; sustain: number }> = []
+  // 速度尺子只提供拍长:决定包络释放时长与「闪烁频率」档位的最小间距
+  const tempoRuler = createTempoRuler()
   // pauseBeatAnalysis 会把上一帧频谱清零,恢复后首帧对零向量求差分会产生
   // 全频谱伪 flux;该标志让恢复首帧跳过 ODF 采样(只更新上一帧基线)
   let skipNextOdfSample = false
-  // 节拍跟踪:ACF 估计周期(40–222 BPM),梳齿对齐相位,预测式调度节拍脉冲
-  let tempoPeriodSlots = 0
-  let tempoConfidence = 0
-  let nextBeatAt = 0
-  let lastTempoEstimateMs = 0
-  // 节拍脉冲包络:触发时抬升并按时间常数衰减,背景呈现呼吸而非闪烁
-  let beatImpulse = 0
+  // 慢包络:低频能量高出自适应底的部分,给背景一点随段落起伏的呼吸(CSS 侧权重很低)
+  let sustainLevel = 0
   let lastFrameAt = 0
   let visibilityListenerRegistered = false
   let isUnmounted = false
@@ -180,25 +195,47 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     }
     analyser = null
     frequencyData = null
-    previousFrequencyData = null
+    hpss = null
+    linearMagnitude = null
+    prevPercussiveLow = null
+  }
+
+  function visualDelayMs() {
+    const context = audioContext as (AudioContext & { outputLatency?: number }) | null
+    const deviceLatencyMs = ((context?.baseLatency ?? 0) + (context?.outputLatency ?? 0)) * 1000
+    const manual = options.beatVisualDelay?.value
+    const manualMs = typeof manual === 'number' && Number.isFinite(manual) ? manual : 0
+    return clamp(deviceLatencyMs - VISUAL_PIPELINE_MS + manualMs, 0, MAX_VISUAL_DELAY_MS)
+  }
+
+  // 延迟线:记录每帧的包络,取"延迟量之前"那一帧写出;延迟为 0 时原样返回
+  function delayedLevels(now: number, level: number, sustain: number) {
+    const delay = visualDelayMs()
+    if (delay <= 0) {
+      levelHistory.length = 0
+      return { level, sustain }
+    }
+    levelHistory.push({ at: now, level, sustain })
+    const target = now - delay
+    let picked = levelHistory[0] ?? { at: now, level, sustain }
+    while (levelHistory.length > 1 && (levelHistory[1]?.at ?? Infinity) <= target) {
+      levelHistory.shift()
+      picked = levelHistory[0] ?? picked
+    }
+    // 还没积累到延迟量的时长:先保持暗,避免开播首帧提前亮
+    if (picked.at > target) return { level: 0, sustain: 0 }
+    return { level: picked.level, sustain: picked.sustain }
   }
 
   function resetBeatTracking() {
-    odfHistory.fill(0)
+    levelHistory.length = 0
+    envelope.reset()
+    tempoRuler.reset()
     bandBaselines.fill(0)
     prevBandDbs.fill(0)
-    odfSlotCount = 0
-    currentSlotStartMs = 0
-    currentSlotFlux = 0
-    odfPeak = 0.1
-    lastOnsetSlot = -1000
-    lastOnsetMs = 0
-    hasOnset = false
-    tempoPeriodSlots = 0
-    tempoConfidence = 0
-    nextBeatAt = 0
-    lastTempoEstimateMs = 0
-    beatImpulse = 0
+    hpss?.reset()
+    prevPercussiveLow?.fill(0)
+    sustainLevel = 0
   }
 
   function stopBeatAnalysis() {
@@ -208,7 +245,8 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     resetBeatTracking()
     lastFrameAt = 0
     writeBeatLevelToTargets(0)
-    if (previousFrequencyData) previousFrequencyData.fill(0)
+    prevPercussiveLow?.fill(0)
+    hpss?.reset()
     spectrumLevels.value = spectrumLevels.value.map(() => 0.08)
     writeSpectrumToTargets(spectrumLevels.value)
     if (visibilityListenerRegistered) {
@@ -221,7 +259,8 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     if (!beatFrame) return
     window.cancelAnimationFrame(beatFrame)
     beatFrame = 0
-    if (previousFrequencyData) previousFrequencyData.fill(0)
+    prevPercussiveLow?.fill(0)
+    hpss?.reset()
     skipNextOdfSample = true
     // 重置污染检测计时,避免恢复后首帧把整段后台时长一次性累加
     taintedSilenceMs = 0
@@ -289,166 +328,44 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     return sum / 255 / Math.max(1, end - start)
   }
 
-  // SuperFlux(Böck & Widmer, ISMIR 2013):对数域频谱(byte 数据本身是 dB 映射,
-  // 近似对数压缩)与其最大值滤波后的上一帧求正向差分总和。最大值滤波把上一帧
-  // 频谱在频率方向"拓宽"±3 bin,抑制颤音/滑音造成的伪 onset
-  function superFluxODF(data: Uint8Array<ArrayBuffer>, toBin: number) {
-    if (!previousFrequencyData) return 0
-    const prevLength = previousFrequencyData.length
-    const end = Math.max(5, Math.min(data.length - 4, toBin))
-    let flux = 0
-    for (let index = 1; index < end; index += 1) {
-      const current = (data[index] ?? 0) / 255
-      let widened = 0
-      for (let k = index - 3; k <= index + 3; k += 1) {
-        const value = previousFrequencyData[clamp(k, 0, prevLength - 1)] ?? 0
-        if (value > widened) widened = value
-      }
-      const rise = current - widened
-      if (rise > 0) flux += rise
+  // 打击成分 30–150Hz 的线性功率(每 bin 平均),包络的输入
+  function percussiveLowPower(
+    magnitude: Float32Array,
+    mask: Float32Array,
+    fromBin: number,
+    toBin: number,
+  ) {
+    const start = Math.max(1, fromBin)
+    const end = Math.max(start + 1, Math.min(magnitude.length, toBin))
+    let power = 0
+    for (let index = start; index < end; index += 1) {
+      const value = magnitude[index] ?? 0
+      power += value * value * (mask[index] ?? 0.5)
     }
-    return flux
+    return power / (end - start)
+  }
+
+  // 打击成分低频 dB 域正向通量(每 bin 平均),速度尺子的 ODF
+  function percussiveLowFlux(
+    data: Uint8Array<ArrayBuffer>,
+    mask: Float32Array,
+    previous: Float32Array,
+    fromBin: number,
+    toBin: number,
+  ) {
+    const start = Math.max(1, fromBin)
+    const end = Math.max(start + 1, Math.min(data.length, toBin))
+    let flux = 0
+    for (let index = start; index < end; index += 1) {
+      const compressed = ((data[index] ?? 0) / 255) * (mask[index] ?? 0.5)
+      const rise = compressed - (previous[index] ?? 0)
+      if (rise > 0) flux += rise
+      previous[index] = compressed
+    }
+    return flux / (end - start)
   }
 
   const TAINTED_SILENCE_GRACE_MS = 3000
-
-  function histAt(absSlot: number) {
-    if (absSlot < 0 || absSlot >= odfSlotCount) return 0
-    return odfHistory[absSlot % ODF_HISTORY] ?? 0
-  }
-
-  function slotTime(slot: number) {
-    return odfOriginMs + slot * ODF_SLOT_MS
-  }
-
-  // 把帧内 ODF 采样归并进固定 10ms 槽;槽满即入历史并评估上一槽是否 onset。
-  // 帧率波动只影响每帧写入次数,不影响 ODF 的时间基准
-  function pushOdfSample(now: number, flux: number) {
-    if (currentSlotStartMs === 0) {
-      currentSlotStartMs = now
-      odfOriginMs = now
-    }
-    if (now - currentSlotStartMs > ODF_HISTORY * ODF_SLOT_MS) {
-      // 长时间暂停/后台挂起:历史整体作废,从当前时刻重建
-      resetBeatTracking()
-      currentSlotStartMs = now
-      odfOriginMs = now
-    }
-    currentSlotFlux = Math.max(currentSlotFlux, flux)
-    while (now - currentSlotStartMs >= ODF_SLOT_MS) {
-      odfHistory[odfSlotCount % ODF_HISTORY] = currentSlotFlux
-      odfSlotCount += 1
-      currentSlotFlux = 0
-      currentSlotStartMs += ODF_SLOT_MS
-      evaluateOnsetSlot(odfSlotCount - 2)
-    }
-  }
-
-  // Böck peak-picking:局部极大 + 移动均值自适应阈值 + 120ms 不应期
-  function evaluateOnsetSlot(slot: number) {
-    if (slot < 2) return
-    const prev = histAt(slot - 1)
-    const cur = histAt(slot)
-    const next = histAt(slot + 1)
-    if (!(cur > prev && cur >= next)) return
-    let sum = 0
-    let count = 0
-    for (let i = Math.max(0, slot - 100); i < slot; i += 1) {
-      sum += histAt(i)
-      count += 1
-    }
-    const mean = count > 0 ? sum / count : 0
-    if (cur < mean * 1.5 + 0.02) return
-    if (slot - lastOnsetSlot < 12) return
-    lastOnsetSlot = slot
-    lastOnsetMs = slotTime(slot)
-    hasOnset = true
-    odfPeak = Math.max(cur, odfPeak * 0.995, 0.05)
-    handleOnset(lastOnsetMs, clamp(cur / odfPeak, 0, 1))
-  }
-
-  function handleOnset(onsetMs: number, strength: number) {
-    const periodMs = tempoPeriodSlots * ODF_SLOT_MS
-    if (tempoConfidence >= 0.3 && periodMs > 0 && nextBeatAt > 0) {
-      // onset 只用于相位校正:与最近的预测节拍比对,渐进对齐(容差 ±20% 周期)
-      const nearest = nextBeatAt + Math.round((onsetMs - nextBeatAt) / periodMs) * periodMs
-      const error = onsetMs - nearest
-      if (Math.abs(error) < periodMs * 0.2) nextBeatAt += error * 0.25
-      return
-    }
-    // 无可靠节拍估计(前奏/氛围/自由节奏):退回反应式触发,保持即时响应
-    beatImpulse = Math.max(beatImpulse, 0.5 + strength * 0.5)
-  }
-
-  // Davies/Plumbley 因果节拍跟踪:对 ODF 历史做自相关估计周期(40–222 BPM,
-  // 高斯权重偏向 ~110BPM 抑制半速/倍速歧义),再穷举相位使梳齿与 ODF 脉冲对齐
-  function estimateTempo() {
-    const N = Math.min(odfSlotCount, 400)
-    if (N < 250) return
-    const h = new Float32Array(N)
-    let power = 0
-    for (let i = 0; i < N; i += 1) {
-      const value = histAt(odfSlotCount - N + i)
-      h[i] = value
-      power += value * value
-    }
-    if (power < 1e-6) {
-      tempoConfidence = 0
-      return
-    }
-    let bestTau = 0
-    let bestWeighted = 0
-    let bestRaw = 0
-    for (let tau = 27; tau <= 150; tau += 1) {
-      let score = 0
-      for (let n = tau; n < N; n += 1) score += (h[n] ?? 0) * (h[n - tau] ?? 0)
-      const bpm = 60000 / (tau * ODF_SLOT_MS)
-      const weight = Math.exp(-0.5 * ((bpm - 110) / 45) ** 2)
-      const weighted = score * weight
-      if (weighted > bestWeighted) {
-        bestWeighted = weighted
-        bestTau = tau
-        bestRaw = score
-      }
-    }
-    tempoConfidence = clamp(bestRaw / power, 0, 1)
-    tempoPeriodSlots = bestTau
-    let bestPhase = 0
-    let bestPhaseScore = -1
-    for (let phase = 0; phase < bestTau; phase += 1) {
-      let score = 0
-      for (let n = N - 1 - phase; n >= 0; n -= bestTau) score += h[n] ?? 0
-      if (score > bestPhaseScore) {
-        bestPhaseScore = score
-        bestPhase = phase
-      }
-    }
-    const periodMs = bestTau * ODF_SLOT_MS
-    const candidate = slotTime(odfSlotCount - 1 - bestPhase + bestTau)
-    // 与当前预测差距小则渐进调整,避免节拍位置跳变;差距大(失步/重估)才重置
-    if (nextBeatAt === 0 || Math.abs(candidate - nextBeatAt) > periodMs * 0.35) {
-      nextBeatAt = candidate
-    } else {
-      nextBeatAt += (candidate - nextBeatAt) * 0.2
-    }
-  }
-
-  // 预测式节拍调度:到点即触发脉冲,而不是等 onset 出现再反应;
-  // 首次 onset 后 2s 无新 onset 时置信度衰减,间奏不会机械地一直跳
-  function scheduleBeats(now: number, dt: number) {
-    if (hasOnset && now - lastOnsetMs > 2000) tempoConfidence *= Math.exp(-dt / 1)
-    if (tempoConfidence >= 0.3 && tempoPeriodSlots > 0 && nextBeatAt > 0) {
-      const periodMs = tempoPeriodSlots * ODF_SLOT_MS
-      let guard = 0
-      while (now >= nextBeatAt && guard < 3) {
-        // 错过超过一个周期的节拍不重放
-        if (now - nextBeatAt <= periodMs) beatImpulse = Math.max(beatImpulse, 0.85)
-        nextBeatAt += periodMs
-        guard += 1
-      }
-      if (now - nextBeatAt > periodMs * 2) nextBeatAt = 0
-    }
-  }
 
   function updateBeatLevel() {
     const activeAudio = getActiveAudio()
@@ -460,9 +377,9 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       taintedSilenceMs = 0
       lastBeatFrameAt = 0
       lastObservedCurrentTime = activeAudio.currentTime
-      beatImpulse = 0
       beatLevel.value *= Math.exp(-dt / 0.13)
-      writeBeatLevelToTargets(beatLevel.value)
+      sustainLevel *= Math.exp(-dt / 0.3)
+      writeBeatLevelToTargets(beatLevel.value, sustainLevel)
       spectrumLevels.value = spectrumLevels.value.map((level) =>
         Math.max(0.08, level * Math.exp(-dt / 0.084)),
       )
@@ -503,9 +420,11 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       }
     }
     lastBeatFrameAt = now
-    // 确保 previousFrequencyData 长度与 data 一致（在任何读操作之前执行，防止旧数据残留导致频谱计算异常）
-    if (!previousFrequencyData || previousFrequencyData.length !== data.length) {
-      previousFrequencyData = new Float32Array(data.length)
+    // 分离缓冲与 data 等长(fftSize 变化时重建),在任何读操作之前执行
+    if (!hpss || !linearMagnitude || !prevPercussiveLow || linearMagnitude.length !== data.length) {
+      hpss = createRealtimeHpss({ bins: data.length })
+      linearMagnitude = new Float32Array(data.length)
+      prevPercussiveLow = new Float32Array(data.length)
     }
     // 频段按 Hz 划分再换算 bin:fftSize 或采样率变化时语义不变。
     // 底鼓基频集中在 30–130Hz,旧实现(fftSize 256)一个 bin 就 ~187Hz,
@@ -518,28 +437,49 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     const lowMidEnergy = bandEnergy(data, binOf(260), binOf(2000))
     const beatEnergy = kickEnergy * 0.62 + bassEnergy * 0.26 + lowMidEnergy * 0.12
 
-    // 自适应能量底:EMA 跟踪近期平均能量,持续低音提供少量环境亮度,
-    // 避免纯节拍驱动在持续 bassline 下完全熄灭
+    // 自适应能量底:EMA 跟踪近期平均能量,持续低音提供少量环境亮度
     energyFloor += (beatEnergy - energyFloor) * smoothingAlpha(dt, 1.1)
 
-    // SuperFlux ODF 并入 10ms 槽(onset 评估在槽 finalize 时进行),
-    // 然后做预测式节拍调度与周期/相位重估;恢复首帧跳过采样避免伪 flux
-    const odfSample = skipNextOdfSample ? 0 : superFluxODF(data, binOf(8000))
-    skipNextOdfSample = false
-    pushOdfSample(now, odfSample)
-    scheduleBeats(now, dt)
-    if (now - lastTempoEstimateMs >= 500) {
-      lastTempoEstimateMs = now
-      estimateTempo()
+    // 实时 HPSS 掩膜 → 打击成分 30–150Hz 功率 → 连续包络;恢复首帧跳过差分避免伪 flux
+    for (let index = 0; index < data.length; index += 1) {
+      linearMagnitude[index] = LINEAR_MAGNITUDE_LUT[data[index] ?? 0] ?? 0
     }
-    beatImpulse *= Math.exp(-dt / 0.23)
+    const percussiveMask = hpss.process(linearMagnitude).percussiveMask
+    const lowFrom = binOf(30)
+    const lowTo = binOf(150)
+    const rulerFlux = percussiveLowFlux(data, percussiveMask, prevPercussiveLow, lowFrom, lowTo)
+    const lowPower = percussiveLowPower(linearMagnitude, percussiveMask, lowFrom, lowTo)
+    const flashRate = sanitizeBeatFlashRate(options.beatFlashRate?.value)
+    if (skipNextOdfSample) {
+      skipNextOdfSample = false
+      tempoRuler.pushSample(now, 0)
+      // 用当前功率"预热"包络的上一帧,本帧不产生上升
+      envelope.update({
+        power: lowPower,
+        dtSeconds: 0.001,
+        nowMs: now,
+        periodMs: 0,
+        rate: flashRate,
+      })
+    } else {
+      tempoRuler.pushSample(now, rulerFlux)
+    }
+    const tempo = tempoRuler.getState()
+    const rawLevel = envelope.update({
+      power: lowPower,
+      dtSeconds: dt,
+      nowMs: now,
+      periodMs: tempo.locked ? tempo.periodMs : 0,
+      rate: flashRate,
+    })
 
-    const sustain = clamp((beatEnergy - energyFloor * 1.05) * 0.9, 0, 0.16)
-    const target = clamp(beatImpulse + sustain, 0, 1)
-    beatLevel.value +=
-      (target - beatLevel.value) * smoothingAlpha(dt, target > beatLevel.value ? 0.028 : 0.11)
+    const sustainTarget = clamp((beatEnergy - energyFloor * 1.05) * 6, 0, 1)
+    sustainLevel +=
+      (sustainTarget - sustainLevel) * smoothingAlpha(dt, sustainTarget > sustainLevel ? 0.15 : 0.6)
+    const delayed = delayedLevels(now, rawLevel, sustainLevel)
+    beatLevel.value = delayed.level
     // 高频写入：直接 setProperty 到目标节点，跳过 Vue reactivity 与根 :style 路径
-    writeBeatLevelToTargets(beatLevel.value)
+    writeBeatLevelToTargets(delayed.level, delayed.sustain)
 
     // 频谱柱五段 Hz 划分(sub/low/mid/high/air)
     const spectrumBands: Array<{ from: number; to: number }> = [
@@ -594,10 +534,6 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     })
     spectrumLevels.value = nextSpectrum
     writeSpectrumToTargets(nextSpectrum)
-    // 将当前帧数据保存为"上一帧"供下一帧频谱通量计算使用
-    for (let index = 0; index < data.length; index += 1) {
-      previousFrequencyData[index] = (data[index] ?? 0) / 255
-    }
     beatFrame = window.requestAnimationFrame(updateBeatLevel)
   }
 
@@ -662,7 +598,6 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
         eqOutput.connect(analyser)
         analyser.connect(audioContext.destination)
         frequencyData = new Uint8Array(analyser.frequencyBinCount)
-        previousFrequencyData = new Float32Array(analyser.frequencyBinCount)
         options.onEqFiltersReady?.(eqFilters)
       }
       if (audioContext.state === 'suspended') await audioContext.resume()
