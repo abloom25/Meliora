@@ -85,6 +85,7 @@
     currentTrack,
     isPlaying,
     currentTime,
+    lyricAnimation: computed(() => settings.value.lyricAnimation),
   })
   const { canInstall, isInstalled, install, iosInstallAvailable } = usePwaInstall()
 

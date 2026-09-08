@@ -13,6 +13,8 @@ interface LyricsWindowOptions {
   isPlaying: Ref<boolean>
   /** 播放位置(秒)。小窗内的逐字扫光靠它驱动自己的外推时钟 */
   currentTime: Ref<number>
+  /** 歌词动画开关。关掉后小窗同样停掉逐字扫光,整行一次性高亮 */
+  lyricAnimation: Ref<boolean>
 }
 
 interface CachedNodes {
@@ -51,8 +53,9 @@ const popupStyles = `
   .main { display: block; }
   /* 逐字扫光。弹窗文档里没有 @property 注册,var() 必须带兜底值,
      否则未写入的音节会让整条 background-image 失效、文字变透明 */
-  /* padding 撑开背景绘制盒、负 margin 抵消排版影响:否则 background-clip: text 会把 g/y/p 的降部切掉 */
-  .word { display: inline-block; padding: .08em 0 .16em; margin: -.08em 0 -.16em; color: var(--lyric-fill); translate: 0 calc(var(--w,1) * -.05em); }
+  /* padding 撑开背景绘制盒、负 margin 抵消排版影响:否则 background-clip: text 会把 g/y/p 的降部切掉;
+     横向同理——letter-spacing: -.035em 让盒宽比末字字形窄,不留余量字会被左右削掉一道 */
+  .word { display: inline-block; padding: .08em .12em .16em; margin: -.08em -.12em -.16em; color: var(--lyric-fill); translate: 0 calc(var(--w,1) * -.05em); }
   @supports (background-clip: text) or (-webkit-background-clip: text) {
     /* --e 是前沿柔化宽度的缩放,进度为 0 或 1 时收到 0;
        否则未唱词的左边缘会被画出一段亮色渐变 */
@@ -76,7 +79,12 @@ function isWindowClosed(target: Window): boolean {
   }
 }
 
-export function useLyricsWindow({ currentTrack, isPlaying, currentTime }: LyricsWindowOptions) {
+export function useLyricsWindow({
+  currentTrack,
+  isPlaying,
+  currentTime,
+  lyricAnimation,
+}: LyricsWindowOptions) {
   const snapshot = ref<LyricsSnapshot>({
     lines: [],
     activeIndex: -1,
@@ -333,6 +341,9 @@ export function useLyricsWindow({ currentTrack, isPlaying, currentTime }: Lyrics
 
   function bindKaraoke() {
     releaseKaraoke()
+    // 扫光关闭时不接管任何音节:释放内联的 --w / --e 后,
+    // 样式里的兜底值 var(--w,1) 让整行按已唱完渲染,等同整行高亮
+    if (!lyricAnimation.value) return
     if (!cachedNodes || activeSlot < 0 || !activeWords?.length) return
     const spans = cachedNodes.wordNodes[activeSlot]
     // 数量对不上说明 DOM 与快照不同步,这一轮先不接管,下一次 render 会重绑
@@ -592,6 +603,16 @@ export function useLyricsWindow({ currentTrack, isPlaying, currentTime }: Lyrics
     },
     { immediate: true },
   )
+  watch(lyricAnimation, () => {
+    // 开关切换后立刻接管/交还当前行,不必等到下一次换行
+    bindKaraoke()
+    if (karaokeSpans.length) {
+      writeKaraoke(clock.read(performance.now()))
+      startKaraoke()
+    } else {
+      stopKaraoke()
+    }
+  })
   watch(
     [
       () => currentTrack.value?.id,

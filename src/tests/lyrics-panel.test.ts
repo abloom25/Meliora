@@ -752,6 +752,56 @@ describe('LyricsPanel scrolling alignment', () => {
     ).toBe('')
   })
 
+  it('stops the syllable scan when lyric animation is off and hands it back when re-enabled', async () => {
+    // 扫光本身就是动画:每帧写入的是内联自定义属性,优先级高于任何 CSS 规则,
+    // 关掉「歌词动画」必须在 JS 侧拦住,否则关了开关字还在一个个亮
+    mockedLoadTrackLyrics.mockResolvedValueOnce(karaokeLines)
+    const { wrapper, store } = await mountLyricsPanel()
+    await flushVueUpdates()
+    setPanelLayout(wrapper)
+
+    await moveTo(store, wrapper, 0.5)
+    const word = wrapper
+      .findAll<HTMLElement>('.lyric-line')[0]!
+      .findAll<HTMLElement>('.lyric-word')[0]!
+    expect(word.element.style.getPropertyValue('--lyric-word-fill')).toBe('0.500')
+
+    store.settings.lyricAnimation = false
+    await flushVueUpdates()
+
+    // 内联值被释放,整行回落到 CSS 的 --lyric-word-fill: 1,表现为整行高亮
+    expect(word.element.style.getPropertyValue('--lyric-word-fill')).toBe('')
+    expect(word.element.style.getPropertyValue('--lyric-word-edge')).toBe('')
+
+    store.isPlaying = true
+    await flushVueUpdates()
+    vi.advanceTimersByTime(400)
+    flushAnimationFrames()
+    await flushVueUpdates()
+    expect(word.element.style.getPropertyValue('--lyric-word-fill')).toBe('')
+
+    store.settings.lyricAnimation = true
+    await flushVueUpdates()
+    expect(word.element.style.getPropertyValue('--lyric-word-fill')).not.toBe('')
+  })
+
+  it('keeps the syllable scan off for a line that becomes active while animation is disabled', async () => {
+    mockedLoadTrackLyrics.mockResolvedValueOnce(karaokeLines)
+    const { wrapper, store } = await mountLyricsPanel()
+    await flushVueUpdates()
+    setPanelLayout(wrapper)
+
+    store.settings.lyricAnimation = false
+    await flushVueUpdates()
+    await moveTo(store, wrapper, 5.5)
+
+    const active = wrapper.findAll<HTMLElement>('.lyric-line')[1]!
+    expect(active.classes()).toContain('active')
+    for (const word of active.findAll<HTMLElement>('.lyric-word')) {
+      expect(word.element.style.getPropertyValue('--lyric-word-fill')).toBe('')
+    }
+  })
+
   it('advances the syllable fill from the extrapolated clock between timeupdates', async () => {
     mockedLoadTrackLyrics.mockResolvedValueOnce(karaokeLines)
     const { wrapper, store } = await mountLyricsPanel()

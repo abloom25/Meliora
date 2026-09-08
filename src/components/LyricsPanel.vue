@@ -80,6 +80,8 @@
   function handleReducedMotionChange(event: MediaQueryListEvent | MediaQueryList) {
     prefersReducedMotion = event.matches
     if (prefersReducedMotion) cancelLyricsScroll()
+    bindKaraoke(activeIndex.value)
+    renderOnce()
   }
 
   const {
@@ -342,6 +344,13 @@
   let karaokeTargets: KaraokeTarget[] = []
   let karaokeIndex = -1
 
+  // 逐字扫光本身就是动画,关掉「歌词动画」后不该继续跑。
+  // 必须在 JS 侧拦住:每帧写入的是内联自定义属性,优先级高于
+  // .animation-disabled 里的任何声明,CSS 关不掉它
+  function karaokeEnabled(): boolean {
+    return settings.value.lyricAnimation && !prefersReducedMotion
+  }
+
   function releaseKaraoke() {
     for (const target of karaokeTargets) {
       if (!target.element.isConnected) continue
@@ -354,6 +363,12 @@
 
   function bindKaraoke(index: number) {
     releaseKaraoke()
+    // 释放内联属性后整行回落到 .lyric-line 上的 --lyric-word-fill: 1,
+    // 表现为整行一次性高亮,和没有逐字数据的行一致
+    if (!karaokeEnabled()) {
+      karaokeIndex = index
+      return
+    }
     const group = index < 0 ? [] : activeGroup.value
     const targets: KaraokeTarget[] = []
 
@@ -440,8 +455,10 @@
     const time = readClock()
     syncActiveLyric(time)
     // 行节点被 Vue 重建(切换译文显示、字号变化)后旧的音节引用会失效,
-    // 这里按索引比对自愈,不依赖任何一处的调用时序
-    if (karaokeIndex !== activeIndex.value || !karaokeTargets[0]?.element.isConnected) {
+    // 这里按索引比对自愈,不依赖任何一处的调用时序。
+    // 空目标是合法状态(整行没有逐字数据、或扫光被关闭),不能当成失效反复重绑
+    const head = karaokeTargets[0]
+    if (karaokeIndex !== activeIndex.value || (head && !head.element.isConnected)) {
       bindKaraoke(activeIndex.value)
     }
     writeKaraoke(time)
@@ -559,6 +576,9 @@
     () => settings.value.lyricAnimation,
     (enabled) => {
       if (!enabled) cancelLyricsScroll()
+      // 开关切换后立刻接管/交还当前行的扫光,不必等下一次换行
+      bindKaraoke(activeIndex.value)
+      renderOnce()
       scheduleRealign({ animate: false })
     },
   )
@@ -873,12 +893,20 @@
      --lyric-word-fill 是这个音节的演唱进度(0…1),由 JS 每帧写入当前行。
      前沿留 --lyric-edge 的渐变过渡,看起来是"亮起来"而不是"被刷过去" */
   .lyric-word {
+    /* 左右各留出的绘制余量。字形墨迹横向溢出行内盒的来源有两处:
+       行上的 letter-spacing: -0.035em 会让盒宽比最后一个字的字形窄,
+       以及 690 字重下 J / f / y 这类字形本身带负边距。
+       溢出的那一条同样没有背景可裁,表现为字被左右削掉一道 */
+    --lyric-word-bleed: 0.12em;
+
     display: inline-block;
     /* background-clip: text 只在元素自身的背景盒内绘制。行高 1.18 比字体的自然行盒紧,
        g / y / p / q 的降部会伸出盒外,那一截没有背景可裁就被切掉。
-       用 padding 撑开绘制盒、再用等量负 margin 抵消掉它对排版的影响 */
-    padding: 0.08em 0 0.16em;
-    margin: -0.08em 0 -0.16em;
+       用 padding 撑开绘制盒、再用等量负 margin 抵消掉它对排版的影响。
+       横向余量左右对称,扫光边界仍按盒宽百分比推进:两端各偏 bleed、正中零偏差,
+       最大偏移远小于 --lyric-edge 的柔化宽度,不需要额外补偿渐变色标 */
+    padding: 0.08em var(--lyric-word-bleed) 0.16em;
+    margin: -0.08em calc(var(--lyric-word-bleed) * -1) -0.16em;
     /* 不支持 background-clip: text 时保持普通文字颜色。
        没有这层兜底,color: transparent 会让整屏歌词直接消失 */
     color: var(--lyric-fill);

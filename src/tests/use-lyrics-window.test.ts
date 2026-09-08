@@ -37,6 +37,7 @@ function mountLyricsWindowHarness(popup = createPopupWindow()) {
   vi.spyOn(window, 'open').mockReturnValue(popup)
   const isPlaying = ref(false)
   const currentTime = ref(0)
+  const lyricAnimation = ref(true)
 
   const track = reactive<Track>({
     id: 'track-1',
@@ -51,14 +52,14 @@ function mountLyricsWindowHarness(popup = createPopupWindow()) {
   const wrapper = mount(
     defineComponent({
       setup() {
-        api = useLyricsWindow({ currentTrack: ref(track), isPlaying, currentTime })
+        api = useLyricsWindow({ currentTrack: ref(track), isPlaying, currentTime, lyricAnimation })
         return {}
       },
       template: '<div />',
     }),
   )
 
-  return { api, popup, track, wrapper, isPlaying, currentTime }
+  return { api, popup, track, wrapper, isPlaying, currentTime, lyricAnimation }
 }
 
 function runPopupFrames(popup: Window, count: number, stepMs = 16) {
@@ -207,6 +208,45 @@ describe('useLyricsWindow', () => {
     // 非当前行不写内联值,CSS 的 var() 兜底把它们渲染成已唱完
     const idle = popup.document.querySelector<HTMLElement>('.line:not(.active) .word')
     expect(idle?.style.getPropertyValue('--w')).toBe('')
+  })
+
+  it('stops the syllable scan in the popup when lyric animation is off', async () => {
+    const { api, popup, currentTime, lyricAnimation } = mountLyricsWindowHarness()
+    await api.toggleLyricsWindow()
+    await nextTick()
+
+    currentTime.value = 0.5
+    await nextTick()
+    api.setSnapshot({
+      status: 'ready',
+      activeIndex: 0,
+      lines: [
+        {
+          time: 0,
+          endTime: 2,
+          text: 'ze ro',
+          wordSource: 'native',
+          words: [
+            { time: 0, duration: 1, text: 'ze', trailingSpace: true },
+            { time: 1, duration: 1, text: 'ro' },
+          ],
+        },
+      ],
+    })
+
+    const word = popup.document.querySelector<HTMLElement>('.line.active .word')!
+    expect(word.style.getPropertyValue('--w')).toBe('0.500')
+
+    lyricAnimation.value = false
+    await nextTick()
+
+    // 释放内联值后由样式里的 var(--w,1) 兜底成"已唱完",整行一次性高亮
+    expect(word.style.getPropertyValue('--w')).toBe('')
+    expect(word.style.getPropertyValue('--e')).toBe('')
+
+    lyricAnimation.value = true
+    await nextTick()
+    expect(word.style.getPropertyValue('--w')).toBe('0.500')
   })
 
   it('drives the fill from its own frame loop while playing', async () => {
