@@ -4,12 +4,6 @@
   "installCommand": "pnpm install --frozen-lockfile",
   "buildCommand": "pnpm build",
   "outputDirectory": "dist",
-  "git": {
-    "deploymentEnabled": {
-      "preview": false,
-      "feat/beat-background-highlight": false
-    }
-  },
   "headers": [
     {
       "source": "/(.*)",
