@@ -371,9 +371,12 @@ describe('player settings migration', () => {
       smoothTrackChange: 'yes' as unknown as boolean,
       preloadNextTrack: false,
       dynamicBackground: 'no' as unknown as boolean,
+      beatFlash: 'off' as unknown as boolean,
       backgroundBlur: 999,
       backgroundSaturation: Number.POSITIVE_INFINITY,
       beatBrightness: -1,
+      beatFlashRate: 9,
+      beatVisualDelay: 999,
       lyricFontSize: '22' as unknown as number,
       lyricAnimation: null as unknown as boolean,
       lyricTranslation: null as unknown as boolean,
@@ -393,9 +396,12 @@ describe('player settings migration', () => {
     expect(result.smoothTrackChange).toBe(true)
     expect(result.preloadNextTrack).toBe(false)
     expect(result.dynamicBackground).toBe(true)
+    expect(result.beatFlash).toBe(true)
     expect(result.backgroundBlur).toBe(130)
     expect(result.backgroundSaturation).toBe(1.15)
     expect(result.beatBrightness).toBe(0)
+    expect(result.beatFlashRate).toBe(4)
+    expect(result.beatVisualDelay).toBe(300)
     expect(result.lyricFontSize).toBe(22)
     expect(result.lyricAnimation).toBe(true)
     expect(result.lyricTranslation).toBe(true)

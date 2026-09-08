@@ -4,6 +4,7 @@ import type { PlayMode, PlayerSettings, Track } from '../types/music'
 import { transferTrackLyricsProvider } from '../services/lyrics'
 import { safeStorage } from '../utils/storage'
 import { createDefaultEqualizer, sanitizeEqualizer } from '../utils/equalizer'
+import { sanitizeBeatFlashRate } from '../utils/beat-envelope'
 
 const SETTINGS_KEY = 'meliora:settings'
 const LAST_TRACK_KEY = 'meliora:last-track'
@@ -16,9 +17,12 @@ const defaultSettings: PlayerSettings = {
   smoothTrackChange: true,
   preloadNextTrack: true,
   dynamicBackground: true,
+  beatFlash: true,
   backgroundBlur: 90,
   backgroundSaturation: 1.15,
   beatBrightness: 0.28,
+  beatFlashRate: 1,
+  beatVisualDelay: 0,
   lyricFontSize: 20,
   lyricAnimation: true,
   lyricTranslation: true,
@@ -37,6 +41,7 @@ export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings 
     smoothTrackChange: sanitizeBoolean(input.smoothTrackChange, defaultSettings.smoothTrackChange),
     preloadNextTrack: sanitizeBoolean(input.preloadNextTrack, defaultSettings.preloadNextTrack),
     dynamicBackground: sanitizeBoolean(input.dynamicBackground, defaultSettings.dynamicBackground),
+    beatFlash: sanitizeBoolean(input.beatFlash, defaultSettings.beatFlash),
     backgroundBlur: sanitizeNumber(input.backgroundBlur, defaultSettings.backgroundBlur, 45, 130),
     backgroundSaturation: sanitizeNumber(
       input.backgroundSaturation,
@@ -45,6 +50,13 @@ export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings 
       1.8,
     ),
     beatBrightness: sanitizeNumber(input.beatBrightness, defaultSettings.beatBrightness, 0, 0.65),
+    beatFlashRate: sanitizeBeatFlashRate(input.beatFlashRate),
+    beatVisualDelay: sanitizeNumber(
+      input.beatVisualDelay,
+      defaultSettings.beatVisualDelay,
+      -100,
+      300,
+    ),
     lyricFontSize: sanitizeNumber(input.lyricFontSize, defaultSettings.lyricFontSize, 15, 30),
     lyricAnimation: sanitizeBoolean(input.lyricAnimation, defaultSettings.lyricAnimation),
     lyricTranslation: sanitizeBoolean(input.lyricTranslation, defaultSettings.lyricTranslation),

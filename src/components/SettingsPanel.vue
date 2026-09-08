@@ -1,6 +1,8 @@
 <script setup lang="ts">
   import { Download, GitFork, PictureInPicture2, SlidersHorizontal } from '@lucide/vue'
   import { storeToRefs } from 'pinia'
+  import { computed } from 'vue'
+  import { BEAT_FLASH_RATE_STEPS, sanitizeBeatFlashRate } from '../utils/beat-envelope'
   import { APP_VERSION } from '../generated/app-version'
   import { usePlayerStore } from '../stores/player'
   import EqualizerPanel from './EqualizerPanel.vue'
@@ -11,6 +13,24 @@
   const REPO_URL = 'https://github.com/abloom25/Meliora'
 
   const { settings } = storeToRefs(usePlayerStore())
+  // 闪烁频率滑块:档位吸附,滑块值是档位下标,存储的是每拍闪烁次数
+  const BEAT_FLASH_RATE_LABELS = ['每 2 拍', '每拍', '每半拍', '每 ¼ 拍'] as const
+  const beatFlashRateIndex = computed({
+    get: () => BEAT_FLASH_RATE_STEPS.indexOf(sanitizeBeatFlashRate(settings.value.beatFlashRate)),
+    set: (index: number) => {
+      const clamped = Math.max(0, Math.min(BEAT_FLASH_RATE_STEPS.length - 1, Math.round(index)))
+      settings.value.beatFlashRate = BEAT_FLASH_RATE_STEPS[clamped] ?? 1
+    },
+  })
+  const beatFlashRateLabel = computed(
+    () => BEAT_FLASH_RATE_LABELS[beatFlashRateIndex.value] ?? BEAT_FLASH_RATE_LABELS[1],
+  )
+  // 闪光延迟:0 表示只用按设备输出延迟的自动补偿;正值让画面更晚,负值更早
+  const beatVisualDelayLabel = computed(() => {
+    const value = Math.round(settings.value.beatVisualDelay)
+    if (value === 0) return '自动'
+    return `${value > 0 ? '+' : '−'}${Math.abs(value)} ms`
+  })
 
   interface Props {
     playModeText: string
@@ -190,6 +210,10 @@
         <span><strong>动态封面背景</strong><small>使用当前封面渲染背景</small></span>
         <ToggleSwitch v-model="settings.dynamicBackground" aria-label="动态封面背景" />
       </div>
+      <div class="setting-row toggle-row">
+        <span><strong>节奏闪光</strong><small>背景随音乐的节奏亮起</small></span>
+        <ToggleSwitch v-model="settings.beatFlash" aria-label="节奏闪光" />
+      </div>
       <div class="setting-group">
         <div class="setting-group-label">
           <span id="setting-background-blur-label"><strong>背景模糊</strong></span
@@ -230,6 +254,35 @@
           :min="0"
           :max="0.65"
           :step="0.05"
+        />
+      </div>
+      <div class="setting-group">
+        <div class="setting-group-label">
+          <span id="setting-beat-flash-rate-label"><strong>闪烁频率</strong></span
+          ><strong>{{ beatFlashRateLabel }}</strong>
+        </div>
+        <SettingRange
+          v-model="beatFlashRateIndex"
+          aria-labelledby="setting-beat-flash-rate-label"
+          :aria-value-text="beatFlashRateLabel"
+          :min="0"
+          :max="BEAT_FLASH_RATE_STEPS.length - 1"
+          :step="1"
+        />
+      </div>
+      <div class="setting-group">
+        <div class="setting-group-label stacked">
+          <span id="setting-beat-visual-delay-label"
+            ><strong>闪光延迟</strong><small>闪光比声音早就调大,晚就调小</small></span
+          ><strong>{{ beatVisualDelayLabel }}</strong>
+        </div>
+        <SettingRange
+          v-model="settings.beatVisualDelay"
+          aria-labelledby="setting-beat-visual-delay-label"
+          :aria-value-text="beatVisualDelayLabel"
+          :min="-100"
+          :max="300"
+          :step="10"
         />
       </div>
     </div>
@@ -374,9 +427,16 @@
     font-size: 0.8rem;
     font-weight: 560;
   }
-  .setting-row small {
+  .setting-row small,
+  .setting-group-label.stacked small {
     color: var(--text-subtle);
     font-size: 0.66rem;
+  }
+  // 带说明的滑块组:标题与灰字竖排,间距与开关行一致(4px)
+  .setting-group-label.stacked > span:first-child {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
   }
   .install-row {
     width: 100%;

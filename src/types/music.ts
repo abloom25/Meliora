@@ -125,9 +125,15 @@ export interface PlayerSettings {
   smoothTrackChange: boolean
   preloadNextTrack: boolean
   dynamicBackground: boolean
+  /** 背景随节奏闪光(与动态封面背景独立) */
+  beatFlash: boolean
   backgroundBlur: number
   backgroundSaturation: number
   beatBrightness: number
+  /** 闪烁密度:每拍最多闪几次(0.5 / 1 / 2 / 4),见 utils/beat-envelope.ts */
+  beatFlashRate: number
+  /** 闪光延迟微调(ms),叠加在按输出延迟自动补偿之上;0 = 自动 */
+  beatVisualDelay: number
   lyricFontSize: number
   lyricAnimation: boolean
   lyricTranslation: boolean
