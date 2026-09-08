@@ -9,6 +9,7 @@
   } from '../utils/equalizer'
   import type { EqPresetId } from '../types/music'
   import { useHaptic } from '../composables/useHaptic'
+  import Collapse from './Collapse.vue'
   import SettingRange from './SettingRange.vue'
   import ToggleSwitch from './ToggleSwitch.vue'
 
@@ -58,45 +59,46 @@
         @update:model-value="emit('update:enabled', $event)"
       />
     </div>
-    <div class="setting-group eq-preset-group">
-      <label
-        ><span><strong>预设</strong></span></label
-      >
-      <div class="eq-preset-list">
-        <button
-          v-for="item in EQ_PRESET_LIST"
-          :key="item.id"
-          class="eq-preset-button"
-          :class="{
-            active: preset === item.id,
-            'is-custom': item.id === 'custom',
-          }"
-          :disabled="!enabled"
-          @click="selectPreset(item.id)"
+    <!-- 均衡器关掉后预设与频段都不生效,收起来而不是留一排拖不动的滑块 -->
+    <Collapse :expanded="enabled">
+      <div class="setting-group eq-preset-group">
+        <label
+          ><span><strong>预设</strong></span></label
         >
-          {{ item.name }}
-        </button>
+        <div class="eq-preset-list">
+          <button
+            v-for="item in EQ_PRESET_LIST"
+            :key="item.id"
+            class="eq-preset-button"
+            :class="{
+              active: preset === item.id,
+              'is-custom': item.id === 'custom',
+            }"
+            @click="selectPreset(item.id)"
+          >
+            {{ item.name }}
+          </button>
+        </div>
       </div>
-    </div>
-    <div class="setting-group eq-bands">
-      <label v-for="(label, index) in EQ_BAND_LABELS" :key="label" class="eq-band-row">
-        <span class="eq-band-label">{{ label }}</span>
-        <SettingRange
-          class="eq-band-range"
-          :model-value="normalizedBands[index] ?? 0"
-          :min="-12"
-          :max="12"
-          :step="1"
-          :disabled="!enabled"
-          :aria-label="`${label} 增益`"
-          :aria-value-text="`${(normalizedBands[index] ?? 0) > 0 ? '+' : ''}${normalizedBands[index] ?? 0}dB`"
-          @update:model-value="updateBand(index, $event)"
-        />
-        <strong class="eq-band-value">
-          {{ (normalizedBands[index] ?? 0) > 0 ? '+' : '' }}{{ normalizedBands[index] ?? 0 }}dB
-        </strong>
-      </label>
-    </div>
+      <div class="setting-group eq-bands">
+        <label v-for="(label, index) in EQ_BAND_LABELS" :key="label" class="eq-band-row">
+          <span class="eq-band-label">{{ label }}</span>
+          <SettingRange
+            class="eq-band-range"
+            :model-value="normalizedBands[index] ?? 0"
+            :min="-12"
+            :max="12"
+            :step="1"
+            :aria-label="`${label} 增益`"
+            :aria-value-text="`${(normalizedBands[index] ?? 0) > 0 ? '+' : ''}${normalizedBands[index] ?? 0}dB`"
+            @update:model-value="updateBand(index, $event)"
+          />
+          <strong class="eq-band-value">
+            {{ (normalizedBands[index] ?? 0) > 0 ? '+' : '' }}{{ normalizedBands[index] ?? 0 }}dB
+          </strong>
+        </label>
+      </div>
+    </Collapse>
   </div>
 </template>
 

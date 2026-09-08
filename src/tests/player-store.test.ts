@@ -415,4 +415,28 @@ describe('player settings migration', () => {
     })
     expect(result.settingsVersion).toBe(1)
   })
+
+  it('resets only the requested settings and leaves the rest alone', () => {
+    const store = usePlayerStore()
+    store.settings.lyricFontSize = 30
+    store.settings.backgroundBlur = 130
+
+    store.resetSettings(['lyricFontSize'])
+
+    expect(store.settings.lyricFontSize).toBe(20)
+    expect(store.settings.backgroundBlur).toBe(130)
+  })
+
+  it('rebuilds the equalizer object when it is reset', () => {
+    const store = usePlayerStore()
+    store.settings.equalizer.enabled = true
+    store.settings.equalizer.preset = 'rock'
+    store.settings.equalizer.bands = store.settings.equalizer.bands.map(() => 6)
+
+    store.resetSettings(['equalizer'])
+
+    expect(store.settings.equalizer.enabled).toBe(false)
+    expect(store.settings.equalizer.preset).toBe('flat')
+    expect(store.settings.equalizer.bands.every((gain) => gain === 0)).toBe(true)
+  })
 })

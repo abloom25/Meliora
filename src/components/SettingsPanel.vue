@@ -4,15 +4,45 @@
   import { computed } from 'vue'
   import { BEAT_FLASH_RATE_STEPS, sanitizeBeatFlashRate } from '../utils/beat-envelope'
   import { APP_VERSION } from '../generated/app-version'
-  import { usePlayerStore } from '../stores/player'
+  import { usePlayerStore, type ResettableSettingKey } from '../stores/player'
+  import Collapse from './Collapse.vue'
   import EqualizerPanel from './EqualizerPanel.vue'
-  import SettingRange from './SettingRange.vue'
+  import SettingSlider from './SettingSlider.vue'
+  import SettingToggleRow from './SettingToggleRow.vue'
+  import SettingsSectionHeader from './SettingsSectionHeader.vue'
   import SleepTimerControl from './SleepTimerControl.vue'
   import ToggleSwitch from './ToggleSwitch.vue'
 
   const REPO_URL = 'https://github.com/abloom25/Meliora'
 
-  const { settings } = storeToRefs(usePlayerStore())
+  const store = usePlayerStore()
+  const { settings } = storeToRefs(store)
+
+  // 各分组「恢复默认」覆盖的设置项。均衡器有自己的预设,不在这里重置
+  const PLAYBACK_KEYS: readonly ResettableSettingKey[] = [
+    'volume',
+    'playMode',
+    'smoothTrackChange',
+    'preloadNextTrack',
+    'skipOnError',
+  ]
+  const LYRICS_KEYS: readonly ResettableSettingKey[] = [
+    'lyricFontSize',
+    'lyricAnimation',
+    'lyricTranslation',
+    'progressLyricPreview',
+  ]
+  const DISPLAY_KEYS: readonly ResettableSettingKey[] = ['autoHideChrome']
+  const BACKGROUND_KEYS: readonly ResettableSettingKey[] = [
+    'dynamicBackground',
+    'beatFlash',
+    'backgroundBlur',
+    'backgroundSaturation',
+    'beatBrightness',
+    'beatFlashRate',
+    'beatVisualDelay',
+  ]
+
   // 闪烁频率滑块:档位吸附,滑块值是档位下标,存储的是每拍闪烁次数
   const BEAT_FLASH_RATE_LABELS = ['每 2 拍', '每拍', '每半拍', '每 ¼ 拍'] as const
   const beatFlashRateIndex = computed({
@@ -32,14 +62,23 @@
     return `${value > 0 ? '+' : '−'}${Math.abs(value)} ms`
   })
 
-  interface Props {
-    playModeText: string
-    sleepTimerMinutes: number
-    sleepTimerRemaining: number
-    sleepTimerDisplayMinutes: number
-    sleepTimerProgress: number
-    sleepTimerOptions: readonly number[]
-    formatSleepTimerRemaining: (value: number) => string
+  const volumeLabel = computed(() => `${Math.round(settings.value.volume * 100)}%`)
+  const backgroundSaturationLabel = computed(
+    () => `${Math.round(settings.value.backgroundSaturation * 100)}%`,
+  )
+  const beatBrightnessLabel = computed(() => `${Math.round(settings.value.beatBrightness * 100)}%`)
+
+  interface SleepTimerState {
+    minutes: number
+    remaining: number
+    displayMinutes: number
+    progress: number
+    options: readonly number[]
+    formatRemaining: (value: number) => string
+  }
+
+  /** 由 PlayerView 侧的 composable 决定的能力/状态,面板只读不管来源 */
+  interface SettingsCapabilities {
     portableDevice: boolean
     fullscreenActive: boolean
     fullscreenSupported: boolean
@@ -51,7 +90,11 @@
     iosInstallAvailable: boolean
   }
 
-  defineProps<Props>()
+  defineProps<{
+    playModeText: string
+    sleepTimer: SleepTimerState
+    capabilities: SettingsCapabilities
+  }>()
 
   const emit = defineEmits<{
     cyclePlayMode: []
@@ -66,54 +109,50 @@
 
 <template>
   <div class="settings-scroll">
-    <div class="settings-section">
-      <h3 class="settings-section-title">播放</h3>
-      <div class="setting-group">
-        <div class="setting-group-label">
-          <span id="setting-volume-label"
-            ><SlidersHorizontal :size="17" /><strong>音量</strong></span
-          ><strong>{{ Math.round(settings.volume * 100) }}%</strong>
-        </div>
-        <SettingRange
-          v-model="settings.volume"
-          aria-labelledby="setting-volume-label"
-          :aria-value-text="`${Math.round(settings.volume * 100)}%`"
-          :min="0"
-          :max="1"
-          :step="0.01"
-        />
-      </div>
+    <section class="settings-section">
+      <SettingsSectionHeader title="播放" resettable @reset="store.resetSettings(PLAYBACK_KEYS)" />
+      <SettingSlider
+        v-model="settings.volume"
+        label="音量"
+        :value-text="volumeLabel"
+        :min="0"
+        :max="1"
+        :step="0.01"
+      >
+        <template #icon><SlidersHorizontal :size="17" /></template>
+      </SettingSlider>
       <div class="setting-row">
-        <span
-          ><strong>播放模式</strong><small>{{ playModeText }}</small></span
-        >
+        <span><strong>播放模式</strong><small>顺序 / 随机 / 单曲循环</small></span>
         <button class="value-button" @click="emit('cyclePlayMode')">
           {{ playModeText }}
         </button>
       </div>
-      <div class="setting-row toggle-row">
-        <span><strong>平滑切歌</strong><small>切歌前淡出，载入后淡入</small></span>
-        <ToggleSwitch v-model="settings.smoothTrackChange" aria-label="平滑切歌" />
-      </div>
-      <div class="setting-row toggle-row">
-        <span><strong>预加载前后歌曲</strong><small>当前歌曲载入后准备上一首和下一首</small></span>
-        <ToggleSwitch v-model="settings.preloadNextTrack" aria-label="预加载前后歌曲" />
-      </div>
+      <SettingToggleRow
+        v-model="settings.smoothTrackChange"
+        label="平滑切歌"
+        description="切歌前淡出，载入后淡入"
+      />
+      <SettingToggleRow
+        v-model="settings.preloadNextTrack"
+        label="预加载前后歌曲"
+        description="当前歌曲载入后准备上一首和下一首"
+      />
       <SleepTimerControl
-        :minutes="sleepTimerMinutes"
-        :remaining="sleepTimerRemaining"
-        :display-minutes="sleepTimerDisplayMinutes"
-        :progress="sleepTimerProgress"
-        :options="sleepTimerOptions"
-        :format-remaining="formatSleepTimerRemaining"
+        :minutes="sleepTimer.minutes"
+        :remaining="sleepTimer.remaining"
+        :display-minutes="sleepTimer.displayMinutes"
+        :progress="sleepTimer.progress"
+        :options="sleepTimer.options"
+        :format-remaining="sleepTimer.formatRemaining"
         @input="emit('sleepTimerInput', $event)"
         @change="emit('sleepTimerChange', $event)"
       />
-      <div class="setting-row toggle-row">
-        <span><strong>失败后自动跳过</strong><small>继续尝试下一首歌曲</small></span>
-        <ToggleSwitch v-model="settings.skipOnError" aria-label="失败后自动跳过" />
-      </div>
-    </div>
+      <SettingToggleRow
+        v-model="settings.skipOnError"
+        label="失败后自动跳过"
+        description="继续尝试下一首歌曲"
+      />
+    </section>
 
     <EqualizerPanel
       :enabled="settings.equalizer.enabled"
@@ -124,70 +163,144 @@
       @update:bands="settings.equalizer.bands = $event"
     />
 
-    <div class="settings-section">
-      <h3 class="settings-section-title">显示</h3>
-      <div class="setting-row toggle-row">
-        <span><strong>自动隐藏上下控件</strong><small>鼠标闲置 30 秒后只保留歌曲内容</small></span>
-        <ToggleSwitch v-model="settings.autoHideChrome" aria-label="自动隐藏上下控件" />
-      </div>
-      <div v-if="!portableDevice && fullscreenSupported" class="setting-row toggle-row">
-        <span
-          ><strong>全屏模式</strong
-          ><small>{{ fullscreenActive ? '已进入全屏' : '让播放器占满整个屏幕' }}</small></span
-        >
-        <ToggleSwitch
-          :model-value="fullscreenActive"
-          aria-label="全屏模式"
-          @update:model-value="emit('toggleFullscreenMode')"
-        />
-      </div>
-      <div class="setting-group">
-        <div class="setting-group-label">
-          <span id="setting-lyric-font-size-label"><strong>歌词字号</strong></span
-          ><strong>{{ settings.lyricFontSize }}px</strong>
-        </div>
-        <SettingRange
-          v-model="settings.lyricFontSize"
-          aria-labelledby="setting-lyric-font-size-label"
-          :aria-value-text="`${settings.lyricFontSize}px`"
-          :min="15"
-          :max="30"
-          :step="1"
-        />
-      </div>
-      <div class="setting-row toggle-row">
-        <span><strong>歌词动画</strong><small>开启牵拉、淡入淡出与状态切换动画</small></span>
-        <ToggleSwitch v-model="settings.lyricAnimation" aria-label="歌词动画" />
-      </div>
-      <div class="setting-row toggle-row">
-        <span><strong>歌词翻译</strong><small>显示歌词中解析出的翻译文本</small></span>
-        <ToggleSwitch v-model="settings.lyricTranslation" aria-label="歌词翻译" />
-      </div>
-      <div v-if="!portableDevice" class="setting-row toggle-row">
-        <span><strong>进度条歌词预览</strong><small>悬停进度条时显示对应时间的歌词</small></span>
-        <ToggleSwitch v-model="settings.progressLyricPreview" aria-label="进度条歌词预览" />
-      </div>
+    <section class="settings-section">
+      <SettingsSectionHeader title="歌词" resettable @reset="store.resetSettings(LYRICS_KEYS)" />
+      <SettingSlider
+        v-model="settings.lyricFontSize"
+        label="歌词字号"
+        :value-text="`${settings.lyricFontSize}px`"
+        :min="15"
+        :max="30"
+      />
+      <SettingToggleRow
+        v-model="settings.lyricAnimation"
+        label="歌词动画"
+        description="开启牵拉、逐字扫光与状态切换动画"
+      />
+      <SettingToggleRow
+        v-model="settings.lyricTranslation"
+        label="歌词翻译"
+        description="显示歌词中解析出的翻译文本"
+      />
+      <SettingToggleRow
+        v-if="!capabilities.portableDevice"
+        v-model="settings.progressLyricPreview"
+        label="进度条歌词预览"
+        description="悬停进度条时显示对应时间的歌词"
+      />
       <button
-        v-if="lyricsWindowSupported"
+        v-if="capabilities.lyricsWindowSupported"
         class="setting-row window-setting-row"
-        :class="{ active: lyricsWindowOpen }"
-        :disabled="!hasCurrentTrack"
+        :class="{ active: capabilities.lyricsWindowOpen }"
+        :disabled="!capabilities.hasCurrentTrack"
         @click="emit('openLyricsWindow')"
       >
         <span>
           <strong>歌词小窗</strong>
           <small>{{
-            lyricsWindowOpen
+            capabilities.lyricsWindowOpen
               ? '小窗已打开'
-              : hasCurrentTrack
+              : capabilities.hasCurrentTrack
                 ? '在独立小窗中显示歌曲与歌词'
                 : '选择歌曲后可用'
           }}</small>
         </span>
         <PictureInPicture2 :size="20" />
       </button>
+    </section>
+
+    <section class="settings-section">
+      <SettingsSectionHeader title="显示" resettable @reset="store.resetSettings(DISPLAY_KEYS)" />
+      <SettingToggleRow
+        v-model="settings.autoHideChrome"
+        label="自动隐藏上下控件"
+        description="鼠标闲置 30 秒后只保留歌曲内容"
+      />
+      <div
+        v-if="!capabilities.portableDevice && capabilities.fullscreenSupported"
+        class="setting-row toggle-row"
+      >
+        <span
+          ><strong>全屏模式</strong
+          ><small>{{
+            capabilities.fullscreenActive ? '已进入全屏' : '让播放器占满整个屏幕'
+          }}</small></span
+        >
+        <ToggleSwitch
+          :model-value="capabilities.fullscreenActive"
+          aria-label="全屏模式"
+          @update:model-value="emit('toggleFullscreenMode')"
+        />
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <SettingsSectionHeader
+        title="背景"
+        resettable
+        @reset="store.resetSettings(BACKGROUND_KEYS)"
+      />
+      <SettingToggleRow
+        v-model="settings.dynamicBackground"
+        label="动态封面背景"
+        description="使用当前封面渲染背景"
+      />
+      <!-- 关掉封面背景后这两项没有作用对象,收起来而不是留一排拖不动结果的滑块 -->
+      <Collapse :expanded="settings.dynamicBackground">
+        <SettingSlider
+          v-model="settings.backgroundBlur"
+          label="背景模糊"
+          :value-text="`${settings.backgroundBlur}px`"
+          :min="45"
+          :max="130"
+        />
+        <SettingSlider
+          v-model="settings.backgroundSaturation"
+          label="背景饱和度"
+          :value-text="backgroundSaturationLabel"
+          :min="0.7"
+          :max="1.8"
+          :step="0.05"
+        />
+      </Collapse>
+      <SettingToggleRow
+        v-model="settings.beatFlash"
+        label="节奏闪光"
+        description="背景随音乐的节奏亮起"
+      />
+      <!-- 同上:闪光关掉后亮度 / 频率 / 延迟都无处生效 -->
+      <Collapse :expanded="settings.beatFlash">
+        <SettingSlider
+          v-model="settings.beatBrightness"
+          label="节奏亮度"
+          :value-text="beatBrightnessLabel"
+          :min="0"
+          :max="0.65"
+          :step="0.05"
+        />
+        <SettingSlider
+          v-model="beatFlashRateIndex"
+          label="闪烁频率"
+          :value-text="beatFlashRateLabel"
+          :min="0"
+          :max="BEAT_FLASH_RATE_STEPS.length - 1"
+        />
+        <SettingSlider
+          v-model="settings.beatVisualDelay"
+          label="闪光延迟"
+          description="闪光比声音早就调大,晚就调小"
+          :value-text="beatVisualDelayLabel"
+          :min="-100"
+          :max="300"
+          :step="10"
+        />
+      </Collapse>
+    </section>
+
+    <section class="settings-section about-section">
+      <SettingsSectionHeader title="关于" />
       <button
-        v-if="canInstall && !isInstalled"
+        v-if="capabilities.canInstall && !capabilities.isInstalled"
         class="setting-row install-row"
         @click="emit('installPwa')"
       >
@@ -195,100 +308,13 @@
         <Download :size="19" />
       </button>
       <button
-        v-if="iosInstallAvailable && !canInstall"
+        v-if="capabilities.iosInstallAvailable && !capabilities.canInstall"
         class="setting-row install-row"
         @click="emit('showIosInstallGuide')"
       >
         <span><strong>安装 Meliora</strong><small>通过 Safari 分享菜单添加到主屏幕</small></span>
         <Download :size="19" />
       </button>
-    </div>
-
-    <div class="settings-section">
-      <h3 class="settings-section-title">背景</h3>
-      <div class="setting-row toggle-row">
-        <span><strong>动态封面背景</strong><small>使用当前封面渲染背景</small></span>
-        <ToggleSwitch v-model="settings.dynamicBackground" aria-label="动态封面背景" />
-      </div>
-      <div class="setting-row toggle-row">
-        <span><strong>节奏闪光</strong><small>背景随音乐的节奏亮起</small></span>
-        <ToggleSwitch v-model="settings.beatFlash" aria-label="节奏闪光" />
-      </div>
-      <div class="setting-group">
-        <div class="setting-group-label">
-          <span id="setting-background-blur-label"><strong>背景模糊</strong></span
-          ><strong>{{ settings.backgroundBlur }}px</strong>
-        </div>
-        <SettingRange
-          v-model="settings.backgroundBlur"
-          aria-labelledby="setting-background-blur-label"
-          :aria-value-text="`${settings.backgroundBlur}px`"
-          :min="45"
-          :max="130"
-          :step="1"
-        />
-      </div>
-      <div class="setting-group">
-        <div class="setting-group-label">
-          <span id="setting-background-saturation-label"><strong>背景饱和度</strong></span
-          ><strong>{{ Math.round(settings.backgroundSaturation * 100) }}%</strong>
-        </div>
-        <SettingRange
-          v-model="settings.backgroundSaturation"
-          aria-labelledby="setting-background-saturation-label"
-          :aria-value-text="`${Math.round(settings.backgroundSaturation * 100)}%`"
-          :min="0.7"
-          :max="1.8"
-          :step="0.05"
-        />
-      </div>
-      <div class="setting-group">
-        <div class="setting-group-label">
-          <span id="setting-beat-brightness-label"><strong>节奏亮度</strong></span
-          ><strong>{{ Math.round(settings.beatBrightness * 100) }}%</strong>
-        </div>
-        <SettingRange
-          v-model="settings.beatBrightness"
-          aria-labelledby="setting-beat-brightness-label"
-          :aria-value-text="`${Math.round(settings.beatBrightness * 100)}%`"
-          :min="0"
-          :max="0.65"
-          :step="0.05"
-        />
-      </div>
-      <div class="setting-group">
-        <div class="setting-group-label">
-          <span id="setting-beat-flash-rate-label"><strong>闪烁频率</strong></span
-          ><strong>{{ beatFlashRateLabel }}</strong>
-        </div>
-        <SettingRange
-          v-model="beatFlashRateIndex"
-          aria-labelledby="setting-beat-flash-rate-label"
-          :aria-value-text="beatFlashRateLabel"
-          :min="0"
-          :max="BEAT_FLASH_RATE_STEPS.length - 1"
-          :step="1"
-        />
-      </div>
-      <div class="setting-group">
-        <div class="setting-group-label stacked">
-          <span id="setting-beat-visual-delay-label"
-            ><strong>闪光延迟</strong><small>闪光比声音早就调大,晚就调小</small></span
-          ><strong>{{ beatVisualDelayLabel }}</strong>
-        </div>
-        <SettingRange
-          v-model="settings.beatVisualDelay"
-          aria-labelledby="setting-beat-visual-delay-label"
-          :aria-value-text="beatVisualDelayLabel"
-          :min="-100"
-          :max="300"
-          :step="10"
-        />
-      </div>
-    </div>
-
-    <div class="settings-section about-section">
-      <h3 class="settings-section-title">关于</h3>
       <div class="about-block">
         <div class="about-headline">
           <span class="about-name">Meliora</span>
@@ -299,7 +325,7 @@
           <span>GitHub 仓库</span>
         </a>
       </div>
-    </div>
+    </section>
   </div>
 </template>
 
@@ -332,20 +358,13 @@
     box-shadow: inset 0 1px rgba(255, 255, 255, 0.045);
     backdrop-filter: blur(22px);
   }
-  .settings-section-title {
-    margin: 0;
-    padding: 12px 14px 10px;
-    color: rgba(255, 255, 255, 0.48);
-    font-size: 0.62rem;
-    font-weight: 680;
-    letter-spacing: 0.08em;
-  }
   .setting-group,
   .setting-row {
     padding: 15px 14px;
     border-top: 1px solid rgba(255, 255, 255, 0.075);
   }
-  .settings-section > :first-child {
+  // 分组标题后的第一项不画分隔线
+  .settings-section-header + * {
     border-top: 0;
   }
   .about-section {
@@ -400,43 +419,25 @@
   .about-repo:active {
     transform: scale(0.98);
   }
-  .setting-group label,
-  .setting-group .setting-group-label,
   .setting-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 20px;
   }
-  .setting-group label > span,
-  .setting-group .setting-group-label > span,
   .setting-row > span {
     display: flex;
     flex-direction: column;
     gap: 4px;
   }
-  .setting-group label > span,
-  .setting-group .setting-group-label > span {
-    flex-direction: row;
-    align-items: center;
-    gap: 7px;
-  }
-  .setting-group strong,
   .setting-row strong {
     color: #fff;
     font-size: 0.8rem;
     font-weight: 560;
   }
-  .setting-row small,
-  .setting-group-label.stacked small {
+  .setting-row small {
     color: var(--text-subtle);
     font-size: 0.66rem;
-  }
-  // 带说明的滑块组:标题与灰字竖排,间距与开关行一致(4px)
-  .setting-group-label.stacked > span:first-child {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
   }
   .install-row {
     width: 100%;
@@ -481,11 +482,6 @@
     font-size: 0.68rem;
     cursor: pointer;
   }
-  .setting-value {
-    color: rgba(255, 255, 255, 0.7);
-    font-size: 0.68rem;
-    font-weight: 560;
-  }
 
   @media (max-width: 720px) {
     .settings-scroll {
@@ -503,20 +499,13 @@
       margin-top: 9px;
       border-radius: 20px;
     }
-    .settings-section-title {
-      padding: 11px 12px 8px;
-      font-size: 0.58rem;
-    }
     .setting-group,
     .setting-row {
       padding: 13px 12px;
     }
-    .setting-group label,
-    .setting-group .setting-group-label,
     .setting-row {
       gap: 14px;
     }
-    .setting-group strong,
     .setting-row strong {
       font-size: 0.76rem;
     }
@@ -534,9 +523,6 @@
     .settings-section {
       margin-top: 7px;
       border-radius: 18px;
-    }
-    .settings-section-title {
-      padding: 9px 10px 7px;
     }
     .setting-group,
     .setting-row {

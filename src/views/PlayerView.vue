@@ -294,6 +294,28 @@
     ]
   })
   const playModeText = computed(() => PLAY_MODE_META[settings.value.playMode].text)
+
+  // 设置面板的入参按语义收成两组:定时关闭的状态、以及由各 composable 决定的能力开关。
+  // 面板本身只读它们,不关心这些能力从哪来
+  const settingsSleepTimer = computed(() => ({
+    minutes: sleepTimerMinutes.value,
+    remaining: sleepTimerRemaining.value,
+    displayMinutes: sleepTimerDisplayMinutes.value,
+    progress: sleepTimerProgress.value,
+    options: sleepTimerOptions,
+    formatRemaining: formatSleepTimerRemaining,
+  }))
+  const settingsCapabilities = computed(() => ({
+    portableDevice: portableDevice.value,
+    fullscreenActive: fullscreenActive.value,
+    fullscreenSupported: fullscreenSupported.value,
+    lyricsWindowSupported: lyricsWindowSupported.value,
+    lyricsWindowOpen: lyricsWindowOpen.value,
+    hasCurrentTrack: Boolean(currentTrack.value),
+    canInstall: canInstall.value,
+    isInstalled: isInstalled.value,
+    iosInstallAvailable: iosInstallAvailable.value,
+  }))
   const playModeIcon = computed(() => PLAY_MODE_META[settings.value.playMode].icon)
   const beatStyle = computed(() => ({
     // --beat-level 已移出本 computed：高频写入由 useBeatAnalyser 直接 setProperty 到目标节点，
@@ -1006,21 +1028,8 @@
         </header>
         <SettingsPanel
           :play-mode-text="playModeText"
-          :sleep-timer-minutes="sleepTimerMinutes"
-          :sleep-timer-remaining="sleepTimerRemaining"
-          :sleep-timer-display-minutes="sleepTimerDisplayMinutes"
-          :sleep-timer-progress="sleepTimerProgress"
-          :sleep-timer-options="sleepTimerOptions"
-          :format-sleep-timer-remaining="formatSleepTimerRemaining"
-          :portable-device="portableDevice"
-          :fullscreen-active="fullscreenActive"
-          :fullscreen-supported="fullscreenSupported"
-          :lyrics-window-supported="lyricsWindowSupported"
-          :lyrics-window-open="lyricsWindowOpen"
-          :has-current-track="Boolean(currentTrack)"
-          :can-install="canInstall"
-          :is-installed="isInstalled"
-          :ios-install-available="iosInstallAvailable"
+          :sleep-timer="settingsSleepTimer"
+          :capabilities="settingsCapabilities"
           @cycle-play-mode="cyclePlayModeWithHaptic"
           @sleep-timer-input="handleSleepTimerInput"
           @sleep-timer-change="handleSleepTimerChange"

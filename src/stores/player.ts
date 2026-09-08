@@ -33,6 +33,9 @@ const defaultSettings: PlayerSettings = {
   settingsVersion: CURRENT_SETTINGS_VERSION,
 }
 
+/** 可被「恢复默认」重置的设置项。settingsVersion 是迁移用的内部字段,不参与重置 */
+export type ResettableSettingKey = Exclude<keyof PlayerSettings, 'settingsVersion'>
+
 export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings {
   const input = saved && typeof saved === 'object' ? saved : {}
   return {
@@ -264,6 +267,16 @@ export const usePlayerStore = defineStore('player', () => {
     else safeStorage.removeItem(LAST_TRACK_KEY)
   })
 
+  // 把指定设置项恢复默认:置为 undefined 后交给 migrateSettings 走既有的兜底链路,
+  // 不必在这里重复一份默认值,也顺带保证重置后的值一定通过校验
+  function resetSettings(keys: readonly ResettableSettingKey[]) {
+    if (!keys.length) return
+    const overrides = Object.fromEntries(
+      keys.map((key) => [key, undefined]),
+    ) as Partial<PlayerSettings>
+    settings.value = migrateSettings({ ...settings.value, ...overrides })
+  }
+
   return {
     tracks,
     queue,
@@ -284,5 +297,6 @@ export const usePlayerStore = defineStore('player', () => {
     nextTrack,
     previousTrack,
     cyclePlayMode,
+    resetSettings,
   }
 })
