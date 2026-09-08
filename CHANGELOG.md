@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1-rc1] - 2026-09-08
+
 ### Added
 
 - **闪光延迟微调**:设备报的输出延迟不一定准(蓝牙编解码延迟常常不在里面),新增
@@ -46,6 +48,13 @@ outputLatency` 减去视觉链路固有延迟延后写入,蓝牙耳机等高输�
   扫光则严格对齐音频时间
 - **歌词时钟抽为纯模块**:`utils/lyric-clock.ts` 以 timeupdate 为锚点做线性外推并对
   缓冲 stall 封顶,主面板与歌词小窗共用同一套实现
+
+### Fixed
+
+- **逐字歌词字形被左右切掉**:`background-clip: text` 只在元素自身的边框盒内绘制,音节节点原来只补了纵向余量;行上 `letter-spacing: -0.035em` 会让盒宽比末字字形窄,690 字重的 J / f / y 又自带负边距,溢出的墨迹没有背景可裁就被削掉——唱过之后变纯白才看得出来。横向补上对称余量并用等量负 margin 抵消,总宽与换行点不变;扫光边界仍按盒宽百分比推进,两端各偏一个余量、正中零偏差,远小于前沿柔化宽度,不需要补偿渐变色标
+- **关闭歌词动画后逐字扫光仍在跑**:扫光每帧写入的是内联自定义属性,优先级高于 `.animation-disabled` 里的任何声明,原来只压住了上浮,渐变与随进度增强的发光照旧在跑;改为在 JS 侧拦截,释放内联属性后整行回落到 `--lyric-word-fill: 1`,表现为整行一次性高亮。`prefers-reduced-motion` 一并纳入,歌词小窗同步处理
+
+[0.2.1-rc1]: https://github.com/abloom25/Meliora/releases/tag/v0.2.1-rc1
 
 ## [0.2.0] - 2026-08-01
 
