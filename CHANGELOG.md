@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1-rc2] - 2026-09-10
+
 ### Added
 
 - **进度条歌词预览支持高级歌词**:悬停进度条的气泡改用与歌词面板同一套场景解析,
@@ -38,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 进度条歌词气泡里右对齐的行在气泡改变宽度时会横向跳一下:气泡宽度由 JS 量出并带过渡,
   内容盒却按 max-content 自己算宽,过渡期间两者不一致,右对齐的文字会离开气泡右缘甚至被裁掉
 - 歌词行只有行首时间戳(没有结束时间)时,预览气泡会把之前唱过的行全部堆进去
+
+[0.2.1-rc2]: https://github.com/abloom25/Meliora/releases/tag/v0.2.1-rc2
 
 ## [0.2.1-rc1] - 2026-09-08
 
