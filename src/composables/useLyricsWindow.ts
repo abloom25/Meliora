@@ -51,6 +51,8 @@ const popupStyles = `
   .line { --lyric-fill: rgba(255,255,255,.27); --lyric-idle: rgba(255,255,255,.27); color: var(--lyric-fill); font-size: clamp(21px,5.4vw,31px); font-weight: 690; line-height: 1.16; letter-spacing: -.035em; transition: opacity calc(.45s * var(--lyric-tempo,1)) ease,color calc(.45s * var(--lyric-tempo,1)) ease,text-shadow calc(.45s * var(--lyric-tempo,1)) ease; }
   .line.active { --lyric-fill: #fff; --lyric-idle: rgba(255,255,255,.32); text-shadow: 0 0 20px rgba(255,255,255,.18); }
   .main { display: block; }
+  .line.secondary { text-align: right; }
+  .line.harmony { font-size: .84em; opacity: .82; }
   /* 逐字扫光。弹窗文档里没有 @property 注册,var() 必须带兜底值,
      否则未写入的音节会让整条 background-image 失效、文字变透明 */
   /* padding 撑开背景绘制盒、负 margin 抵消排版影响:否则 background-clip: text 会把 g/y/p 的降部切掉;
@@ -104,8 +106,8 @@ export function useLyricsWindow({
   // 扫光必须跑在小窗自己的帧循环上才能保持平滑
   const clock = createLyricClock()
   let karaokeFrame = 0
-  let activeSlot = -1
-  let activeWords: LyricWord[] | null = null
+  // 同一时刻可以有多行在唱(对唱双声部、背景和声),扫光要按整批槽位绑
+  let activeSlots: Array<{ slot: number; words: LyricWord[] }> = []
   let karaokeSpans: HTMLElement[] = []
   let karaokeWords: LyricWord[] = []
   let karaokeLastFill: string[] = []
@@ -143,8 +145,7 @@ export function useLyricsWindow({
     if (lyricsWindow === target) {
       stopKaraoke()
       releaseKaraoke()
-      activeSlot = -1
-      activeWords = null
+      activeSlots = []
       lyricsWindow = null
       isOpen.value = false
       clearCache()
@@ -343,15 +344,23 @@ export function useLyricsWindow({
     releaseKaraoke()
     // 扫光关闭时不接管任何音节:释放内联的 --w / --e 后,
     // 样式里的兜底值 var(--w,1) 让整行按已唱完渲染,等同整行高亮
-    if (!lyricAnimation.value) return
-    if (!cachedNodes || activeSlot < 0 || !activeWords?.length) return
-    const spans = cachedNodes.wordNodes[activeSlot]
-    // 数量对不上说明 DOM 与快照不同步,这一轮先不接管,下一次 render 会重绑
-    if (!spans || spans.length !== activeWords.length) return
+    if (!lyricAnimation.value || !cachedNodes) return
+
+    const spans: HTMLElement[] = []
+    const words: LyricWord[] = []
+    for (const entry of activeSlots) {
+      const slotSpans = cachedNodes.wordNodes[entry.slot]
+      // 数量对不上说明 DOM 与快照不同步,整批都先不接管,下一次 render 会重绑
+      if (!slotSpans || slotSpans.length !== entry.words.length) return
+      spans.push(...slotSpans)
+      words.push(...entry.words)
+    }
+    if (!spans.length) return
+
     karaokeSpans = spans
-    karaokeWords = activeWords
-    karaokeLastFill = activeWords.map(() => '')
-    karaokeLastEdge = activeWords.map(() => '')
+    karaokeWords = words
+    karaokeLastFill = words.map(() => '')
+    karaokeLastEdge = words.map(() => '')
   }
 
   function writeKaraoke(time: number) {
@@ -435,8 +444,7 @@ export function useLyricsWindow({
     if (!ready) {
       stopKaraoke()
       releaseKaraoke()
-      activeSlot = -1
-      activeWords = null
+      activeSlots = []
       for (let i = 0; i < lineNodes.length; i += 1) {
         const node = lineNodes[i]
         if (node && node.parentNode) node.remove()
@@ -462,10 +470,21 @@ export function useLyricsWindow({
       lyricsContainer.style.setProperty('--lyric-tempo', tempoScale)
     }
     const hasActiveLine = active >= 0 && active < lines.length
-    activeSlot = -1
-    activeWords = null
-    const start = hasActiveLine ? Math.max(0, active - 1) : 0
-    const end = hasActiveLine ? Math.min(lines.length, active + 3) : Math.min(lines.length, 4)
+    // 缺省(旧快照)按只有锚点行处理
+    const activeIndices = snapshot.value.activeIndices?.length
+      ? snapshot.value.activeIndices
+      : hasActiveLine
+        ? [active]
+        : []
+    const activeSet = new Set(activeIndices)
+    activeSlots = []
+    // 可见范围要盖住整个活跃组:对唱的另一声部可能在锚点之前,和声在其后
+    const groupMin = activeIndices.length ? Math.min(...activeIndices, active) : active
+    const groupMax = activeIndices.length ? Math.max(...activeIndices, active) : active
+    const start = hasActiveLine ? Math.max(0, Math.min(active - 1, groupMin)) : 0
+    const end = hasActiveLine
+      ? Math.min(lines.length, Math.max(active + 3, groupMax + 1))
+      : Math.min(lines.length, 4)
     const visibleCount = end - start
 
     for (let slot = 0; slot < visibleCount; slot += 1) {
@@ -475,20 +494,21 @@ export function useLyricsWindow({
 
       const positionClass = !hasActiveLine
         ? 'after'
-        : lineIndex === active
+        : activeSet.has(lineIndex)
           ? 'active'
           : lineIndex < active
             ? 'before'
             : 'after'
-      const desiredClass = `line ${positionClass}`
+      // 对唱的第二声部靠右,背景和声更小更淡 —— 和主面板同一套语义
+      const roleClass = `${line.agent === 'secondary' ? ' secondary' : ''}${line.background ? ' harmony' : ''}`
+      const desiredClass = `line ${positionClass}${roleClass}`
       if (node.className !== desiredClass) node.className = desiredClass
       const indexStr = String(lineIndex)
       if (node.dataset.index !== indexStr) node.dataset.index = indexStr
 
       renderLineContent(doc, slot, line)
-      if (lineIndex === active) {
-        activeSlot = slot
-        activeWords = line.words ?? null
+      if (activeSet.has(lineIndex) && line.words?.length) {
+        activeSlots.push({ slot, words: line.words })
       }
 
       if (node.parentNode !== lyricsContainer) {

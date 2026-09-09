@@ -89,6 +89,21 @@ describe('SettingsPanel', () => {
     expect(display.text()).not.toContain('歌词')
   })
 
+  it('collapses the lyric spring slider together with the lyric animation toggle', async () => {
+    const { wrapper, store } = mountPanel()
+    const lyrics = sectionByTitle(wrapper, '歌词')!
+
+    expect(lyrics.text()).toContain('歌词弹簧')
+    expect(lyrics.find('.collapse-wrapper').classes()).toContain('expanded')
+
+    store.settings.lyricAnimation = false
+    await nextTick()
+
+    // 关掉牵拉动画后弹簧系数没有作用对象
+    expect(lyrics.find('.collapse-wrapper').classes()).not.toContain('expanded')
+    expect(lyrics.find('.collapse-body').attributes('inert')).toBeDefined()
+  })
+
   it('needs a second click on the reset button before it actually restores defaults', async () => {
     const { wrapper, store } = mountPanel()
     store.settings.lyricFontSize = 29

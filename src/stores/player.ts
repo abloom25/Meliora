@@ -25,6 +25,7 @@ const defaultSettings: PlayerSettings = {
   beatVisualDelay: 0,
   lyricFontSize: 20,
   lyricAnimation: true,
+  lyricSpring: 1,
   lyricTranslation: true,
   progressLyricPreview: false,
   skipOnError: true,
@@ -62,6 +63,7 @@ export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings 
     ),
     lyricFontSize: sanitizeNumber(input.lyricFontSize, defaultSettings.lyricFontSize, 15, 30),
     lyricAnimation: sanitizeBoolean(input.lyricAnimation, defaultSettings.lyricAnimation),
+    lyricSpring: sanitizeNumber(input.lyricSpring, defaultSettings.lyricSpring, 0.5, 2),
     lyricTranslation: sanitizeBoolean(input.lyricTranslation, defaultSettings.lyricTranslation),
     progressLyricPreview: sanitizeBoolean(
       input.progressLyricPreview,

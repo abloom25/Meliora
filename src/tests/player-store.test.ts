@@ -416,6 +416,12 @@ describe('player settings migration', () => {
     expect(result.settingsVersion).toBe(1)
   })
 
+  it('clamps the lyric spring coefficient into the supported range', () => {
+    expect(migrateSettings({ lyricSpring: 9 }).lyricSpring).toBe(2)
+    expect(migrateSettings({ lyricSpring: 0 }).lyricSpring).toBe(0.5)
+    expect(migrateSettings({}).lyricSpring).toBe(1)
+  })
+
   it('resets only the requested settings and leaves the rest alone', () => {
     const store = usePlayerStore()
     store.settings.lyricFontSize = 30

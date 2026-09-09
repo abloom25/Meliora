@@ -27,6 +27,7 @@ const defaultSettings: PlayerSettings = {
   beatVisualDelay: 0,
   lyricFontSize: 20,
   lyricAnimation: true,
+  lyricSpring: 1,
   lyricTranslation: true,
   progressLyricPreview: false,
   skipOnError: true,

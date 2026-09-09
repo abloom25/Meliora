@@ -29,6 +29,7 @@
   const LYRICS_KEYS: readonly ResettableSettingKey[] = [
     'lyricFontSize',
     'lyricAnimation',
+    'lyricSpring',
     'lyricTranslation',
     'progressLyricPreview',
   ]
@@ -63,6 +64,7 @@
   })
 
   const volumeLabel = computed(() => `${Math.round(settings.value.volume * 100)}%`)
+  const lyricSpringLabel = computed(() => `×${settings.value.lyricSpring.toFixed(2)}`)
   const backgroundSaturationLabel = computed(
     () => `${Math.round(settings.value.backgroundSaturation * 100)}%`,
   )
@@ -177,6 +179,18 @@
         label="歌词动画"
         description="开启牵拉、逐字扫光与状态切换动画"
       />
+      <!-- 弹簧只在牵拉动画开着时才有作用对象 -->
+      <Collapse :expanded="settings.lyricAnimation">
+        <SettingSlider
+          v-model="settings.lyricSpring"
+          label="歌词弹簧"
+          description="越大越紧绷利落,越小越绵软拖沓"
+          :value-text="lyricSpringLabel"
+          :min="0.5"
+          :max="2"
+          :step="0.05"
+        />
+      </Collapse>
       <SettingToggleRow
         v-model="settings.lyricTranslation"
         label="歌词翻译"

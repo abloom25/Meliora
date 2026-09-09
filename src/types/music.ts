@@ -107,7 +107,10 @@ export interface MetingTrack {
 
 export interface LyricsSnapshot {
   lines: LyricLine[]
+  /** 锚点行:活跃集合里最靠后的主行,决定居中与前后分段 */
   activeIndex: number
+  /** 当前正在唱的所有行。对唱双声部与背景和声可以同时在唱,缺省视为只有锚点行 */
+  activeIndices?: number[]
   status: LyricStatus
   /** 快节奏歌词下的动画压缩系数(1 = 完整节奏,0 = 瞬切),缺省按 1 处理 */
   tempoScale?: number
@@ -136,6 +139,8 @@ export interface PlayerSettings {
   beatVisualDelay: number
   lyricFontSize: number
   lyricAnimation: boolean
+  /** 歌词牵引滚动的弹簧刚度系数(1 = 默认)。越大越紧绷、越快到位,越小越绵软 */
+  lyricSpring: number
   lyricTranslation: boolean
   progressLyricPreview: boolean
   skipOnError: boolean

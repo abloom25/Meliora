@@ -256,6 +256,42 @@ export function findActiveLyricIndex(lines: LyricLine[], currentTime: number): n
   return active
 }
 
+/**
+ * 当前时刻正在唱的所有行。
+ *
+ * Apple Music 规格的 TTML 里同一时刻可以有多行:对唱双声部各有独立的
+ * `<p ttm:agent>`,背景和声(x-bg)各有独立的 begin/end。只返回一个索引会让
+ * 重叠的那一行永远不亮,所以这里按时间区间取集合而不是二分找最后一个开始的行。
+ *
+ * 间奏(所有行都唱完、下一句还没开始)时保持最后一句主行亮着,不让整屏变暗。
+ */
+export interface ActiveLyricLines {
+  /** 当前正在唱的行;held 为 true 时这里是被保留高亮的上一句 */
+  indices: number[]
+  /** true 表示所有行都已唱完而下一句还没开始(间奏) */
+  held: boolean
+}
+
+export function findActiveLyricIndices(lines: LyricLine[], currentTime: number): ActiveLyricLines {
+  const indices: number[] = []
+  let lastStarted = -1
+  let lastStartedPrimary = -1
+
+  for (const [index, line] of lines.entries()) {
+    const start = line.time
+    if (start === null || start === undefined || start > currentTime) continue
+    lastStarted = index
+    if (!line.background) lastStartedPrimary = index
+    const end = line.endTime
+    if (end !== undefined && currentTime >= end) continue
+    indices.push(index)
+  }
+
+  if (indices.length) return { indices, held: false }
+  const fallback = lastStartedPrimary >= 0 ? lastStartedPrimary : lastStarted
+  return { indices: fallback >= 0 ? [fallback] : [], held: fallback >= 0 }
+}
+
 export interface WeightedToken {
   text: string
   /** 相对权重:决定该 token 在整行时长中占多少比例 */
@@ -427,7 +463,13 @@ export function resolveLyricTimings(lines: LyricLine[], trackDuration?: number):
       ? Math.max(...line.words.map((word) => word.time + word.duration))
       : null
     const preferredEnd = line.endTime ?? nativeEnd ?? start + estimated
-    const hardLimit = nextStart ?? trackDuration ?? start + estimated
+    // 有真实结束时间(TTML 的 end、或最后一个音节的末尾)就信它。Apple Music 规格里
+    // 对唱双声部与背景和声都可能与相邻行在时间上重叠,拿下一行起点去截断会把重叠
+    // 信息抹掉,表现就是同时演唱的那一句被跳过。只有靠估算时才用下一行兜底
+    const hasRealEnd = line.endTime !== undefined || nativeEnd !== null
+    const hardLimit = hasRealEnd
+      ? (trackDuration ?? Number.POSITIVE_INFINITY)
+      : (nextStart ?? trackDuration ?? start + estimated)
     const endTime = Math.max(start + MIN_WORD_DURATION, Math.min(preferredEnd, hardLimit))
 
     // 只有歌词源自带字级时间轴的行才有 words。没有真实逐字数据时不做插值合成:
