@@ -31,7 +31,12 @@
 
 ### 歌词体验
 
-- 📜 **LRC 歌词跟随**:FLIP 牵引滚动 + 逐行高亮 + 可调字号
+- 📜 **逐字歌词**:接入 Apple Music 规格的逐词歌词库,英文按词、中文按字随演唱推进点亮;
+  也支持增强型 LRC、网易云 YRC 与 QQ QRC 的字级时间轴,没有逐字数据时回落为整行高亮
+- 🎭 **对唱与和声**:对唱双声部左右分栏同时高亮,背景和声在所属句子唱到时从下沿探出、唱完收回
+- 🌊 **弹簧牵引滚动**:每行一根弹簧、沿运动方向逐行错峰起步,换行与拖动进度条都不会顿挫;
+  可调弹簧松紧、字号,支持译文与罗马音
+- 🔍 **进度条歌词预览**:悬停进度条即可看到该时刻的歌词,含对唱、和声与逐字进度快照(设置中开启)
 - 🪟 **歌词小窗**:Document Picture-in-Picture 独立浮窗,支持在外部应用时查看歌词
 
 ### 播放控制
@@ -284,6 +289,22 @@ netlify/             Netlify Function 入口
 
 ---
 
+## 🙏 致谢
+
+特别感谢 [@OnyxAxisOwO](https://github.com/OnyxAxisOwO) 提供 Opus 5 与 Fable 5.1。
+
+本项目在开发过程中由多个 AI 模型参与协作,以下排名与贡献不分先后,包括但不限于:
+
+- GLM 5.2
+- GLM 5.3 Flash
+- Opus 5
+- Fable 5.1
+- GPT 5.5
+- GPT 5.6 Sol
+- Kimi K3
+
+---
+
 ## 📄 开源许可
 
 [GNU Affero General Public License v3.0 or later](LICENSE) © abloom25
@@ -296,6 +317,6 @@ netlify/             Netlify Function 入口
 
 如果这个项目对你有帮助,欢迎点亮 ⭐ Star
 
-Made with ❤️ by [abloom25](https://github.com/abloom25) and OpenAI Codex
+Made with ♥️ by [abloom25](https://github.com/abloom25)
 
 </div>
