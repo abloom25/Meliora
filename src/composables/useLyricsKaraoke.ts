@@ -1,5 +1,5 @@
 import type { LyricLine, LyricWord } from '../types/music'
-import { wordFillProgress } from '../utils/lyrics'
+import { wordEdgeSoftness, wordFillProgress } from '../utils/lyrics'
 
 // 逐字扫光。只有当前正在唱的行需要每帧写入;其余行由 CSS 的
 // `.lyric-line { --lyric-word-fill: 1 }` 兜底为"整行已唱完"。
@@ -15,18 +15,11 @@ export interface LyricsKaraokeOptions {
   isEnabled: () => boolean
 }
 
-// 前沿柔化宽度的收敛斜率:进度进入 [0, 1/斜率] 或 [1-1/斜率, 1] 时线性收到 0
-const EDGE_FADE_SLOPE = 8
-
 interface KaraokeTarget {
   element: HTMLElement
   word: LyricWord
   lastFill: string
   lastEdge: string
-}
-
-function clamp01(value: number): number {
-  return Math.max(0, Math.min(1, value))
 }
 
 export function useLyricsKaraoke(options: LyricsKaraokeOptions) {
@@ -88,8 +81,7 @@ export function useLyricsKaraoke(options: LyricsKaraokeOptions) {
         target.lastFill = fill
         target.element.style.setProperty('--lyric-word-fill', fill)
       }
-      // 只有正在推进的词才有柔化前沿,已唱完和未开唱的词一律实色
-      const edge = clamp01(Math.min(progress, 1 - progress) * EDGE_FADE_SLOPE).toFixed(3)
+      const edge = wordEdgeSoftness(progress).toFixed(3)
       if (edge !== target.lastEdge) {
         target.lastEdge = edge
         target.element.style.setProperty('--lyric-word-edge', edge)

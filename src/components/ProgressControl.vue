@@ -2,8 +2,28 @@
   import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
   import { storeToRefs } from 'pinia'
   import { usePlayerStore } from '../stores/player'
-  import { findActiveLyricIndex } from '../utils/lyrics'
+  import { wordEdgeSoftness, wordFillProgress } from '../utils/lyrics'
+  import { harmonyParentsOf, resolveLyricScene } from '../utils/lyric-scene'
   import type { LyricsSnapshot } from '../types/music'
+
+  /** 气泡里的一个音节。fill / edge 是预览时刻的静态扫光快照 */
+  interface PreviewWord {
+    text: string
+    fill: string
+    edge: string
+    trailingSpace: boolean
+  }
+
+  /** 气泡里的一行。对唱的第二声部靠右,背景和声更小更淡地附在主句下方 */
+  interface PreviewRow {
+    index: number
+    text: string
+    roman?: string
+    translation?: string
+    secondary: boolean
+    background: boolean
+    words: PreviewWord[] | null
+  }
 
   const props = withDefaults(
     defineProps<{
@@ -30,8 +50,6 @@
   const previewVisible = ref(false)
   const previewScrollDirection = ref<'forward' | 'backward' | 'idle'>('idle')
   const previewBubble = ref<HTMLElement | null>(null)
-  const previewContent = ref<HTMLElement | null>(null)
-  const previewTextElement = ref<HTMLElement | null>(null)
   const previewHover = ref<{
     track: HTMLElement
     clientX: number
@@ -40,26 +58,65 @@
   } | null>(null)
   const displayTime = computed(() => draftTime.value ?? currentTime.value)
   const progress = computed(() => (duration.value ? (displayTime.value / duration.value) * 100 : 0))
-  const previewLine = computed(() => {
+  const previewLines = computed(() => props.lyricPreview?.lines ?? [])
+  const previewHarmonyParents = computed(() => harmonyParentsOf(previewLines.value))
+  // 预览与面板共用同一套场景解析:对唱双声部同时亮、和声按自己的时间轴、
+  // 间奏保留上一句。旧实现是"最后一个开始的行",和声会把主句挤掉,
+  // 唱完的句子也会一直显示成正在唱
+  const previewScene = computed(() => {
     if (previewTime.value === null || props.lyricPreview?.status !== 'ready') return null
-    const lines = props.lyricPreview.lines
-    if (!lines.length) return null
-    const index = findActiveLyricIndex(lines, previewTime.value)
-    if (index < 0) return null
-    return lines[index] ?? null
+    if (!previewLines.value.length) return null
+    return resolveLyricScene(previewLines.value, previewTime.value, previewHarmonyParents.value)
   })
+  const previewRows = computed<PreviewRow[]>(() => {
+    const scene = previewScene.value
+    const time = previewTime.value
+    if (!scene || time === null) return []
+    const shown = new Set(scene.active)
+    // 和声只在它所属的主句被唱到时跟着出现。这里必须按"有主句"过滤:
+    // 找不到主句的和声在面板里是常驻的,气泡只显示当前这一句,不能把它也带上
+    for (const [index] of previewHarmonyParents.value) {
+      if (scene.harmonyOpen[index]) shown.add(index)
+    }
+    return [...shown]
+      .sort((left, right) => left - right)
+      .map((index) => {
+        const line = previewLines.value[index]!
+        return {
+          index,
+          text: line.text,
+          roman: line.roman,
+          translation: line.translation,
+          secondary: line.agent === 'secondary',
+          background: Boolean(line.background),
+          words:
+            line.words?.map((word) => {
+              const progress = wordFillProgress(time, word)
+              return {
+                text: word.text,
+                fill: progress.toFixed(3),
+                edge: wordEdgeSoftness(progress).toFixed(3),
+                trailingSpace: Boolean(word.trailingSpace),
+              }
+            }) ?? null,
+        }
+      })
+  })
+  // 间奏:这一句其实已经唱完了,只是保留着高亮。整体压暗以示区别
+  const previewHeld = computed(() => previewScene.value?.held ?? false)
   const previewStyle = computed(() => ({
     left: `${previewX.value}px`,
     top: `${previewY.value}px`,
     width: previewWidth.value === null ? undefined : `${previewWidth.value}px`,
     height: previewHeight.value === null ? undefined : `${previewHeight.value}px`,
   }))
+  // 只在"显示哪几行"变化时才换 key:逐字进度每帧都在变,拿它当 key 会让
+  // 气泡每帧重新播一次进出场动画
   const previewContentKey = computed(() => {
-    if (previewTime.value === null || !previewLine.value) return 'empty'
-    return `${previewLine.value.time}-${previewLine.value.text}-${previewLine.value.translation ?? ''}`
+    const rows = previewRows.value
+    if (!rows.length) return 'empty'
+    return `${previewHeld.value ? 'held' : 'sung'}:${rows.map((row) => row.index).join(',')}`
   })
-  const previewText = computed(() => previewLine.value?.text ?? '')
-  const previewTranslation = computed(() => previewLine.value?.translation ?? '')
   let progressDragTarget: HTMLElement | null = null
   let progressDragPointerId: number | null = null
   // 拖动开始时锁定的时长:拖动全程用它换算指针位置,
@@ -220,33 +277,37 @@
     return viewportWidth ? Math.min(320, Math.max(0, viewportWidth - 24)) : 320
   }
 
+  // 量气泡在"没有显式尺寸"时的自然大小。内容盒的宽度跟着气泡走(见样式里的注释),
+  // 带着上一次的宽度去量只会量回上一次的值;过渡也要一起摘掉,否则这次临时改宽
+  // 自己会动画起来,恢复时又动画回去
   function updatePreviewSize() {
-    const content = previewContent.value
-    if (!content) return
-    const text = previewTextElement.value
-    const time = content.querySelector<HTMLElement>('.lyric-preview-time')
-    const styles = window.getComputedStyle(content)
-    const horizontalPadding =
-      Number.parseFloat(styles.paddingLeft) + Number.parseFloat(styles.paddingRight)
-    const verticalPadding =
-      Number.parseFloat(styles.paddingTop) + Number.parseFloat(styles.paddingBottom)
-    const maxWidth = Math.min(
-      320,
-      Math.max(0, (window.innerWidth || document.documentElement.clientWidth || 0) - 24),
-    )
-    const intrinsicTextWidth = text?.scrollWidth ?? 0
-    const intrinsicTimeWidth = time?.scrollWidth ?? 0
-    const measuredWidth = Math.min(
-      maxWidth,
-      Math.max(intrinsicTextWidth, intrinsicTimeWidth) + horizontalPadding,
-    )
-    if (measuredWidth > 0) previewWidth.value = measuredWidth
+    const bubble = previewBubble.value
+    if (!bubble) return
+    const inlineWidth = bubble.style.width
+    const inlineHeight = bubble.style.height
+    const inlineTransition = bubble.style.transition
+    // 正在淡出的旧内容与新内容落在同一个网格单元里,不摘掉它,量到的是新旧两块的并集,
+    // 气泡就会停在偏大的宽度上不再收回来
+    const leaving = [...bubble.querySelectorAll<HTMLElement>('.lyric-preview-content-leave-active')]
+    for (const element of leaving) element.style.display = 'none'
+    bubble.style.transition = 'none'
+    bubble.style.width = ''
+    bubble.style.height = ''
 
-    const rect = content.getBoundingClientRect()
-    const measuredHeight = Math.max(
-      rect.height,
-      (text?.scrollHeight ?? 0) + (time?.scrollHeight ?? 0) + verticalPadding,
-    )
+    // 自然外框已经含边框与内边距,并被样式里的 max-width 收住
+    const natural = bubble.getBoundingClientRect()
+    const measuredWidth = natural.width
+    const measuredHeight = natural.height
+
+    bubble.style.width = inlineWidth
+    bubble.style.height = inlineHeight
+    for (const element of leaving) element.style.display = ''
+    // 先把恢复的尺寸提交掉,再放开过渡 —— 否则"临时宽度 → 恢复宽度"这一步
+    // 会被当成一次过渡的起点,气泡自己抖一下
+    void bubble.offsetWidth
+    bubble.style.transition = inlineTransition
+
+    if (measuredWidth > 0) previewWidth.value = measuredWidth
     if (measuredHeight > 0) previewHeight.value = measuredHeight
   }
 
@@ -362,7 +423,7 @@
     if (nextTime === null) return
     updatePreviewScrollDirection(nextTime)
     previewTime.value = nextTime
-    if (!previewLine.value) return
+    if (!previewRows.value.length) return
     previewVisible.value = true
     updatePreviewPosition(hover.clientX, hover.clientY, hover.track)
     void nextTick(() => {
@@ -375,7 +436,7 @@
     () => props.lyricPreview,
     () => {
       restoreLyricPreviewFromHover()
-      if (!previewLine.value) {
+      if (!previewRows.value.length) {
         hideLyricPreview()
       }
     },
@@ -404,7 +465,7 @@
     // 方向 class 只影响歌词文本切换的进出场方向,仅在真正换行(内容 key 变化)时应用,
     // pointermove 期间只累积 pending 值,避免每帧触发气泡重渲染
     previewScrollDirection.value = pendingPreviewDirection
-    if (!previewVisible.value || !previewLine.value) return
+    if (!previewVisible.value || !previewRows.value.length) return
     void nextTick(updatePreviewSize)
   })
 
@@ -464,21 +525,44 @@
   <Teleport to="body">
     <Transition name="lyric-preview">
       <div
-        v-if="previewVisible && previewLine"
+        v-if="previewVisible && previewRows.length"
         ref="previewBubble"
         class="lyric-preview-bubble"
-        :class="`scroll-${previewScrollDirection}`"
+        :class="[`scroll-${previewScrollDirection}`, { held: previewHeld }]"
         :style="previewStyle"
         aria-hidden="true"
       >
-        <div ref="previewContent" class="lyric-preview-content">
+        <div class="lyric-preview-content">
           <span class="lyric-preview-time">{{ formatTime(previewTime ?? 0) }}</span>
           <Transition name="lyric-preview-content">
-            <div :key="previewContentKey" ref="previewTextElement" class="lyric-preview-text">
-              <strong>{{ previewText }}</strong>
-              <span v-if="previewTranslation" class="lyric-preview-translation">
-                {{ previewTranslation }}
-              </span>
+            <div :key="previewContentKey" class="lyric-preview-text">
+              <div
+                v-for="row in previewRows"
+                :key="row.index"
+                class="lyric-preview-row"
+                :class="{ secondary: row.secondary, harmony: row.background }"
+              >
+                <strong>
+                  <template v-if="row.words">
+                    <template v-for="(word, wordIndex) in row.words" :key="wordIndex">
+                      <span
+                        class="lyric-preview-word"
+                        :style="{
+                          '--lyric-word-fill': word.fill,
+                          '--lyric-word-edge': word.edge,
+                        }"
+                        >{{ word.text }}</span
+                      >
+                      <span v-if="word.trailingSpace" class="lyric-preview-gap">{{ ' ' }}</span>
+                    </template>
+                  </template>
+                  <template v-else>{{ row.text }}</template>
+                </strong>
+                <span v-if="row.roman" class="lyric-preview-roman">{{ row.roman }}</span>
+                <span v-if="row.translation" class="lyric-preview-translation">
+                  {{ row.translation }}
+                </span>
+              </div>
             </div>
           </Transition>
         </div>
@@ -606,10 +690,82 @@
     }
   }
 
+  /* 间奏:这一句已经唱完,只是保留着高亮 */
+  .lyric-preview-bubble.held .lyric-preview-text {
+    opacity: 0.62;
+  }
+
   .lyric-preview-text,
   .lyric-preview-content strong,
   .lyric-preview-content span {
     display: block;
+  }
+
+  /* 音节必须留在行内。选择器要压过上面那条把 span 一律设为 block 的兜底规则,
+     否则每个音节各占一行,气泡会被撑成又窄又高的一条 */
+  .lyric-preview-content .lyric-preview-word,
+  .lyric-preview-content .lyric-preview-gap {
+    display: inline;
+  }
+
+  /* 同一时刻的多行(对唱双声部 + 背景和声)依次排开,间距比行内的译文更松 */
+  .lyric-preview-row + .lyric-preview-row {
+    margin-top: 7px;
+  }
+
+  /* 对唱的第二声部靠右,与主唱形成左右分栏,和面板同一套语义 */
+  .lyric-preview-row.secondary {
+    text-align: right;
+  }
+
+  /* 背景和声更小更淡,附在主句下方 */
+  .lyric-preview-row.harmony {
+    margin-top: 4px;
+    opacity: 0.72;
+
+    strong {
+      font-size: 0.72rem;
+      font-weight: 650;
+    }
+  }
+
+  /* 预览时刻的静态扫光快照:唱过的部分是亮色,没唱到的是暗色,
+     前沿留一段渐变,看起来是"唱到这里"而不是一条硬边的进度条。
+     不支持 background-clip: text 时整段保持亮色,不会变透明 */
+  .lyric-preview-word {
+    --lyric-word-fill: 1;
+    --lyric-word-edge: 0;
+
+    color: rgba(255, 255, 255, 0.92);
+  }
+
+  @supports (background-clip: text) or (-webkit-background-clip: text) {
+    .lyric-preview-word {
+      background-image: linear-gradient(
+        90deg,
+        rgba(255, 255, 255, 0.92) 0%,
+        rgba(255, 255, 255, 0.92) calc(var(--lyric-word-fill) * 100%),
+        rgba(255, 255, 255, 0.42)
+          calc(var(--lyric-word-fill) * 100% + 0.5em * var(--lyric-word-edge)),
+        rgba(255, 255, 255, 0.42) 100%
+      );
+      color: transparent;
+      -webkit-background-clip: text;
+      background-clip: text;
+    }
+  }
+
+  /* 音节之间要留一个真实的空白文本节点,否则英文长句没有换行机会 */
+  .lyric-preview-gap {
+    white-space: pre-wrap;
+  }
+
+  .lyric-preview-roman {
+    margin-top: 3px;
+    overflow-wrap: anywhere;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.66rem;
+    line-height: 1.3;
   }
 
   .lyric-preview-content {
@@ -617,8 +773,11 @@
     grid-template-areas:
       'time'
       'text';
-    width: max-content;
-    max-width: min(320px, calc(100vw - 24px));
+    /* 宽度跟着气泡走,不自己按 max-content 算。气泡的宽度是 JS 量出来的、带 110ms 过渡,
+       内容盒若自己算宽,过渡期间两者不一致 —— 右对齐的行会离开气泡右缘,
+       内容更宽时甚至被 overflow: hidden 裁掉一截,看起来就是横向跳一下。
+       气泡没有显式宽度时(首次显示、测量时)它自己是 max-content,这里的 100% 仍是固有宽度 */
+    width: 100%;
     padding: 10px 12px 11px;
     box-sizing: border-box;
   }

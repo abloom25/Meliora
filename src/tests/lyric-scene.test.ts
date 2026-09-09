@@ -64,6 +64,25 @@ describe('resolveLyricScene', () => {
     expect(resolveLyricScene(lines, 2.5).harmonyOpen[0]).toBe(true)
   })
 
+  it('lets a line without an end time give way to the next sung line', () => {
+    // 歌词源只给行首时间戳时没有 endTime。不让位的话每一行都会一直算在"正在唱"里,
+    // 越往后堆得越多(resolveLyricTimings 正常会补上 endTime,这里是数据不完整的兜底)
+    const lines: LyricLine[] = [
+      { time: 0, text: 'first' },
+      { time: 5, text: 'second' },
+      { time: 10, text: 'third' },
+    ]
+    expect(resolveLyricScene(lines, 7).active).toEqual([1])
+    expect(resolveLyricScene(lines, 12).active).toEqual([2])
+    // 同一时刻开唱的对唱双声部仍然一起亮
+    const duet: LyricLine[] = [
+      { time: 0, text: 'main', agent: 'primary' },
+      { time: 0, text: 'other', agent: 'secondary' },
+      { time: 5, text: 'next' },
+    ]
+    expect(resolveLyricScene(duet, 1).active).toEqual([0, 1])
+  })
+
   it('reports an empty scene before the first line', () => {
     const scene = resolveLyricScene(duetLines, -1)
     expect(scene).toMatchObject({ active: [], held: false, anchor: -1 })

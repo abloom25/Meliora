@@ -273,19 +273,33 @@ export interface ActiveLyricLines {
 }
 
 export function findActiveLyricIndices(lines: LyricLine[], currentTime: number): ActiveLyricLines {
-  const indices: number[] = []
+  const started: number[] = []
   let lastStarted = -1
   let lastStartedPrimary = -1
+  let lastPrimaryStart = Number.NEGATIVE_INFINITY
 
   for (const [index, line] of lines.entries()) {
     const start = line.time
     if (start === null || start === undefined || start > currentTime) continue
     lastStarted = index
-    if (!line.background) lastStartedPrimary = index
+    if (!line.background) {
+      lastStartedPrimary = index
+      lastPrimaryStart = Math.max(lastPrimaryStart, start)
+    }
     const end = line.endTime
     if (end !== undefined && currentTime >= end) continue
-    indices.push(index)
+    started.push(index)
   }
+
+  // 没有结束时间的行(歌词源只给了行首时间戳)在更晚开唱的主行出现时让位。
+  // 比的是开唱时间而不是行号:对唱双声部同时开唱、各占一行,按行号比会让第一声部
+  // 被第二声部挤掉。不让位的话每一行都会一直算在"正在唱"里,越往后堆得越多 ——
+  // resolveLyricTimings 会给每一行补上 endTime,所以这条只在数据不完整时兜底
+  const indices = started.filter((index) => {
+    const line = lines[index]
+    if (!line || line.endTime !== undefined) return true
+    return (line.time ?? Number.NEGATIVE_INFINITY) >= lastPrimaryStart
+  })
 
   if (indices.length) return { indices, held: false }
   const fallback = lastStartedPrimary >= 0 ? lastStartedPrimary : lastStarted
@@ -527,4 +541,17 @@ export function wordFillProgress(time: number, word: LyricWord): number {
   if (word.duration <= 0) return time >= word.time ? 1 : 0
   const ratio = (time - word.time) / word.duration
   return ratio <= 0 ? 0 : ratio >= 1 ? 1 : ratio
+}
+
+// 前沿柔化宽度的收敛斜率:进度进入 [0, 1/斜率] 或 [1-1/斜率, 1] 时线性收到 0
+const EDGE_FADE_SLOPE = 8
+
+/**
+ * 扫光前沿的柔化宽度缩放(0…1)。只有正在推进的词才有柔化前沿,
+ * 已唱完和未开唱的词一律实色 —— 不收敛的话,进度为 0 时渐变的前两个色标都落在 0%,
+ * 每个未唱词的左边缘都会被画出一段"亮→暗"
+ */
+export function wordEdgeSoftness(progress: number): number {
+  const softness = Math.min(progress, 1 - progress) * EDGE_FADE_SLOPE
+  return softness <= 0 ? 0 : softness >= 1 ? 1 : softness
 }
