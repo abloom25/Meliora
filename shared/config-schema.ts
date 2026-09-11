@@ -4,6 +4,7 @@ import type {
   MetingPlaylistConfig,
   MusicConfig,
   MusicServer,
+  MusicSourceToggle,
   PublicMusicConfig,
   UmamiConfig,
 } from './music-config'
@@ -294,6 +295,18 @@ export function validateMusicConfig(
     if (typeof g.enabled === 'boolean') googleAnalytics.enabled = g.enabled
     if (typeof g.measurementId === 'string') googleAnalytics.measurementId = g.measurementId
     cleaned.googleAnalytics = googleAnalytics
+  }
+
+  if (isObject(config.sources)) {
+    // 校验阶段已经挡掉未注册的音源与非布尔开关,这里只把形状收敛成 { enabled } 再落盘。
+    // 少了这一段,后台保存会「成功」但开关不生效 —— 写回仓库的配置里根本没有这张表
+    const sources: Record<string, MusicSourceToggle> = {}
+    for (const [id, toggle] of Object.entries(config.sources)) {
+      if (isObject(toggle) && typeof toggle.enabled === 'boolean') {
+        sources[id] = { enabled: toggle.enabled }
+      }
+    }
+    if (Object.keys(sources).length > 0) cleaned.sources = sources
   }
 
   return { valid: true, config: cleaned, errors: [] }

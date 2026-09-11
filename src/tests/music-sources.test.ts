@@ -100,6 +100,17 @@ describe('config validation for source toggles', () => {
     expect(validate({ sources: { meting: { enabled: false } } }).valid).toBe(true)
   })
 
+  // 只断言 valid 是不够的:校验通过但开关没被写进 cleaned 的话,
+  // 后台会保存「成功」而配置里没有这张表,前端按缺省当作开启,开关等于白点
+  it('carries the toggle map into the cleaned config that gets persisted', () => {
+    const result = validate({ sources: { meting: { enabled: false }, local: { enabled: true } } })
+    expect(result.valid).toBe(true)
+    expect(result.config?.sources).toEqual({
+      meting: { enabled: false },
+      local: { enabled: true },
+    })
+  })
+
   it('rejects a toggle for a source nobody registered', () => {
     const result = validate({ sources: { subsonic: { enabled: true } } })
     expect(result.valid).toBe(false)
