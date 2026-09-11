@@ -26,7 +26,8 @@ const CHANNEL_EVENTS: readonly AudioChannelEvent[] = [
 export interface WebAudioBackendOptions {
   /** iOS 后台安全模式:出声元素必须挂进文档,且只能有一路出声 */
   backgroundSafe: boolean
-  getMasterVolume: () => number
+  /** 初始总音量(0…1),缺省 1。之后一律由 setMasterVolume 说了算 */
+  initialVolume?: number
   /** 频谱降级时通知上层(队列小频谱要回退成序号) */
   onSpectrumLost?: () => void
 }
@@ -36,6 +37,11 @@ export interface WebAudioBackend extends AudioBackend {
   elementOf(channel: AudioChannel): HTMLAudioElement
   /** 跨源污染:换成无 crossOrigin 的元素,牺牲频谱保播放 */
   degradeForTaint(element: HTMLAudioElement): void
+}
+
+function clampGain(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return value <= 0 ? 0 : value >= 1 ? 1 : value
 }
 
 function createElement(
@@ -76,16 +82,26 @@ function createChannel(
   }
 
   function applyGain() {
-    const volume = getMasterVolume() * channelGain
-    element.volume = volume <= 0 ? 0 : volume >= 1 ? 1 : volume
+    element.volume = clampGain(getMasterVolume() * channelGain)
+  }
+
+  // <audio> 在少数状态下会拒绝写 currentTime 并抛 InvalidStateError
+  // (刚 ended、metadata 刚就绪时最常见)。后端契约要求方法不抛错,
+  // 所以落位一律走这里:写不进去就当这次跳转还欠着,等下一个时长事件再试
+  function applyCurrentTime(target: HTMLAudioElement, seconds: number, total: number): boolean {
+    try {
+      target.currentTime = Math.max(0, Math.min(seconds, total))
+      return true
+    } catch {
+      return false
+    }
   }
 
   function flushPendingSeek() {
     if (pendingSeek === null) return
     const total = element.duration
     if (!Number.isFinite(total) || total <= 0) return
-    element.currentTime = Math.max(0, Math.min(pendingSeek, total))
-    pendingSeek = null
+    if (applyCurrentTime(element, pendingSeek, total)) pendingSeek = null
   }
 
   function attach(target: HTMLAudioElement) {
@@ -139,14 +155,13 @@ function createChannel(
         pendingSeek = seconds
         return
       }
-      element.currentTime = Math.max(0, Math.min(seconds, total))
-      pendingSeek = null
+      pendingSeek = applyCurrentTime(element, seconds, total) ? null : seconds
     },
     duration() {
       return Number.isFinite(element.duration) && element.duration > 0 ? element.duration : null
     },
     setGain(gain) {
-      channelGain = gain <= 0 ? 0 : gain >= 1 ? 1 : gain
+      channelGain = clampGain(gain)
       applyGain()
     },
     gain() {
@@ -210,11 +225,16 @@ function createChannel(
 }
 
 export function createWebAudioBackend(options: WebAudioBackendOptions): WebAudioBackend {
+  // 总音量由后端自己持有:setMasterVolume 是唯一的写入口,
+  // 从外部闭包现取会让传进来的音量与实际生效的音量可能不是同一个值
+  let masterVolume = clampGain(options.initialVolume ?? 1)
+  const getMasterVolume = () => masterVolume
+
   // 第一路出声,后两路预加载
   const internals = [
-    createChannel('main', createElement('metadata', 'anonymous'), options.getMasterVolume),
-    createChannel('spare-a', createElement('auto', 'anonymous'), options.getMasterVolume),
-    createChannel('spare-b', createElement('auto', 'anonymous'), options.getMasterVolume),
+    createChannel('main', createElement('metadata', 'anonymous'), getMasterVolume),
+    createChannel('spare-a', createElement('auto', 'anonymous'), getMasterVolume),
+    createChannel('spare-b', createElement('auto', 'anonymous'), getMasterVolume),
   ]
   const byChannel = new Map(internals.map((entry) => [entry.channel, entry]))
   let active = internals[0]!.channel
@@ -246,7 +266,8 @@ export function createWebAudioBackend(options: WebAudioBackendOptions): WebAudio
     },
     supportsOverlap: () => !options.backgroundSafe,
     supportsSpectrum: () => spectrumAvailable,
-    setMasterVolume() {
+    setMasterVolume(volume) {
+      masterVolume = clampGain(volume)
       // 总音量变化后各路要按自己的增益重算
       for (const entry of internals) entry.channel.setGain(entry.channel.gain())
     },

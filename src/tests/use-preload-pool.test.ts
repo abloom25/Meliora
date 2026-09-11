@@ -76,7 +76,7 @@ class MockImageWithoutDecode {
 // 预加载池现在只认播放通道句柄。这里用真实的 Web 后端,
 // 触发"就绪/失败"时直接在通道背后的元素上派事件
 function createBackend() {
-  return createWebAudioBackend({ backgroundSafe: false, getMasterVolume: () => 1 })
+  return createWebAudioBackend({ backgroundSafe: false, initialVolume: 1 })
 }
 
 function resolveDeferred(callback: (() => void) | null) {

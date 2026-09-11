@@ -47,7 +47,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   const iosBackgroundSafeAudio = shouldUseIOSBackgroundSafeAudio()
   const backend = createWebAudioBackend({
     backgroundSafe: iosBackgroundSafeAudio,
-    getMasterVolume: () => settings.value.volume,
+    initialVolume: settings.value.volume,
     // 跨源素材被 Web Audio 拒绝后频谱不可用,队列小频谱要回退成序号
     onSpectrumLost: () => {
       spectrumAvailable.value = false

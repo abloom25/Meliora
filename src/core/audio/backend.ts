@@ -56,7 +56,10 @@ export interface AudioChannel {
 }
 
 export interface AudioBackend {
-  /** 全部通道。第一路是出声通道,其余给预加载 */
+  /**
+   * 全部通道。第一路是出声通道,其余给预加载。
+   * **至少三路**:一路出声 + 上一首 / 下一首各一路预加载。给不够的后端装不上预加载池
+   */
   channels(): readonly AudioChannel[]
   active(): AudioChannel
   setActive(channel: AudioChannel): void

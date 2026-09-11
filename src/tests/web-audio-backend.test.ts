@@ -20,7 +20,7 @@ describe('web audio backend', () => {
   function backend(backgroundSafe = false, onSpectrumLost?: () => void) {
     return createWebAudioBackend({
       backgroundSafe,
-      getMasterVolume: () => volume,
+      initialVolume: volume,
       onSpectrumLost,
     })
   }
@@ -40,11 +40,40 @@ describe('web audio backend', () => {
     channel.setGain(0.5)
     expect(element.volume).toBeCloseTo(0.5, 5)
 
-    volume = 0.4
+    // 总音量以传进来的实参为准,后端不该回头去读构造时那个闭包
     audio.setMasterVolume(0.4)
     expect(element.volume).toBeCloseTo(0.2, 5)
     // 总音量变了,这一路自己的增益不该被改写
     expect(channel.gain()).toBeCloseTo(0.5, 5)
+    audio.dispose()
+  })
+
+  it('swallows a rejected currentTime write and retries it on the next duration event', () => {
+    // 单曲循环在 ended 事件里立刻 seek(0),部分浏览器此刻会抛 InvalidStateError。
+    // 后端契约要求方法不抛错,否则异常会从 ended 监听里窜出去,重播直接变成停播
+    const audio = backend()
+    const channel = audio.active()
+    const element = audio.elementOf(channel)
+    defineProp(element, 'duration', 120)
+
+    let accepted: number | null = null
+    let rejecting = true
+    Object.defineProperty(element, 'currentTime', {
+      configurable: true,
+      get: () => accepted ?? 0,
+      set: (value: number) => {
+        if (rejecting) throw new DOMException('seek rejected', 'InvalidStateError')
+        accepted = value
+      },
+    })
+
+    expect(() => channel.seek(30)).not.toThrow()
+    expect(accepted).toBeNull()
+
+    // 欠着的跳转要在下一次时长事件里补上
+    rejecting = false
+    element.dispatchEvent(new Event('durationchange'))
+    expect(accepted).toBe(30)
     audio.dispose()
   })
 

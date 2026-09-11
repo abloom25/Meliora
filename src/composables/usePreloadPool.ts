@@ -119,16 +119,22 @@ export interface PreloadPoolOptions {
 export function usePreloadPool(options: PreloadPoolOptions) {
   const { backend, store, settings, transitionInProgress } = options
   const spares = backend.channels().slice(1)
+  const [previousChannel, nextChannel] = spares
+  // 契约要求后端至少给三路。给不够就在装配时当场报错,
+  // 别拖到第一次预加载才在 undefined 上解引用 —— 那时候已经看不出是后端的问题了
+  if (!previousChannel || !nextChannel) {
+    throw new Error('usePreloadPool 需要后端提供至少 3 路通道:1 路出声 + 2 路预加载')
+  }
   const preloadSlots: Record<PreloadDirection, PreloadSlot> = {
     previous: {
-      channel: spares[0]!,
+      channel: previousChannel,
       direction: 'previous',
       ready: null,
       track: null,
       cleanup: null,
     },
     next: {
-      channel: spares[1]!,
+      channel: nextChannel,
       direction: 'next',
       ready: null,
       track: null,
