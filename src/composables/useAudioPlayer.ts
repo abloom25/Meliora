@@ -13,7 +13,7 @@ import {
   fadeGain,
   fadeProgress,
 } from '../core/audio/fade'
-import { SKIP_NOTICE, describePlaybackFailure } from '../core/audio/failure'
+import { describePlaybackFailure, resolveFailureAction } from '../core/audio/failure'
 import { previousMeansRestart, resolveSeek, shouldStartAutoCrossfade } from '../core/audio/timeline'
 import { useBeatAnalyser } from '../platform/web/useBeatAnalyser'
 import { useEqualizer } from './useEqualizer'
@@ -420,11 +420,17 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         if (!ready || isSwitchAborted(controller)) {
           if (!ready) {
             markTrackFailed(track.id)
-            // 与随后调度的 next(false) 走同一预测:先标记失败再 predictNextTrack(false),
-            // 无实际后继(如 sequence 播到队尾)时不提示"继续播放",
-            // 否则提示会与实际停止的行为不符。
-            if (shouldPlay && settings.value.skipOnError && predictNextTrack(false)) {
-              preloadMessage.value = SKIP_NOTICE
+            // 预加载没就绪等同于取不到音频。跳不跳同样交给 core/audio/failure:
+            // 先标记失败再预测后继,没有实际后继(如 sequence 播到队尾)时它不会给出
+            // skip,提示也就不会与"其实已经停了"打架
+            const action = resolveFailureAction('network', {
+              // 本来就不打算出声的切换(静默换曲)谈不上"跳过"
+              skipOnError: shouldPlay && settings.value.skipOnError,
+              hasNextTrack: Boolean(predictNextTrack(false)),
+              canFallBack: false,
+            })
+            if (action.kind === 'skip') {
+              preloadMessage.value = action.notice
               schedulePlayerTimeout(() => void next(false), 80)
             }
           }
@@ -530,12 +536,13 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         .catch((error) => {
           if (isSwitchAborted(controller)) return
           markTrackFailed(track.id)
-          // 先算出错误描述:后面的 clearSlot 会清掉 newAudio.src,
-          // 事后再调用 describePlaybackError 会得到"没有可用的音频地址"这种不准确文案。
-          const errorDescription = describePlaybackError(error, incoming)
-          store.errorMessage = errorDescription
+          // 先把失败原因归一出来:后面的 clearSlot 会清掉通道的 src,
+          // 事后再 classifyFailure 只会得到"没有可用的音频地址"这种不准确的结论
+          const reason = incoming.classifyFailure(error)
+          const skipOnError = settings.value.skipOnError
+          store.errorMessage = describePlaybackFailure(reason)
           incoming.pause()
-          if (settings.value.skipOnError) {
+          if (skipOnError) {
             backend.setActive(outgoing)
             // oldAudio 的 fade-out 可能已把音量压到 ~0(或仍在进行中),
             // 回退期间会"在播但无声";取消其增益动画并恢复满音量。
@@ -551,27 +558,25 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
             reverseSlot.track = null
             reverseSlot.ready = null
             clearSlot(reverseSlot)
-            // 与随后调度的 next(true) 走同一预测:先标记失败、先把 store 回退到旧曲目,
-            // 再以 predictNextTrack(true) 判断是否存在实际后继,
-            // 保证"继续播放"的提示与实际调度的行为一致。
-            if (predictNextTrack(true)) {
-              preloadMessage.value = SKIP_NOTICE
-              isPlaying.value = shouldPlay
-              schedulePlayerTimeout(() => void next(true), 0)
-            } else if (oldTrack) {
-              // 无实际后继但已回退到旧曲目:store 回退会触发 watch 重新加载并播放旧曲目,
-              // play() 成功后会清空 errorMessage,因此真实错误改走 preloadMessage 提示,
-              // 保证用户能看到"跳过失败"的原因,且不谎称"正在继续播放"。
-              preloadMessage.value = errorDescription
-              isPlaying.value = shouldPlay
-            } else {
-              // 无实际后继且无旧曲目可回退:干净地停止。
-              preloadMessage.value = ''
-              outgoing.pause()
-              outgoing.seek(0)
-              outgoing.setGain(0)
-              isPlaying.value = false
-            }
+          }
+          // 回退已经做完(store 也指回了旧曲目),此刻的 predictNextTrack(true) 才与
+          // 随后真正调度的 next(true) 是同一结果。跳过 / 回退 / 停止的取舍交给
+          // core/audio/failure,由它保证提示语和实际发生的事一致
+          const action = resolveFailureAction(reason, {
+            skipOnError,
+            hasNextTrack: Boolean(predictNextTrack(true)),
+            canFallBack: Boolean(oldTrack),
+          })
+          if (action.kind === 'skip') {
+            preloadMessage.value = action.notice
+            isPlaying.value = shouldPlay
+            schedulePlayerTimeout(() => void next(true), 0)
+          } else if (action.kind === 'fall-back') {
+            // 已经回退到旧曲目:store 回退会触发 watch 重新加载并播放它,
+            // play() 成功后会清空 errorMessage,所以真实原因改走 preloadMessage,
+            // 既让用户看得到为什么跳过,也不谎称"正在继续播放"
+            preloadMessage.value = action.notice
+            isPlaying.value = shouldPlay
           } else {
             preloadMessage.value = ''
             outgoing.pause()
@@ -786,17 +791,22 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     if (wasTransitioning) {
       console.warn('[useAudioPlayer] 切歌过程中当前音频出错', failedTrack?.id ?? '(无曲目)')
     }
-    // willSkip 必须与随后调度的 next(false) 的真实行为一致:先标记失败再预测后继。
-    // 否则单曲循环下会预测到刚被拉黑的当前曲目,提示"正在继续播放"而实际已停
-    const willSkip =
-      Boolean(failedTrack) && settings.value.skipOnError && Boolean(predictNextTrack(false))
-    if (willSkip) {
-      preloadMessage.value = SKIP_NOTICE
+    // 决策必须与随后调度的 next(false) 得出同一结果:先标记失败再预测后继,
+    // 否则单曲循环下会预测到刚被拉黑的当前曲目,提示"正在继续播放"而实际已经停了
+    const reason = channel.classifyFailure(new Error('media error'))
+    const action = resolveFailureAction(reason, {
+      skipOnError: Boolean(failedTrack) && settings.value.skipOnError,
+      hasNextTrack: Boolean(predictNextTrack(false)),
+      // 出错的就是正在出声的这一路,没有"刚才那一首"可以退回去
+      canFallBack: false,
+    })
+    if (action.kind === 'skip') {
+      preloadMessage.value = action.notice
       store.errorMessage = ''
       schedulePlayerTimeout(() => void next(false), 80)
     } else {
       // 不跳过时透传真实原因(网络/解码/源不支持),别让播放器静默停住
-      store.errorMessage = describePlaybackError(new Error('media error'), channel)
+      store.errorMessage = describePlaybackFailure(reason)
     }
   }
 
