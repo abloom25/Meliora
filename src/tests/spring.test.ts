@@ -5,7 +5,7 @@ import {
   snapSpring,
   springFromDuration,
   stepSpring,
-} from '../utils/spring'
+} from '../core/motion/spring'
 
 function settle(state: ReturnType<typeof createSpringState>, target: number, seconds: number) {
   const step = 1 / 60

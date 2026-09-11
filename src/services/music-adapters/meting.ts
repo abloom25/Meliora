@@ -1,6 +1,9 @@
-import type { MetingPlaylistConfig, MetingTrack, Track } from '../../types/music'
+import { httpFetch } from '../http'
+import type { Track } from '../../core/types'
+import type { MetingPlaylistConfig } from '../../../shared/music-config'
+import type { MetingTrack } from './types'
 import { hasCachedLyrics, loadCombinedLyrics, registerTrackLyrics } from '../lyrics'
-import { mapMetingTrack } from '../../utils/tracks'
+import { mapMetingTrack } from './track-mapping'
 import type { MusicProviderAdapter, MusicProviderContext } from './types'
 
 function buildMetingPlaylistUrl(apiEndpoint: string, playlist: MetingPlaylistConfig): string {
@@ -39,7 +42,7 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(url, { signal: controller.signal })
+    return await httpFetch(url, { signal: controller.signal })
   } finally {
     clearTimeout(timer)
   }

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import PlayerControls from '../components/PlayerControls.vue'
 import { usePlayerStore } from '../stores/player'
-import type { LyricsSnapshot } from '../types/music'
+import type { LyricsSnapshot } from '../core/types'
 
 const lyricPreview: LyricsSnapshot = {
   status: 'ready',

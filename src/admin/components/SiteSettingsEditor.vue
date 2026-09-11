@@ -1,7 +1,7 @@
 <script setup lang="ts">
   import { computed, onBeforeUnmount, ref, watch } from 'vue'
   import { Check, Loader2, PlugZap, Upload, X } from '@lucide/vue'
-  import type { MusicConfig } from '../../types/music'
+  import type { MusicConfig } from '../../../shared/music-config'
   import BaseInput from '../../components/BaseInput.vue'
   import {
     MAX_UPLOAD_BYTES,

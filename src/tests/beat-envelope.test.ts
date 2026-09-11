@@ -4,7 +4,7 @@ import {
   createBeatEnvelope,
   sanitizeBeatFlashRate,
   type BeatFlashRate,
-} from '../utils/beat-envelope'
+} from '../core/analysis/beat-envelope'
 
 const DT = 1 / 60
 

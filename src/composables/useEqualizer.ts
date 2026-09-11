@@ -1,6 +1,6 @@
 import { watch, type Ref } from 'vue'
-import type { PlayerSettings } from '../types/music'
-import { EQ_PRESETS } from '../utils/equalizer'
+import type { PlayerSettings } from '../core/types'
+import { EQ_PRESETS } from '../core/audio/equalizer'
 
 export interface UseEqualizerOptions {
   settings: Ref<PlayerSettings>

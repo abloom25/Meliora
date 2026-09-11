@@ -4,7 +4,7 @@
   import { APP_VERSION } from '../../generated/app-version'
   import { checkUpdate, type UpdateInfo } from '../services/admin-api'
   import { useUpdateStatus } from '../composables/useUpdateStatus'
-  import type { MusicConfig } from '../../types/music'
+  import type { MusicConfig } from '../../../shared/music-config'
   import ConfirmModal from '../components/ConfirmModal.vue'
 
   const REPO_URL = 'https://github.com/abloom25/Meliora'

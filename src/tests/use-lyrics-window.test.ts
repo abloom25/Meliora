@@ -1,10 +1,10 @@
 import { mount } from '@vue/test-utils'
 import { defineComponent, nextTick, reactive, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { useLyricsWindow } from '../composables/useLyricsWindow'
-import type { LyricsSnapshot, Track } from '../types/music'
+import { useLyricsWindow } from '../platform/web/useLyricsWindow'
+import type { LyricsSnapshot, Track } from '../core/types'
 
-vi.mock('../utils/browser', () => ({
+vi.mock('../platform/web/browser', () => ({
   supportsDocumentPictureInPicture: vi.fn(() => false),
 }))
 

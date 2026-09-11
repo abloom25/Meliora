@@ -4,10 +4,10 @@ import {
   deduplicateTracks,
   filterTracks,
   formatTrackDisplayTitle,
-  mapMetingTrack,
   mergeTrackShareAliases,
-} from '../utils/tracks'
-import type { Track } from '../types/music'
+} from '../core/library/tracks'
+import { mapMetingTrack } from '../services/music-adapters/track-mapping'
+import type { Track } from '../core/types'
 
 const tracks: Track[] = [
   {

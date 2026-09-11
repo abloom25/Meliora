@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createLyricClock } from '../utils/lyric-clock'
+import { createLyricClock } from '../core/lyrics/clock'
 
 describe('createLyricClock', () => {
   it('stays frozen until resumed', () => {

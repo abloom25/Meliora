@@ -1,5 +1,5 @@
 import { ref, computed, watch, onBeforeUnmount, type Ref } from 'vue'
-import { isEditableElement } from '../utils/dom'
+import { isEditableElement } from '../platform/web/dom'
 
 export type DrawerDetent = 'full' | 'half' | 'closed'
 

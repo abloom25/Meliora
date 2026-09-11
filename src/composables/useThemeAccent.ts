@@ -1,6 +1,6 @@
 import { onBeforeUnmount, ref } from 'vue'
-import type { ThemeColor } from '../utils/theme'
-import { isReducedMotion } from '../utils/motion'
+import type { ThemeColor } from '../platform/web/theme'
+import { isReducedMotion } from '../platform/web/reduced-motion'
 
 const DEFAULT_ACCENT = '#81d8d0'
 const DEFAULT_ACCENT_SOFT = '#a7e7e2'

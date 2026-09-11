@@ -8,7 +8,7 @@ import {
   mergeTrackLyricsProvider,
   registerTrackLyrics,
 } from '../services/lyrics'
-import type { LyricLine, Track } from '../types/music'
+import type { LyricLine, Track } from '../core/types'
 
 describe('lyrics text cache timeout', () => {
   afterEach(() => {

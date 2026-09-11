@@ -6,7 +6,7 @@
  *   Worker → 主线程:  { id: number, theme: ThemeColor | null }
  */
 
-import { extractThemeColorFromPixels, type ThemeColor } from '../utils/theme-core'
+import { extractThemeColorFromPixels, type ThemeColor } from '../core/theme/palette'
 
 interface RequestMessage {
   id: number

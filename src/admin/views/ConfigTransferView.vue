@@ -1,7 +1,7 @@
 <script setup lang="ts">
   import { ref } from 'vue'
   import { Download, Upload } from '@lucide/vue'
-  import type { MusicConfig } from '../../types/music'
+  import type { MusicConfig } from '../../../shared/music-config'
   import { validateMusicConfig } from '../../../shared/config-schema'
   import ConfirmModal from '../components/ConfirmModal.vue'
 

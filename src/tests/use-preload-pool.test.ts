@@ -4,7 +4,8 @@ import { defineComponent, h, ref, type Ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import { preloadCover, usePreloadPool } from '../composables/usePreloadPool'
 import { usePlayerStore } from '../stores/player'
-import type { PlayerSettings, Track } from '../types/music'
+import type { PlayerSettings, Track } from '../core/types'
+import { createWebAudioBackend } from '../platform/web/audio-backend'
 
 const tracks: Track[] = [
   { id: '1', title: 'One', artist: 'A', audioUrl: '/1.mp3', kind: 'local' },
@@ -72,8 +73,10 @@ class MockImageWithoutDecode {
   }
 }
 
-function createAudioMock(): HTMLAudioElement {
-  return new Audio()
+// 预加载池现在只认播放通道句柄。这里用真实的 Web 后端,
+// 触发"就绪/失败"时直接在通道背后的元素上派事件
+function createBackend() {
+  return createWebAudioBackend({ backgroundSafe: false, getMasterVolume: () => 1 })
 }
 
 function resolveDeferred(callback: (() => void) | null) {
@@ -84,15 +87,14 @@ function resolveDeferred(callback: (() => void) | null) {
 function mountPool(settings: Ref<PlayerSettings>) {
   const store = usePlayerStore()
   store.setTracks(tracks)
-  const players = [createAudioMock(), createAudioMock(), createAudioMock()]
+  const backend = createBackend()
 
   const Harness = defineComponent({
     setup() {
       const pool = usePreloadPool({
-        players,
+        backend,
         store,
         settings,
-        getActiveAudio: () => players[0]!,
         transitionInProgress: () => false,
       })
       return { pool }
@@ -104,7 +106,15 @@ function mountPool(settings: Ref<PlayerSettings>) {
 
   const wrapper = mount(Harness)
   const pool = wrapper.vm.pool as ReturnType<typeof usePreloadPool>
-  return { wrapper, pool, store, players }
+  return { wrapper, pool, store, backend }
+}
+
+/** 让"下一首"那一路预加载失败:在通道背后的真实元素上派 error */
+function failNextSlot(
+  pool: ReturnType<typeof usePreloadPool>,
+  backend: ReturnType<typeof createBackend>,
+) {
+  backend.elementOf(pool.preloadSlots.next.channel).dispatchEvent(new Event('error'))
 }
 
 describe('usePreloadPool', () => {
@@ -183,14 +193,14 @@ describe('usePreloadPool', () => {
 
   it('uses a neutral message when a preload fails without skipping the current track', async () => {
     const settings = ref({ ...defaultSettings })
-    const { pool, store } = mountPool(settings)
+    const { pool, store, backend } = mountPool(settings)
     store.selectTrack(tracks[0]!, tracks)
 
     const ready = pool.loadSlot('next', tracks[1]!)
-    pool.preloadSlots.next.audio.dispatchEvent(new Event('error'))
+    failNextSlot(pool, backend)
 
     await expect(ready).resolves.toBe(false)
-    expect(pool.failedTrackIds.has('2')).toBe(true)
+    expect(pool.failureLog.isFailed('2')).toBe(true)
     expect(pool.preloadMessage.value).toBe('预加载歌曲暂时无法播放，当前播放不受影响')
     expect(pool.preloadMessage.value).not.toContain('已跳过')
     expect(store.currentTrackId).toBe('1')
@@ -198,12 +208,12 @@ describe('usePreloadPool', () => {
 
   it('skips a failed preloaded next track when predicting a manual next action', async () => {
     const settings = ref({ ...defaultSettings })
-    const { pool, store } = mountPool(settings)
+    const { pool, store, backend } = mountPool(settings)
     store.settings.playMode = 'loop'
     store.selectTrack(tracks[0]!, tracks)
 
     const ready = pool.loadSlot('next', tracks[1]!)
-    pool.preloadSlots.next.audio.dispatchEvent(new Event('error'))
+    failNextSlot(pool, backend)
     await expect(ready).resolves.toBe(false)
 
     expect(pool.predictNextTrack(true)?.id).toBe('3')
@@ -263,12 +273,12 @@ describe('usePreloadPool', () => {
 
   it('clearFailedTrack removes the failure mark so the track can be predicted again', async () => {
     const settings = ref({ ...defaultSettings })
-    const { pool, store } = mountPool(settings)
+    const { pool, store, backend } = mountPool(settings)
     store.settings.playMode = 'loop'
     store.selectTrack(tracks[0]!, tracks)
 
     const ready = pool.loadSlot('next', tracks[1]!)
-    pool.preloadSlots.next.audio.dispatchEvent(new Event('error'))
+    failNextSlot(pool, backend)
     await expect(ready).resolves.toBe(false)
     expect(pool.predictNextTrack(true)?.id).toBe('3')
 
@@ -280,12 +290,12 @@ describe('usePreloadPool', () => {
     vi.useFakeTimers()
     try {
       const settings = ref({ ...defaultSettings })
-      const { pool, store } = mountPool(settings)
+      const { pool, store, backend } = mountPool(settings)
       store.settings.playMode = 'loop'
       store.selectTrack(tracks[0]!, tracks)
 
       const ready = pool.loadSlot('next', tracks[1]!)
-      pool.preloadSlots.next.audio.dispatchEvent(new Event('error'))
+      failNextSlot(pool, backend)
       await expect(ready).resolves.toBe(false)
 
       // 失败标记有效期内跳过该曲目

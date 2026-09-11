@@ -4,20 +4,20 @@ import { defineComponent, h, nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
 import { useAudioPlayer } from '../composables/useAudioPlayer'
 import { usePlayerStore } from '../stores/player'
-import { shouldUseIOSBackgroundSafeAudio } from '../utils/browser'
-import type { Track } from '../types/music'
+import { shouldUseIOSBackgroundSafeAudio } from '../platform/web/browser'
+import type { Track } from '../core/types'
 
 const startBeatAnalysisMock = vi.fn()
 
-vi.mock('../utils/browser', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../utils/browser')>()
+vi.mock('../platform/web/browser', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../platform/web/browser')>()
   return {
     ...actual,
     shouldUseIOSBackgroundSafeAudio: vi.fn(() => false),
   }
 })
 
-vi.mock('../composables/useBeatAnalyser', () => ({
+vi.mock('../platform/web/useBeatAnalyser', () => ({
   useBeatAnalyser: vi.fn(() => ({
     beatLevel: { value: 0 },
     spectrumLevels: { value: [0.1, 0.1, 0.1, 0.1, 0.1] },

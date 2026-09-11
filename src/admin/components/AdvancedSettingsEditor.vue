@@ -1,6 +1,6 @@
 <script setup lang="ts">
   import { computed } from 'vue'
-  import type { MusicConfig } from '../../types/music'
+  import type { MusicConfig } from '../../../shared/music-config'
   import BaseInput from '../../components/BaseInput.vue'
   import BaseTextarea from '../../components/BaseTextarea.vue'
   import ToggleSwitch from '../../components/ToggleSwitch.vue'

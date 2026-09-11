@@ -4,8 +4,10 @@ import type {
   MetingPlaylistConfig,
   MusicConfig,
   MusicServer,
+  PublicMusicConfig,
   UmamiConfig,
-} from '../src/types/music'
+} from './music-config'
+import { findMusicSourceKind, isMusicSourceEnabled } from './music-sources'
 import { isPublicHttpsUrl, isValidUrl } from './utils/url-validation'
 import { CONFIG_LIMITS } from './constants'
 
@@ -55,7 +57,9 @@ export function validateMusicConfig(
     errors.push('siteIcon 必须是字符串')
   }
 
+  // 音源总开关关掉时整类都不会加载,此时不该再强制要求 apiEndpoint
   const hasEnabledPlaylist =
+    isMusicSourceEnabled(config as Partial<PublicMusicConfig>, 'meting') &&
     Array.isArray(config.playlists) &&
     config.playlists.some((item) => isObject(item) && item.enabled !== false)
   if (typeof config.apiEndpoint !== 'string') {
@@ -148,6 +152,24 @@ export function validateMusicConfig(
 
   if (config.customJs !== undefined && typeof config.customJs !== 'string') {
     errors.push('customJs 必须是字符串')
+  }
+
+  if (config.sources !== undefined) {
+    if (!isObject(config.sources)) {
+      errors.push('sources 必须是对象')
+    } else {
+      for (const [id, toggle] of Object.entries(config.sources)) {
+        if (!findMusicSourceKind(id)) {
+          errors.push(`sources.${id} 不是已注册的音源`)
+          continue
+        }
+        if (!isObject(toggle)) {
+          errors.push(`sources.${id} 必须是对象`)
+        } else if (toggle.enabled !== undefined && typeof toggle.enabled !== 'boolean') {
+          errors.push(`sources.${id}.enabled 必须是布尔值`)
+        }
+      }
+    }
   }
 
   if (!Array.isArray(config.playlists)) {

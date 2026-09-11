@@ -6,8 +6,8 @@ import {
   resolveLyricTimings,
   tokenizeLyricText,
   wordFillProgress,
-} from '../utils/lyrics'
-import type { LyricLine } from '../types/music'
+} from '../core/lyrics/lyrics'
+import type { LyricLine } from '../core/types'
 
 describe('tokenizeLyricText', () => {
   it('splits CJK per character and latin per word', () => {

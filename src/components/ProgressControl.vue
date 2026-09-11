@@ -2,9 +2,9 @@
   import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
   import { storeToRefs } from 'pinia'
   import { usePlayerStore } from '../stores/player'
-  import { wordEdgeSoftness, wordFillProgress } from '../utils/lyrics'
-  import { harmonyParentsOf, resolveLyricScene } from '../utils/lyric-scene'
-  import type { LyricsSnapshot } from '../types/music'
+  import { wordEdgeSoftness, wordFillProgress } from '../core/lyrics'
+  import { harmonyParentsOf, resolveLyricScene } from '../core/lyrics'
+  import type { LyricsSnapshot } from '../core/types'
 
   /** 气泡里的一个音节。fill / edge 是预览时刻的静态扫光快照 */
   interface PreviewWord {

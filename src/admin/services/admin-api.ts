@@ -1,4 +1,4 @@
-import type { MusicConfig } from '../../types/music'
+import type { MusicConfig } from '../../../shared/music-config'
 import { validateMusicConfig } from '../../../shared/config-schema'
 import { markAdminUnauthenticated } from '../composables/useAdminAuth'
 import { fetchWithCsrf, csrfManager } from '../utils/csrf'

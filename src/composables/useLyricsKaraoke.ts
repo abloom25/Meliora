@@ -1,5 +1,5 @@
-import type { LyricLine, LyricWord } from '../types/music'
-import { wordEdgeSoftness, wordFillProgress } from '../utils/lyrics'
+import type { LyricLine, LyricWord } from '../core/types'
+import { wordEdgeSoftness, wordFillProgress } from '../core/lyrics'
 
 // 逐字扫光。只有当前正在唱的行需要每帧写入;其余行由 CSS 的
 // `.lyric-line { --lyric-word-fill: 1 }` 兜底为"整行已唱完"。

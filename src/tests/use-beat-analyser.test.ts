@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick, ref } from 'vue'
 import { mount } from '@vue/test-utils'
-import { useBeatAnalyser } from '../composables/useBeatAnalyser'
+import { useBeatAnalyser } from '../platform/web/useBeatAnalyser'
 
 class AudioNodeMock {
   connections: unknown[] = []

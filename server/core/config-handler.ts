@@ -17,7 +17,7 @@ import { defaultMusicConfig } from '../../shared/default-config'
 import { collectManagedAssetPaths } from '../../shared/managed-assets'
 import { logSanitizedError } from './error-handler'
 import { isAllowedUploadPath } from './upload-handler'
-import type { MusicConfig } from '../../src/types/music'
+import type { MusicConfig } from '../../shared/music-config'
 
 const CONFIG_PATH = 'public/config.json'
 

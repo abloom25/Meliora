@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { loadTrackLyrics, registerTrackLyrics } from '../services/lyrics'
 import { migrateSettings, usePlayerStore } from '../stores/player'
-import type { PlayerSettings, Track } from '../types/music'
+import { wireApplication } from '../app/composition-root'
+import type { PlayerSettings, Track } from '../core/types'
 
 const tracks: Track[] = [
   {
@@ -29,7 +30,11 @@ const tracks: Track[] = [
 ]
 
 describe('player store', () => {
-  beforeEach(() => setActivePinia(createPinia()))
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    // store 不再直接依赖服务层,歌词来源的搬运由组装点装上(与 main.ts 一致)
+    wireApplication()
+  })
 
   it('stops after the final track in sequence mode', () => {
     const store = usePlayerStore()

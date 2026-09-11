@@ -4,12 +4,13 @@
   import { useRouter } from 'vue-router'
   import { useAdminAuth } from '../composables/useAdminAuth'
   import { fetchConfig, saveConfig, type StagedUpload } from '../services/admin-api'
-  import type { MusicConfig } from '../../types/music'
+  import type { MusicConfig } from '../../../shared/music-config'
   import { collectManagedAssetPaths } from '../../../shared/managed-assets'
   import AdminSidebar from '../components/AdminSidebar.vue'
   import ConfirmModal from '../components/ConfirmModal.vue'
   import Toast from '../../components/Toast.vue'
   import SiteSettingsEditor from '../components/SiteSettingsEditor.vue'
+  import MusicSourceToggles from '../components/MusicSourceToggles.vue'
   import PlaylistEditor from '../components/PlaylistEditor.vue'
   import LocalTrackEditor from '../components/LocalTrackEditor.vue'
   import AnalyticsSettingsEditor from '../components/AnalyticsSettingsEditor.vue'
@@ -233,6 +234,9 @@
             @file-staged="handleFileStaged"
             @notify="(message: string, type: 'success' | 'error') => showMessage(message, type)"
           />
+          <div v-else-if="activeTab === 'sources'" key="sources" class="tab-wrapper">
+            <MusicSourceToggles :config="config" @update:config="config = $event" />
+          </div>
           <div v-else-if="activeTab === 'playlists'" key="playlists" class="tab-wrapper">
             <div class="admin-section">
               <h3 class="section-title">远程歌单</h3>

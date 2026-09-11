@@ -1,7 +1,7 @@
 <script setup lang="ts">
   import { onBeforeUnmount, ref, toRaw } from 'vue'
   import { ChevronDown, Plus, Trash2, Upload } from '@lucide/vue'
-  import type { LocalTrackConfig } from '../../types/music'
+  import type { LocalTrackConfig } from '../../../shared/music-config'
   import { LOCAL_TRACK_ID_PATTERN } from '../../../shared/config-schema'
   import {
     MAX_UPLOAD_BYTES,
