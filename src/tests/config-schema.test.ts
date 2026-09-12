@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { validateMusicConfig } from '../../shared/config-schema'
+import { TOKEN_PLAYBACK_UNSUPPORTED, getPlaybackSupportError } from '../../shared/playback-support'
+import type { MusicConfig } from '../../shared/music-config'
 
 const validConfig = {
   siteName: 'Meliora',
@@ -258,5 +260,21 @@ describe('validateMusicConfig', () => {
 
     expect(result.valid).toBe(false)
     expect(result.errors.some((error) => error.includes('receivePrereleaseUpdates'))).toBe(true)
+  })
+})
+
+describe('getPlaybackSupportError', () => {
+  it('rejects a token-protected source while a playlist is still enabled', () => {
+    expect(getPlaybackSupportError({ ...validConfig, apiToken: 'secret' } as MusicConfig)).toBe(
+      TOKEN_PLAYBACK_UNSUPPORTED,
+    )
+  })
+
+  it('tolerates a config that has no playlists at all', () => {
+    // fetchConfig 把 /api/config 的原始 JSON 直接断言成 MusicConfig,不经校验:
+    // 旧配置或被截断的配置里 playlists 可能压根不存在,兼容读取不能在这里抛
+    const legacy = { siteName: 'Meliora', apiEndpoint: 'https://api.example.com' }
+    expect(() => getPlaybackSupportError(legacy as MusicConfig)).not.toThrow()
+    expect(getPlaybackSupportError({ ...legacy, apiToken: 'secret' } as MusicConfig)).toBeNull()
   })
 })

@@ -274,6 +274,9 @@ export function createAdminApi(dependencies: AdminApiDependencies = {}) {
   async function testMusicApi(
     config: MusicConfig,
   ): Promise<{ ok: boolean; data?: MusicApiTestResult; error?: string }> {
+    // 与 saveConfig 不同,这里不放宽私网地址:服务端的 /api/test-music-api
+    // 一律按公网规则校验(server/core/music-api-tester.ts),dev 下放宽只会
+    // 让前端放行、再被服务端以同样的理由拒掉
     const validation = validateMusicConfig(config)
     if (!validation.valid) return { ok: false, error: validation.errors.join('; ') }
     const playbackError = getPlaybackSupportError(validation.config!)
@@ -382,14 +385,3 @@ export function createAdminApi(dependencies: AdminApiDependencies = {}) {
     fetchUpdateStatus,
   }
 }
-
-export const {
-  fetchConfig,
-  saveConfig,
-  uploadFile,
-  changePassword,
-  testMusicApi,
-  checkUpdate,
-  triggerUpdate,
-  fetchUpdateStatus,
-} = createAdminApi()

@@ -227,7 +227,8 @@ describe('admin-api', () => {
       )
     vi.stubGlobal('fetch', fetchMock)
 
-    const { uploadFile } = await import('../admin/services/admin-api')
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const { uploadFile } = createAdminApi()
     const result = await uploadFile('public/music/a/audio.mp3', 'base64')
 
     expect(result.ok).toBe(true)
@@ -273,7 +274,8 @@ describe('admin-api', () => {
       )
     vi.stubGlobal('fetch', fetchMock)
 
-    const { MAX_UPLOAD_BASE64_LENGTH, uploadFile } = await import('../admin/services/admin-api')
+    const { MAX_UPLOAD_BASE64_LENGTH, createAdminApi } = await import('../admin/services/admin-api')
+    const { uploadFile } = createAdminApi()
     const result = await uploadFile(
       'public/music/a/audio.mp3',
       'a'.repeat(MAX_UPLOAD_BASE64_LENGTH),
@@ -367,7 +369,8 @@ describe('admin-api', () => {
       )
     vi.stubGlobal('fetch', fetchMock)
 
-    const { triggerUpdate } = await import('../admin/services/admin-api')
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const { triggerUpdate } = createAdminApi()
     const result = await triggerUpdate('https://proxy.example/?url={url}', 'v0.3.0', true)
 
     expect(result).toEqual({
@@ -407,7 +410,8 @@ describe('admin-api', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const { fetchUpdateStatus } = await import('../admin/services/admin-api')
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const { fetchUpdateStatus } = createAdminApi()
     const result = await fetchUpdateStatus('2026-06-30T10:00:00.000Z', 'dispatch-123')
 
     expect(result.ok).toBe(true)
@@ -431,7 +435,8 @@ describe('admin-api', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const { fetchUpdateStatus } = await import('../admin/services/admin-api')
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const { fetchUpdateStatus } = createAdminApi()
     const result = await fetchUpdateStatus('2026-06-30T10:00:00.000Z', 'dispatch-123')
 
     expect(result).toEqual({
