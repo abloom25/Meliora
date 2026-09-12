@@ -59,7 +59,7 @@
   const { currentTrack, currentTrackId, currentTime, duration, isPlaying, settings, tracks } =
     storeToRefs(store)
   // --beat-level 高频写入的目标节点：封面层(其 ::after 亮层只改 opacity)与叠加层(::before 光晕),
-  // useBeatAnalyser 会在 RAF 中直接 setProperty 到这些节点，跳过根 :style 的样式重算。
+  // 节拍渲染适配器会在 RAF 中直接 setProperty 到这些节点，跳过根 :style 的样式重算。
   // 两层的 filter 都是静态的:每帧变化的只有 opacity / transform,不会整屏重栅格化。
   const artworkBackgroundRef = ref<HTMLElement | null>(null)
   const backgroundOverlayRef = ref<HTMLElement | null>(null)
@@ -318,7 +318,7 @@
   }))
   const playModeIcon = computed(() => PLAY_MODE_META[settings.value.playMode].icon)
   const beatStyle = computed(() => ({
-    // --beat-level 已移出本 computed：高频写入由 useBeatAnalyser 直接 setProperty 到目标节点，
+    // --beat-level 已移出本 computed：高频写入由节拍渲染适配器直接 setProperty 到目标节点，
     // 避免根元素 :style 改变触发整棵子树（233 个节点）样式重算。
     '--accent': accent.value,
     '--accent-soft': accentSoft.value,
@@ -1131,7 +1131,7 @@
     transition: background 0.46s ease;
   }
   // 叠加层上的节奏光晕:只有一团很淡的主题色,补一点色彩呼吸;主要的"变亮"由封面亮层承担。
-  // --beat-level / --beat-sustain 由 useBeatAnalyser 每帧直写到 .background-overlay,伪元素继承后参与 calc;
+  // --beat-level / --beat-sustain 由节拍渲染适配器每帧直写到 .background-overlay,伪元素继承后参与 calc;
   // opacity / transform 不挂 transition,避免每帧写入被过渡拦截;background 的过渡只在换歌换色时触发。
   .background-overlay::before {
     content: '';

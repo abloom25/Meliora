@@ -182,7 +182,7 @@ pnpm dev:full     # 前端 + 后端模拟(5175 + 8788)
 
 > ### 🔒 配置文件加密
 >
-> 管理后台保存的所有配置(站点信息、API Token、歌单、Umami / GA ID 等)在写入 GitHub 仓库时**全文 AES-GCM 256 加密**,仓库中只存储 base64 密文。构建期会从中生成公开播放器配置,但 `apiToken` 不会进入前端 bundle;需要 token 的 Meting API 后续应通过专门后端代理支持。
+> 管理后台保存的所有配置(站点信息、API Token、歌单、Umami / GA ID 等)在写入 GitHub 仓库时**全文 AES-GCM 256 加密**,仓库中只存储 base64 密文。构建期会从中生成公开播放器配置,但 `apiToken` 不会进入前端 bundle。播放器仅支持无需鉴权的公开 Meting API,不依赖管理边缘函数代理音源。启用远程歌单且填写 API Token 时,保存与连通测试都会明确拒绝；已有配置仍可读取,请在后台清空 Token 并更换为公开接口,或禁用相关歌单。不要把私密 Token 拼进公开 API 端点。服务端连通测试也不能替代浏览器的跨域访问验证。
 >
 > - **加密密钥**:从 `CONFIG_ENCRYPTION_KEY` 用 PBKDF2(100k 迭代)派生,密钥本身**不落盘、不出现在任何文件中**
 > - **密钥解耦**:`CONFIG_ENCRYPTION_KEY` 专用于加密与签名,`GH_TOKEN` 仅用于 GitHub API 读写,两者独立——`GH_TOKEN` 可随时轮换而不影响已加密的配置

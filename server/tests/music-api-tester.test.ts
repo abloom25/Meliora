@@ -11,6 +11,33 @@ const CONFIG: ConfigPayload = {
 }
 
 describe('music api tester', () => {
+  it('rejects token-dependent playback before making an upstream request', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('[]'))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await testMusicApi({ ...CONFIG, apiToken: 'private-token' })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining('暂不支持') })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('preserves existing endpoint query parameters just like the player', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('[]'))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const response = await testMusicApi({
+      ...CONFIG,
+      apiEndpoint: 'https://music-api.example.com/playlist?quality=high&id=old',
+      apiToken: '   ',
+    })
+    expect((await response.json()).ok).toBe(true)
+    const requested = new URL(String(fetchMock.mock.calls[0]?.[0]))
+    expect(requested.searchParams.get('quality')).toBe('high')
+    expect(requested.searchParams.getAll('id')).toEqual(['123'])
+    expect(requested.searchParams.get('server')).toBe('netease')
+    expect(requested.searchParams.has('token')).toBe(false)
+  })
+
   afterEach(() => {
     vi.unstubAllGlobals()
   })

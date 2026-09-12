@@ -4,6 +4,7 @@ import { usePlayerStore } from '../stores/player'
 import type { Track } from '../types/music'
 import { shouldUseIOSBackgroundSafeAudio } from '../utils/browser'
 import { useBeatAnalyser } from './useBeatAnalyser'
+import { createBeatVisualRenderer } from '../utils/beat-visuals'
 import { useEqualizer } from './useEqualizer'
 import {
   usePreloadPool,
@@ -42,12 +43,12 @@ function clamp(value: number, min: number, max: number) {
 export interface UseAudioPlayerOptions {
   /**
    * 可选：返回需要每帧同步 `--beat-level` CSS 变量的目标节点列表。
-   * 仅作为透传给 useBeatAnalyser 的 getBeatTargets。
+   * 由节拍渲染适配器消费，与分析器的采样逻辑分离。
    */
   getBeatTargets?: () => readonly (HTMLElement | null | undefined)[]
   /**
    * 可选：返回队列小频谱 meter 节点(`--spectrum-level-N` 写入目标)。
-   * 仅作为透传给 useBeatAnalyser 的 getSpectrumTargets。
+   * 由节拍渲染适配器消费，与分析器的采样逻辑分离。
    */
   getSpectrumTargets?: () => readonly (HTMLElement | null | undefined)[]
 }
@@ -125,14 +126,15 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   }
 
   const { bindFilters: bindEqFilters } = useEqualizer({ settings })
+  const beatVisuals = createBeatVisualRenderer(options)
   const { beatLevel, spectrumLevels, startBeatAnalysis, stopBeatAnalysis } = useBeatAnalyser({
     players,
     getActiveAudio: () => activeAudio,
     isPlaying,
     beatFlashRate: computed(() => settings.value.beatFlashRate),
     beatVisualDelay: computed(() => settings.value.beatVisualDelay),
-    getBeatTargets: options.getBeatTargets,
-    getSpectrumTargets: options.getSpectrumTargets,
+    onBeat: beatVisuals.renderBeat,
+    onSpectrum: beatVisuals.renderSpectrum,
     onEqFiltersReady: bindEqFilters,
     onTainted: (audio) => taintedHandler?.(audio),
   })

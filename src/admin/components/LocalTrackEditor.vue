@@ -3,16 +3,14 @@
   import { ChevronDown, Plus, Trash2, Upload } from '@lucide/vue'
   import type { LocalTrackConfig } from '../../types/music'
   import { LOCAL_TRACK_ID_PATTERN } from '../../../shared/config-schema'
-  import {
-    MAX_UPLOAD_BYTES,
-    MAX_UPLOAD_SIZE_LABEL,
-    uploadFile,
-    type StagedUpload,
-  } from '../services/admin-api'
+  import { MAX_UPLOAD_BYTES, MAX_UPLOAD_SIZE_LABEL, type StagedUpload } from '../services/admin-api'
+  import { useAdminApi } from '../composables/useAdminApi'
   import ConfirmModal from './ConfirmModal.vue'
   import Collapse from '../../components/Collapse.vue'
   import BaseInput from '../../components/BaseInput.vue'
   import { useFileStagingState } from '../composables/useFileStagingState'
+
+  const { uploadFile } = useAdminApi()
 
   const props = defineProps<{ tracks: LocalTrackConfig[] }>()
   const emit = defineEmits<{

@@ -1,5 +1,8 @@
 import { readonly, ref } from 'vue'
-import { fetchUpdateStatus, triggerUpdate, type UpdateStatusInfo } from '../services/admin-api'
+import type { UpdateStatusInfo } from '../services/admin-api'
+import { useAdminApi } from './useAdminApi'
+
+const { fetchUpdateStatus, triggerUpdate } = useAdminApi()
 
 export type UpdateRunState =
   | 'idle'

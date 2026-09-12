@@ -2,10 +2,13 @@
   import { onBeforeUnmount, onMounted, ref } from 'vue'
   import { GitFork, RefreshCw, ExternalLink, Check, AlertCircle, Loader2 } from '@lucide/vue'
   import { APP_VERSION } from '../../generated/app-version'
-  import { checkUpdate, type UpdateInfo } from '../services/admin-api'
+  import { type UpdateInfo } from '../services/admin-api'
+  import { useAdminApi } from '../composables/useAdminApi'
   import { useUpdateStatus } from '../composables/useUpdateStatus'
   import type { MusicConfig } from '../../types/music'
   import ConfirmModal from '../components/ConfirmModal.vue'
+
+  const { checkUpdate } = useAdminApi()
 
   const REPO_URL = 'https://github.com/abloom25/Meliora'
   const props = defineProps<{ config: MusicConfig }>()

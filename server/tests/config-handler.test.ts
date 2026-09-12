@@ -55,6 +55,40 @@ describe('config-handler', () => {
     expect(data).toMatchObject({ siteName: 'Meliora', playlists: [], localTracks: [] })
   })
 
+  it('rejects enabled token sources before writing to GitHub', async () => {
+    const { putConfig } = await import('../core/config-handler')
+    const response = await putConfig(
+      {
+        siteName: 'Meliora',
+        apiEndpoint: 'https://music.example.com/api',
+        apiToken: 'private-token',
+        playlists: [{ server: 'netease', playlistId: '123' }],
+        localTracks: [],
+      },
+      ENV,
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ error: expect.stringContaining('暂不支持') })
+    expect(githubMocks.getBranchSnapshot).not.toHaveBeenCalled()
+    expect(githubMocks.createBlob).not.toHaveBeenCalled()
+    expect(githubMocks.commitTreeAtomically).not.toHaveBeenCalled()
+  })
+
+  it('allows disabling legacy token sources without losing the rest of the config', async () => {
+    const { putConfig, getConfig } = await import('../core/config-handler')
+    const env = { ...ENV, DEVELOPMENT: 'true' }
+    const config = {
+      siteName: 'Legacy site',
+      apiEndpoint: 'https://music.example.com/api',
+      apiToken: 'private-token',
+      playlists: [{ server: 'netease', playlistId: '123', enabled: false }],
+      localTracks: [],
+    }
+    expect((await putConfig(config, env)).status).toBe(200)
+    expect(await (await getConfig(env)).json()).toMatchObject(config)
+  })
+
   it('fails closed when GitHub config loading fails', async () => {
     githubMocks.readFile.mockRejectedValue(new Error('GitHub unavailable'))
     const { getConfig } = await import('../core/config-handler')

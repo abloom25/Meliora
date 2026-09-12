@@ -3,7 +3,8 @@
   import { computed, onMounted, ref } from 'vue'
   import { useRouter } from 'vue-router'
   import { useAdminAuth } from '../composables/useAdminAuth'
-  import { fetchConfig, saveConfig, type StagedUpload } from '../services/admin-api'
+  import type { StagedUpload } from '../services/admin-api'
+  import { useAdminApi } from '../composables/useAdminApi'
   import type { MusicConfig } from '../../types/music'
   import { collectManagedAssetPaths } from '../../../shared/managed-assets'
   import AdminSidebar from '../components/AdminSidebar.vue'
@@ -19,6 +20,8 @@
   import AboutView from './AboutView.vue'
   import { useTimedMessage } from '../composables/useTimedMessage'
   import { useFileStagingState } from '../composables/useFileStagingState'
+
+  const { fetchConfig, saveConfig } = useAdminApi()
 
   const router = useRouter()
   const { logout } = useAdminAuth()
