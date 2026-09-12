@@ -312,6 +312,44 @@ describe('useAudioPlayer', () => {
     }
   })
 
+  it('treats a pause during startup as a cancellation, not a failed track', async () => {
+    vi.useFakeTimers()
+    const originalPlay = HTMLAudioElement.prototype.play
+    const originalPause = HTMLAudioElement.prototype.pause
+    // 启动还没完成就被暂停:浏览器会把悬着的 play() 打断成 AbortError
+    let rejectPendingPlay: ((error: unknown) => void) | null = null
+    HTMLAudioElement.prototype.play = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectPendingPlay = reject
+        }),
+    )
+    HTMLAudioElement.prototype.pause = vi.fn(() => {
+      rejectPendingPlay?.(new DOMException('interrupted by pause', 'AbortError'))
+      rejectPendingPlay = null
+    })
+    try {
+      const { player, store } = mountPlayer()
+      store.settings.playMode = 'loop'
+      store.settings.skipOnError = true
+
+      await player.selectAndPlay(tracks[0]!, tracks)
+      player.pause()
+      await vi.runOnlyPendingTimersAsync()
+      await Promise.resolve()
+
+      // 取消不是失败:不能跳到下一首,也不该弹任何提示
+      expect(store.currentTrackId).toBe('1')
+      expect(store.isPlaying).toBe(false)
+      expect(store.errorMessage).toBe('')
+      expect(player.preloadMessage.value).toBe('')
+    } finally {
+      HTMLAudioElement.prototype.play = originalPlay
+      HTMLAudioElement.prototype.pause = originalPause
+      vi.useRealTimers()
+    }
+  })
+
   it('clears pending skip timers on unmount', async () => {
     vi.useFakeTimers()
     const originalPlay = HTMLAudioElement.prototype.play

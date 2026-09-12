@@ -535,10 +535,18 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         })
         .catch((error) => {
           if (isSwitchAborted(controller)) return
-          markTrackFailed(track.id)
           // 先把失败原因归一出来:后面的 clearSlot 会清掉通道的 src,
           // 事后再 classifyFailure 只会得到"没有可用的音频地址"这种不准确的结论
           const reason = incoming.classifyFailure(error)
+          // 主动取消不算这首歌的失败:启动期间按暂停时,pause() 会让还悬着的 play()
+          // 抛 AbortError,而它并不 abort 本次切换(切换本身已经生效),走不到上面的早返回。
+          // 若按失败处理,这首歌会被拉黑 5 分钟,还会连带回退/跳到下一首。
+          // 通道已被 pause() 停住,这里只需要让播放状态与之对齐。
+          if (reason === 'aborted') {
+            isPlaying.value = false
+            return
+          }
+          markTrackFailed(track.id)
           const skipOnError = settings.value.skipOnError
           store.errorMessage = describePlaybackFailure(reason)
           incoming.pause()

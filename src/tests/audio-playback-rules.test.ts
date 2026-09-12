@@ -70,6 +70,14 @@ describe('playback failure', () => {
     expect(new Set(messages).size).toBe(messages.length)
   })
 
+  it('never skips a cancellation, however much else is available', () => {
+    // 启动期间用户按了暂停会把还悬着的 play() 打断成 'aborted':
+    // 这不是"这首歌放不了",跳过会让一次暂停变成跳到下一首
+    expect(
+      resolveFailureAction('aborted', { skipOnError: true, hasNextTrack: true, canFallBack: true }),
+    ).toEqual({ kind: 'stop' })
+  })
+
   it('skips to the next track when one actually exists', () => {
     expect(
       resolveFailureAction('network', { skipOnError: true, hasNextTrack: true, canFallBack: true }),

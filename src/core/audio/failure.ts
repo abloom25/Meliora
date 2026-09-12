@@ -69,6 +69,10 @@ export function resolveFailureAction(
   reason: PlaybackFailureReason,
   context: FailureContext,
 ): FailureAction {
+  // 主动取消不是"这首歌放不了":最常见的是启动期间用户按了暂停。
+  // 此时跳过会把"按一下暂停"变成"跳到下一首",而提示语本就是空串(见 describePlaybackFailure),
+  // 于是用户看到的是无缘无故换了首歌。取消一律干净地停下。
+  if (reason === 'aborted') return { kind: 'stop' }
   if (context.skipOnError && context.hasNextTrack) {
     return { kind: 'skip', notice: SKIP_NOTICE }
   }
