@@ -1,24 +1,8 @@
+import { buildMetingPlaylistUrl } from '../../../shared/music-api'
 import type { MetingPlaylistConfig, MetingTrack, Track } from '../../types/music'
 import { hasCachedLyrics, loadCombinedLyrics, registerTrackLyrics } from '../lyrics'
 import { mapMetingTrack } from '../../utils/tracks'
 import type { MusicProviderAdapter, MusicProviderContext } from './types'
-
-function buildMetingPlaylistUrl(apiEndpoint: string, playlist: MetingPlaylistConfig): string {
-  const baseUrl = 'https://meliora.local'
-  const isAbsoluteUrl = /^[a-z][a-z\d+.-]*:/i.test(apiEndpoint)
-  const isProtocolRelativeUrl = apiEndpoint.startsWith('//')
-  const url = new URL(apiEndpoint, baseUrl)
-
-  url.searchParams.set('server', playlist.server)
-  url.searchParams.set('type', 'playlist')
-  url.searchParams.set('id', playlist.playlistId)
-
-  if (isAbsoluteUrl) return url.toString()
-  if (isProtocolRelativeUrl) return `//${url.host}${url.pathname}${url.search}${url.hash}`
-
-  const pathname = apiEndpoint.startsWith('/') ? url.pathname : url.pathname.replace(/^\//, '')
-  return `${pathname}${url.search}${url.hash}`
-}
 
 /**
  * 从 Meting 资源地址中取出平台侧歌曲 ID(`?server=&type=&id=`)。

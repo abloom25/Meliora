@@ -17,7 +17,8 @@ import { defaultMusicConfig } from '../../shared/default-config'
 import { collectManagedAssetPaths } from '../../shared/managed-assets'
 import { logSanitizedError } from './error-handler'
 import { isAllowedUploadPath } from './upload-handler'
-import type { MusicConfig } from '../../src/types/music'
+import type { MusicConfig } from '../../shared/music-config'
+import { getPlaybackSupportError } from '../../shared/playback-support'
 
 const CONFIG_PATH = 'public/config.json'
 
@@ -95,6 +96,13 @@ export async function putConfig(body: unknown, env: Env): Promise<Response> {
   }
 
   const config = result.config!
+  const playbackError = getPlaybackSupportError(config)
+  if (playbackError) {
+    return new Response(JSON.stringify({ error: playbackError }), {
+      status: 400,
+      headers: CONFIG_HEADERS,
+    })
+  }
   const stagedResult = validateStagedUploads(
     request.uploads,
     collectManagedAssetPaths(config),

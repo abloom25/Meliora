@@ -35,17 +35,9 @@ export interface BeatAnalyserOptions {
   beatFlashRate?: Ref<number>
   /** 可选:闪光延迟微调(ms),叠加在自动输出延迟补偿之上,可为负 */
   beatVisualDelay?: Ref<number>
-  /**
-   * 可选：返回需要每帧同步 `--beat-level` / `--beat-sustain` CSS 变量的 DOM 节点列表。
-   * 直接 setProperty 到这些节点可以避免根元素 :style 触发整棵子树样式重算，
-   * 大幅降低 UpdateLayoutTree 频次。
-   */
-  getBeatTargets?: () => readonly (HTMLElement | null | undefined)[]
-  /**
-   * 可选：返回队列小频谱 meter 节点。每帧直接写入 `--spectrum-level-N`,
-   * 避免频谱柱经 Vue 响应式驱动整个播放队列 60fps 重渲染。
-   */
-  getSpectrumTargets?: () => readonly (HTMLElement | null | undefined)[]
+  /** 高频采样结果由宿主消费；分析器不持有视图节点或 CSS 变量。 */
+  onBeat?: (level: number, sustain: number) => void
+  onSpectrum?: (levels: readonly number[]) => void
   /**
    * 可选：当 EQ filter chain 首次创建完毕时回调，把 BiquadFilterNode 数组
    * 交给 useEqualizer 绑定，由其负责按 settings 更新各频段增益。
@@ -61,68 +53,9 @@ export interface BeatAnalyserOptions {
 }
 
 export function useBeatAnalyser(options: BeatAnalyserOptions) {
-  const { players, getActiveAudio, isPlaying, getBeatTargets, getSpectrumTargets } = options
+  const { players, getActiveAudio, isPlaying } = options
   const beatLevel = ref(0)
   const spectrumLevels = ref([0.1, 0.1, 0.1, 0.1, 0.1])
-  // 记录最近一次写到 DOM 的字符串值，避免重复写入触发样式风暴。
-  // 去抖缓存同时绑定主目标元素:目标重挂载(抽屉开合/虚拟列表滚动)后
-  // 即使值未变化也必须重写一轮,否则新元素一直没有内联变量
-  let lastBeatLevelCssValue = ''
-  let lastBeatTarget: HTMLElement | null = null
-  let lastSpectrumCssValues: string[] = []
-  let lastSpectrumTarget: HTMLElement | null = null
-
-  function writeBeatLevelToTargets(level: number, sustain = 0) {
-    if (!getBeatTargets) return
-    const targets = getBeatTargets()
-    const primary = targets.find((el) => el && el.isConnected) ?? null
-    if (!primary) {
-      lastBeatLevelCssValue = ''
-      lastBeatTarget = null
-      return
-    }
-    const nextLevel = level.toFixed(3)
-    const nextSustain = sustain.toFixed(3)
-    const next = `${nextLevel}/${nextSustain}`
-    if (primary === lastBeatTarget && next === lastBeatLevelCssValue) return
-    lastBeatLevelCssValue = next
-    lastBeatTarget = primary
-    for (const el of targets) {
-      // isConnected 守卫：组件卸载或 v-if 隐藏时跳过，避免脏写已脱离 DOM 的节点。
-      if (!el || !el.isConnected) continue
-      el.style.setProperty('--beat-level', nextLevel)
-      el.style.setProperty('--beat-sustain', nextSustain)
-    }
-  }
-
-  function writeSpectrumToTargets(levels: readonly number[]) {
-    if (!getSpectrumTargets) return
-    const targets = getSpectrumTargets()
-    const primary = targets.find((el) => el && el.isConnected) ?? null
-    if (!primary) {
-      lastSpectrumCssValues = []
-      lastSpectrumTarget = null
-      return
-    }
-    const nextValues = levels.map(
-      (level) => `${(Math.max(0.08, Math.min(1, level)) * 100).toFixed(1)}%`,
-    )
-    if (
-      primary === lastSpectrumTarget &&
-      nextValues.every((value, index) => value === lastSpectrumCssValues[index])
-    ) {
-      return
-    }
-    lastSpectrumCssValues = nextValues
-    lastSpectrumTarget = primary
-    for (const el of targets) {
-      if (!el || !el.isConnected) continue
-      nextValues.forEach((value, index) => {
-        el.style.setProperty(`--spectrum-level-${index}`, value)
-      })
-    }
-  }
-
   let audioContext: AudioContext | null = null
   let analyser: AnalyserNode | null = null
   let frequencyData: Uint8Array<ArrayBuffer> | null = null
@@ -244,11 +177,11 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     beatLevel.value = 0
     resetBeatTracking()
     lastFrameAt = 0
-    writeBeatLevelToTargets(0)
+    options.onBeat?.(0, 0)
     prevPercussiveLow?.fill(0)
     hpss?.reset()
     spectrumLevels.value = spectrumLevels.value.map(() => 0.08)
-    writeSpectrumToTargets(spectrumLevels.value)
+    options.onSpectrum?.(spectrumLevels.value)
     if (visibilityListenerRegistered) {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       visibilityListenerRegistered = false
@@ -266,8 +199,8 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     taintedSilenceMs = 0
     lastBeatFrameAt = 0
     spectrumLevels.value = spectrumLevels.value.map((level) => Math.max(0.08, level * 0.82))
-    writeSpectrumToTargets(spectrumLevels.value)
-    writeBeatLevelToTargets(0)
+    options.onSpectrum?.(spectrumLevels.value)
+    options.onBeat?.(0, 0)
   }
 
   function handleVisibilityChange() {
@@ -379,11 +312,11 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       lastObservedCurrentTime = activeAudio.currentTime
       beatLevel.value *= Math.exp(-dt / 0.13)
       sustainLevel *= Math.exp(-dt / 0.3)
-      writeBeatLevelToTargets(beatLevel.value, sustainLevel)
+      options.onBeat?.(beatLevel.value, sustainLevel)
       spectrumLevels.value = spectrumLevels.value.map((level) =>
         Math.max(0.08, level * Math.exp(-dt / 0.084)),
       )
-      writeSpectrumToTargets(spectrumLevels.value)
+      options.onSpectrum?.(spectrumLevels.value)
       if (beatLevel.value > 0.005) beatFrame = window.requestAnimationFrame(updateBeatLevel)
       else stopBeatAnalysis()
       return
@@ -478,8 +411,8 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       (sustainTarget - sustainLevel) * smoothingAlpha(dt, sustainTarget > sustainLevel ? 0.15 : 0.6)
     const delayed = delayedLevels(now, rawLevel, sustainLevel)
     beatLevel.value = delayed.level
-    // 高频写入：直接 setProperty 到目标节点，跳过 Vue reactivity 与根 :style 路径
-    writeBeatLevelToTargets(delayed.level, delayed.sustain)
+    // 同步通知宿主，渲染适配器可直接写 DOM，不需要根样式响应式更新。
+    options.onBeat?.(delayed.level, delayed.sustain)
 
     // 频谱柱五段 Hz 划分(sub/low/mid/high/air)
     const spectrumBands: Array<{ from: number; to: number }> = [
@@ -533,7 +466,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       return previous + (target - previous) * smoothingAlpha(dt, tau)
     })
     spectrumLevels.value = nextSpectrum
-    writeSpectrumToTargets(nextSpectrum)
+    options.onSpectrum?.(nextSpectrum)
     beatFrame = window.requestAnimationFrame(updateBeatLevel)
   }
 

@@ -13,13 +13,7 @@ const adminApiMock = vi.hoisted(() => ({
   testMusicApi: vi.fn(),
 }))
 
-vi.mock('../admin/services/admin-api', () => ({
-  MAX_UPLOAD_BYTES: 25 * 1024 * 1024,
-  MAX_UPLOAD_SIZE_LABEL: '25MB',
-  changePassword: adminApiMock.changePassword,
-  uploadFile: adminApiMock.uploadFile,
-  testMusicApi: adminApiMock.testMusicApi,
-}))
+vi.mock('../admin/composables/useAdminApi', () => ({ useAdminApi: () => adminApiMock }))
 
 function config(patch: Partial<MusicConfig> = {}): MusicConfig {
   return {
@@ -39,6 +33,18 @@ describe('admin consistency components', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     document.body.innerHTML = ''
+  })
+
+  it('explains token playback limitations and lets users clear a legacy token', async () => {
+    const wrapper = mount(SiteSettingsEditor, {
+      props: { config: config({ apiToken: 'legacy-token' }) },
+    })
+    expect(wrapper.text()).toContain('暂不支持 Token 音源')
+    await wrapper.find('input[placeholder="暂不支持，请留空"]').setValue('')
+    const updated = wrapper.emitted('update:config')?.at(-1)?.[0]
+    expect(updated).not.toHaveProperty('apiToken')
+    expect(updated).toMatchObject({ siteName: 'Meliora' })
+    wrapper.unmount()
   })
 
   it('requires an 8 character password before changing admin password', async () => {

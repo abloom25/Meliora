@@ -5,7 +5,7 @@ import type {
   MusicConfig,
   MusicServer,
   UmamiConfig,
-} from '../src/types/music'
+} from './music-config'
 import { isPublicHttpsUrl, isValidUrl } from './utils/url-validation'
 import { CONFIG_LIMITS } from './constants'
 

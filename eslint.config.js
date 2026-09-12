@@ -32,6 +32,46 @@ export default tseslint.config(
     },
   },
   {
+    files: ['shared/**/*.ts', 'server/**/*.ts'],
+    ignores: ['server/tests/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/src/**', 'vue', 'pinia', 'vue-router'],
+              message: '公共契约必须定义在 shared，后端与共享层不能依赖前端源码。',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ['src/admin/services/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: [
+                '**/composables/**',
+                '**/components/**',
+                '**/views/**',
+                'vue',
+                'pinia',
+                'vue-router',
+              ],
+              message: '服务层通过显式依赖注入通知宿主，不直接依赖 Vue 或视图状态。',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: ['scripts/**/*.{js,mjs,cjs}', '*.config.{js,mjs,cjs}'],
     languageOptions: {
       globals: { ...globals.node },

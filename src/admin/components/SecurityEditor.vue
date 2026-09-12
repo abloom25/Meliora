@@ -1,10 +1,12 @@
 <script setup lang="ts">
   import { ref } from 'vue'
-  import { changePassword } from '../services/admin-api'
+  import { useAdminApi } from '../composables/useAdminApi'
   import BaseInput from '../../components/BaseInput.vue'
   import Toast from '../../components/Toast.vue'
   import { AUTH_CONSTANTS } from '../../../shared/constants'
   import { useTimedMessage } from '../composables/useTimedMessage'
+
+  const { changePassword } = useAdminApi()
 
   const currentPassword = ref('')
   const newPassword = ref('')

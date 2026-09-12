@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick, ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import { useBeatAnalyser } from '../composables/useBeatAnalyser'
+import { createBeatVisualRenderer } from '../utils/beat-visuals'
+
+function createHarness(setup: () => Record<string, unknown>) {
+  return defineComponent({ setup, render: () => h('div') })
+}
 
 class AudioNodeMock {
   connections: unknown[] = []
@@ -100,19 +105,14 @@ describe('useBeatAnalyser', () => {
     const onEqFiltersReady = vi.fn()
     const players = [new Audio('/1.mp3'), new Audio('/2.mp3'), new Audio('/3.mp3')]
 
-    const Harness = defineComponent({
-      setup() {
-        const analyser = useBeatAnalyser({
-          players,
-          getActiveAudio: () => players[0]!,
-          isPlaying: ref(true),
-          onEqFiltersReady,
-        })
-        return { analyser }
-      },
-      render() {
-        return h('div')
-      },
+    const Harness = createHarness(() => {
+      const analyser = useBeatAnalyser({
+        players,
+        getActiveAudio: () => players[0]!,
+        isPlaying: ref(true),
+        onEqFiltersReady,
+      })
+      return { analyser }
     })
 
     const wrapper = mount(Harness)
@@ -185,19 +185,19 @@ describe('useBeatAnalyser beat detection', () => {
     const activeAudio =
       options.activeAudio ?? ({ paused: false, currentTime: 0 } as HTMLAudioElement)
     let analyserApi: ReturnType<typeof useBeatAnalyser> | null = null
-    const Harness = defineComponent({
-      setup() {
-        analyserApi = useBeatAnalyser({
-          players: [activeAudio],
-          getActiveAudio: () => activeAudio,
-          isPlaying: ref(true),
+    const Harness = createHarness(() => {
+      analyserApi = useBeatAnalyser({
+        players: [activeAudio],
+        getActiveAudio: () => activeAudio,
+        isPlaying: ref(true),
+        onSpectrum: createBeatVisualRenderer({
           getSpectrumTargets: options.spectrumTarget ? () => [options.spectrumTarget] : undefined,
-          onTainted: options.onTainted,
-          beatVisualDelay:
-            options.beatVisualDelay === undefined ? undefined : ref(options.beatVisualDelay),
-        })
-        return () => h('div')
-      },
+        }).renderSpectrum,
+        onTainted: options.onTainted,
+        beatVisualDelay:
+          options.beatVisualDelay === undefined ? undefined : ref(options.beatVisualDelay),
+      })
+      return {}
     })
     mount(Harness)
     const analyser = analyserApi as unknown as ReturnType<typeof useBeatAnalyser>
