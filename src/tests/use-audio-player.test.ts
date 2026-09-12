@@ -350,6 +350,48 @@ describe('useAudioPlayer', () => {
     }
   })
 
+  it('keeps the audible channel to itself after the library reloads empty', async () => {
+    vi.useFakeTimers()
+    const createdAudios: HTMLAudioElement[] = []
+    const originalAudio = globalThis.Audio
+    vi.stubGlobal(
+      'Audio',
+      vi.fn(function AudioMock() {
+        const audio = document.createElement('audio')
+        createdAudios.push(audio)
+        return audio
+      }),
+    )
+    const restore = stubAudioPlay()
+    try {
+      const { player, store } = mountPlayer()
+      store.settings.playMode = 'loop'
+      store.settings.smoothTrackChange = false
+      store.settings.preloadNextTrack = true
+
+      // 切过一次歌之后三路会轮转:第一路(出声通道的初始位置)落到了某个预加载槽手里
+      await player.selectAndPlay(tracks[0]!, tracks)
+      await player.next(true)
+      await vi.runOnlyPendingTimersAsync()
+
+      // 曲库重载成空(音源全挂/离线):播放停下,出声通道被拨回第一路
+      store.setTracks([])
+      expect(store.currentTrackId).toBeNull()
+
+      // 曲库回来了,继续放一首
+      store.setTracks(tracks)
+      store.selectTrack(tracks[0]!, tracks)
+      await vi.runOnlyPendingTimersAsync()
+
+      // 预加载不能把正在出声的这一路 release 掉再塞进别的歌
+      expect(createdAudios[0]?.src).toContain('/1.mp3')
+    } finally {
+      restore()
+      vi.stubGlobal('Audio', originalAudio)
+      vi.useRealTimers()
+    }
+  })
+
   it('clears pending skip timers on unmount', async () => {
     vi.useFakeTimers()
     const originalPlay = HTMLAudioElement.prototype.play

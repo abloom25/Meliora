@@ -123,6 +123,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     isTrackFailed,
     predictNextTrack,
     clearPreloads,
+    resetSlotChannels,
     clearSlot,
     clearPreloadMessage,
     findSlotByTrack,
@@ -303,7 +304,9 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     currentTime.value = 0
     duration.value = 0
     isPlaying.value = false
-    clearPreloads()
+    // 出声通道被拨回 channels[0],预加载槽必须跟着还原:
+    // 切过歌之后 channels[0] 可能正被某个槽占着,不还原就会被预加载抢走
+    resetSlotChannels()
     clearPreloadMessage()
     stopBeatAnalysis()
     syncMediaSession()

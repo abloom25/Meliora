@@ -203,6 +203,20 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     clearSlot(preloadSlots.next)
   }
 
+  /**
+   * 清空两路预加载,并把它们的通道还原成装配时的划分。
+   *
+   * 出声通道被强行拨回 channels[0] 时(找不到当前曲目而停止播放)必须走这里:
+   * 切过歌之后三路会轮转,某个槽手里可能正拿着 channels[0]。不还原的话
+   * "出声通道与两个槽互不相同"这条前提就破了,随后一次 loadSlot 会 release 掉
+   * 正在出声的那一路,再把别的歌以零增益加载进去 —— 按播放没声音或放错歌。
+   */
+  function resetSlotChannels() {
+    clearPreloads()
+    preloadSlots.previous.channel = previousChannel
+    preloadSlots.next.channel = nextChannel
+  }
+
   function clearPreloadMessage() {
     preloadMessage.value = ''
   }
@@ -327,6 +341,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     predictNextTrack,
     predictPreviousTrack,
     clearPreloads,
+    resetSlotChannels,
     clearSlot,
     clearPreloadMessage,
     findSlotByTrack,

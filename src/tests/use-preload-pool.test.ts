@@ -286,6 +286,26 @@ describe('usePreloadPool', () => {
     expect(pool.predictNextTrack(true)?.id).toBe('2')
   })
 
+  it('resetSlotChannels puts the two preload slots back on the spare channels', () => {
+    const settings = ref({ ...defaultSettings })
+    const { pool, backend } = mountPool(settings)
+    const [main, spareA, spareB] = backend.channels()
+
+    // 切过歌之后三路会轮转,出声的 channels[0] 可能落到某个槽手里
+    pool.preloadSlots.previous.channel = main!
+    pool.preloadSlots.previous.track = tracks[0]!
+    pool.preloadSlots.next.channel = spareA!
+    pool.preloadSlots.next.track = tracks[1]!
+
+    pool.resetSlotChannels()
+
+    // 还原成装配时的划分:出声的那一路重新只属于播放器
+    expect(pool.preloadSlots.previous.channel).toBe(spareA)
+    expect(pool.preloadSlots.next.channel).toBe(spareB)
+    expect(pool.preloadSlots.previous.track).toBeNull()
+    expect(pool.preloadSlots.next.track).toBeNull()
+  })
+
   it('allows a failed track to be retried after the failure TTL expires', async () => {
     vi.useFakeTimers()
     try {
