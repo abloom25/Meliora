@@ -106,6 +106,15 @@ export function supportsWebAnimations(): boolean {
   return typeof Element !== 'undefined' && typeof Element.prototype.animate === 'function'
 }
 
+/** 覆盖 macOS 和 iOS/iPadOS,与浏览器内核无关(包括 Mac 上的 Chrome)。 */
+export function isApplePlatform(): boolean {
+  if (typeof navigator === 'undefined') return false
+  return (
+    /^(Mac|iPhone|iPad|iPod)/i.test(navigator.platform) ||
+    /\b(Macintosh|iPhone|iPad|iPod)\b/i.test(navigator.userAgent)
+  )
+}
+
 // iOS Safari 检测:iPadOS 13+ 默认请求桌面 UA,需要结合 platform + maxTouchPoints 判断
 export function isIOSDevice(): boolean {
   if (typeof navigator === 'undefined') return false
