@@ -7,6 +7,7 @@ import { validateMusicConfig } from './shared/config-schema'
 import { generatePublicConfig } from './scripts/generate-public-config.mjs'
 import { publicMusicConfig } from './src/generated/public-config'
 import { DEV_MUSIC_PROXY_PREFIX } from './shared/dev-music-proxy'
+import { guardDevMusicProxy, isLocalConfigWriteAllowed } from './scripts/dev-request-guards'
 
 const localDevConfigPath = join(process.cwd(), '.meliora/config.local.json')
 const musicApiEndpoint = /^https?:\/\//i.test(publicMusicConfig.apiEndpoint)
@@ -36,9 +37,15 @@ function melioraLocalConfigPlugin(): Plugin {
     name: 'meliora-local-config',
     apply: 'serve',
     configureServer(server) {
+      server.middlewares.use(guardDevMusicProxy(musicApiEndpoint))
       server.middlewares.use('/__meliora-dev/config', async (request, response) => {
         if (request.method !== 'POST') {
           sendJson(response, 405, { error: 'Method Not Allowed' })
+          return
+        }
+
+        if (!isLocalConfigWriteAllowed(request)) {
+          sendJson(response, 403, { error: '仅允许同源 JSON 配置请求' })
           return
         }
 
