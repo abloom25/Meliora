@@ -5,8 +5,13 @@ import { defineConfig, type Plugin } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
 import { validateMusicConfig } from './shared/config-schema'
 import { generatePublicConfig } from './scripts/generate-public-config.mjs'
+import { publicMusicConfig } from './src/generated/public-config'
+import { DEV_MUSIC_PROXY_PREFIX } from './shared/dev-music-proxy'
 
 const localDevConfigPath = join(process.cwd(), '.meliora/config.local.json')
+const musicApiEndpoint = /^https?:\/\//i.test(publicMusicConfig.apiEndpoint)
+  ? new URL(publicMusicConfig.apiEndpoint)
+  : null
 
 function readBody(request: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -70,11 +75,29 @@ export default defineConfig({
   base: '/',
   plugins: [vue(), melioraLocalConfigPlugin()],
   server: {
+    host: '0.0.0.0',
     port: 5175,
     proxy: {
+      ...(musicApiEndpoint
+        ? {
+            [`${DEV_MUSIC_PROXY_PREFIX}/`]: {
+              target: musicApiEndpoint.origin,
+              changeOrigin: true,
+              // 让手机沿用已获准的本机开发来源,远程音乐接口不认识局域网 IP。
+              headers: {
+                Origin: 'http://localhost:5175',
+                Referer: 'http://localhost:5175/',
+                Cookie: '',
+                Authorization: '',
+              },
+              rewrite: (path: string) => path.slice(DEV_MUSIC_PROXY_PREFIX.length),
+            },
+          }
+        : {}),
       '/api': {
         target: 'http://localhost:8788',
-        changeOrigin: true,
+        // 保留浏览器访问的 Host,使局域网请求通过后端同源校验。
+        changeOrigin: false,
       },
     },
   },

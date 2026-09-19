@@ -403,11 +403,13 @@
         window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}`)
       }
       failedSources.value = result.failedSources
+      loadFailed.value = !result.tracks.length && result.failedSources > 0
       if (result.failedSources) {
         sourceWarning.value = `${result.failedSources} 个音乐源暂时无法载入`
-        showNotice(sourceWarning.value)
-      }
-      if (!result.tracks.length) {
+        showNotice(
+          loadFailed.value ? '音乐源加载失败,请检查接口或在曲库中重试' : sourceWarning.value,
+        )
+      } else if (!result.tracks.length) {
         showNotice('暂无可播放歌曲,请在管理后台添加音乐')
       }
     } catch {
