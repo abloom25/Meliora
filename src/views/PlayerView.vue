@@ -52,8 +52,16 @@
 
   const { triggerHaptic, withHaptic } = useHaptic()
 
-  const { compactViewport, portableDevice, phoneDevice, lyricsWindowSupported, isMobileSheet } =
-    useDeviceDetection()
+  const {
+    compactViewport,
+    portableDevice,
+    phoneDevice,
+    lyricsWindowSupported,
+    isMobileSheet,
+    isPhoneLandscape,
+    viewportHeight,
+    viewportTop,
+  } = useDeviceDetection()
 
   const store = usePlayerStore()
   const { currentTrack, currentTrackId, currentTime, duration, isPlaying, settings, tracks } =
@@ -318,6 +326,8 @@
   }))
   const playModeIcon = computed(() => PLAY_MODE_META[settings.value.playMode].icon)
   const beatStyle = computed(() => ({
+    '--player-viewport-height': viewportHeight.value ? `${viewportHeight.value}px` : '100dvh',
+    '--player-viewport-top': `${viewportTop.value}px`,
     // --beat-level 已移出本 computed：高频写入由 useBeatAnalyser 直接 setProperty 到目标节点，
     // 避免根元素 :style 改变触发整棵子树（233 个节点）样式重算。
     '--accent': accent.value,
@@ -511,10 +521,7 @@
     }
   })
 
-  watch(compactViewport, () => {
-    resetDrawerPositions()
-  })
-  watch(phoneDevice, () => {
+  watch([compactViewport, phoneDevice, isPhoneLandscape], () => {
     resetDrawerPositions()
   })
 
@@ -702,6 +709,7 @@
       'chrome-hidden': chromeHidden,
       'drawer-open': listOpen || settingsOpen,
       'mobile-sheet': isMobileSheet,
+      'phone-landscape': isPhoneLandscape,
       'beat-active': isPlaying,
       'css-theme-transition': cssTransitionSupported,
     }"
@@ -2200,7 +2208,270 @@
     }
   }
 
+  // 手机横屏单独排版,不使用竖屏封面/歌词互斥和底部高控制区。
+  .phone-landscape {
+    --landscape-left: max(16px, env(safe-area-inset-left));
+    --landscape-right: max(16px, env(safe-area-inset-right));
+    --landscape-bottom: max(6px, env(safe-area-inset-bottom));
+    --landscape-dock-height: 44px;
+
+    min-height: var(--player-viewport-height);
+    height: var(--player-viewport-height);
+
+    .topbar {
+      top: var(--player-viewport-top);
+      height: calc(44px + env(safe-area-inset-top));
+      padding: env(safe-area-inset-top) var(--landscape-right) 0 var(--landscape-left);
+    }
+
+    .brand {
+      font-size: 0.85rem;
+    }
+    .nav-button {
+      width: 44px;
+      height: 44px;
+    }
+    .source-warning {
+      display: none;
+    }
+
+    .now-playing-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 0.36fr) minmax(0, 0.64fr);
+      grid-template-rows: minmax(0, 1fr);
+      gap: clamp(18px, 4vw, 40px);
+      height: var(--player-viewport-height);
+      padding: calc(44px + env(safe-area-inset-top)) var(--landscape-right)
+        calc(var(--landscape-dock-height) + 6px + var(--landscape-bottom)) var(--landscape-left);
+    }
+
+    .artwork-column {
+      position: static;
+      grid-area: 1 / 1;
+      width: auto;
+      min-height: 0;
+      height: auto;
+      padding: 0;
+      overflow: hidden;
+      justify-content: center;
+      visibility: visible;
+      opacity: 1;
+      filter: none;
+      transform: none;
+      pointer-events: auto;
+      transition: opacity 280ms ease;
+    }
+
+    .artwork-frame {
+      --artwork-radius: clamp(16px, 4vh, 28px);
+      width: min(
+        100%,
+        max(
+          48px,
+          calc(
+            var(--player-viewport-height) - env(safe-area-inset-top) - var(--landscape-bottom) -
+              150px
+          )
+        ),
+        260px
+      );
+      flex: none;
+    }
+
+    .primary-meta {
+      width: 100%;
+      padding: 6px 2px 0;
+      text-align: center;
+    }
+
+    .primary-meta h1 {
+      display: block;
+      overflow: hidden;
+      font-size: clamp(15px, 2.2vw, 19px);
+      text-align: center;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .primary-meta p {
+      margin-top: 3px;
+      font-size: 12px;
+      text-align: center;
+    }
+    .title-version {
+      display: none;
+    }
+    .title-main {
+      white-space: nowrap;
+    }
+
+    .lyrics-column {
+      position: relative;
+      inset: auto;
+      grid-area: 1 / 2;
+      width: auto;
+      min-height: 0;
+      height: 100%;
+      padding: 0;
+      visibility: visible;
+      opacity: 1;
+      filter: none;
+      transform: none;
+      pointer-events: auto;
+      transition: opacity 280ms ease;
+    }
+
+    .lyrics-column.lyrics-disabled {
+      visibility: hidden;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .lyrics-hidden .artwork-column {
+      grid-column: 1 / -1;
+      width: auto;
+    }
+    .lyrics-hidden .primary-meta p {
+      text-align: center;
+    }
+    .lyrics-column :deep(.lyrics-content) {
+      // 引擎读取实际 gap 排版,同时压缩主句和和声间距,避免只改视觉位置造成重叠。
+      --lyric-gap: clamp(10px, calc(var(--lyric-size) * 0.55), 18px);
+      --lyric-harmony-gap: calc(var(--lyric-gap) * 0.4);
+      inset-inline: 3%;
+    }
+    .lyrics-column :deep(.lyrics-viewport) {
+      mask-image: linear-gradient(transparent, #000 6%, #000 94%, transparent);
+    }
+    .lyrics-column :deep(.lyric-line) {
+      font-size: clamp(18px, calc(var(--lyric-size) * 1.1), 30px);
+      line-height: 1.14;
+    }
+    .lyrics-column :deep(.lyric-line.background) {
+      font-size: clamp(14px, calc(var(--lyric-size) * 0.8), 22px);
+    }
+    .lyrics-column :deep(.lyric-translation),
+    .lyrics-column :deep(.lyric-roman) {
+      margin-top: 0.1em;
+      line-height: 1.2;
+    }
+    .mobile-shared-controls,
+    .mobile-view-tabs {
+      display: none;
+    }
+
+    .player-dock {
+      display: grid;
+      top: calc(
+        var(--player-viewport-top) +
+          var(--player-viewport-height) - var(--landscape-bottom) - var(--landscape-dock-height)
+      );
+      right: var(--landscape-right);
+      bottom: auto;
+      left: var(--landscape-left);
+      grid-template-columns: 140px minmax(0, 1fr) 140px;
+      gap: 6px;
+      height: var(--landscape-dock-height);
+    }
+
+    .transport-float,
+    .bottom-progress,
+    .dock-actions {
+      height: var(--landscape-dock-height);
+      border: 0;
+      border-radius: 22px;
+    }
+
+    .transport-float,
+    .dock-actions {
+      padding: 0 2px;
+    }
+    .transport-float :deep(.transport-buttons) {
+      gap: 2px;
+    }
+    .transport-float :deep(button),
+    .dock-actions button {
+      width: 44px;
+      height: 44px;
+      flex: 0 0 44px;
+    }
+    .bottom-progress :deep(.transport) {
+      min-width: 0;
+    }
+    .bottom-progress :deep(.progress-row) {
+      gap: 8px;
+    }
+    .bottom-progress :deep(.time) {
+      font-size: 12px;
+    }
+    .bottom-progress :deep(.range) {
+      --track-height: 6px;
+      height: var(--landscape-dock-height);
+    }
+    .bottom-progress :deep(.range:active),
+    .bottom-progress :deep(.range:focus-visible) {
+      --track-height: 8px;
+    }
+
+    :deep(input),
+    :deep(select),
+    :deep(textarea) {
+      font-size: 16px;
+    }
+
+    // 横屏使用可滚动的侧面板,避开竖屏 sheet 的超屏延长区。
+    .side-drawer {
+      top: calc(var(--player-viewport-top) + 44px + env(safe-area-inset-top));
+      right: var(--landscape-right);
+      bottom: auto;
+      left: auto;
+      width: min(390px, calc(100vw - var(--landscape-left) - var(--landscape-right)));
+      height: calc(
+        var(--player-viewport-height) - 50px - env(safe-area-inset-top) - var(--landscape-bottom)
+      );
+      min-height: 0;
+      padding-bottom: 0;
+      overflow: hidden;
+      border-radius: 24px;
+      z-index: 64;
+    }
+
+    .settings-drawer {
+      padding: 8px 16px;
+    }
+    .settings-drawer header {
+      margin-bottom: 4px;
+    }
+    .settings-drawer header p {
+      display: none;
+    }
+    .settings-drawer :deep(.setting-group),
+    .settings-drawer :deep(.setting-row),
+    .settings-drawer :deep(.settings-section-header) {
+      padding-block: 8px;
+    }
+    .library-drawer :deep(.track-panel) {
+      padding: 10px 16px 6px;
+    }
+    .library-drawer :deep(.track-header) {
+      padding-block: 0 6px;
+    }
+    .settings-drawer h2 {
+      font-size: 18px;
+    }
+    .drawer-grab-handle,
+    .drawer-mini-player {
+      display: none;
+    }
+    .drawer-backdrop {
+      inset: calc(var(--player-viewport-top) + 44px + env(safe-area-inset-top)) 0 0;
+      z-index: 58;
+    }
+  }
+
   @supports (-webkit-touch-callout: none) {
+    .phone-landscape .artwork-background::after {
+      display: none;
+    }
     @media (max-width: 720px) {
       .artwork-background {
         inset: -18%;
