@@ -3,6 +3,7 @@ import type { MetingPlaylistConfig, MetingTrack, Track } from '../../types/music
 import { hasCachedLyrics, loadCombinedLyrics, registerTrackLyrics } from '../lyrics'
 import { mapMetingTrack } from '../../utils/tracks'
 import type { MusicProviderAdapter, MusicProviderContext } from './types'
+import { resolveMusicRequestUrl } from '../../config/music'
 
 /**
  * 从 Meting 资源地址中取出平台侧歌曲 ID(`?server=&type=&id=`)。
@@ -34,7 +35,7 @@ export const metingMusicAdapter: MusicProviderAdapter<MetingPlaylistConfig> = {
 
   async load(playlist: MetingPlaylistConfig, context: MusicProviderContext): Promise<Track[]> {
     const response = await fetchWithTimeout(
-      buildMetingPlaylistUrl(context.apiEndpoint, playlist),
+      resolveMusicRequestUrl(buildMetingPlaylistUrl(context.apiEndpoint, playlist)),
       context.timeoutMs,
     )
     if (!response.ok) throw new Error(`Meting request failed with ${response.status}`)
@@ -46,7 +47,11 @@ export const metingMusicAdapter: MusicProviderAdapter<MetingPlaylistConfig> = {
     return (payload as MetingTrack[])
       .map((track, index) => {
         const mapped = mapMetingTrack(track, sourceKey, index)
-        const lyricsUrl = track.lrc?.trim()
+        if (mapped) {
+          mapped.audioUrl = resolveMusicRequestUrl(mapped.audioUrl)
+          if (mapped.cover) mapped.cover = resolveMusicRequestUrl(mapped.cover)
+        }
+        const lyricsUrl = track.lrc?.trim() ? resolveMusicRequestUrl(track.lrc.trim()) : undefined
         if (mapped && lyricsUrl) {
           // 逐字歌词库按平台歌曲 ID 查询,拿不到 ID 时退化为纯 LRC 加载
           const platformId =
