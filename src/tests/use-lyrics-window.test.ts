@@ -71,6 +71,50 @@ function runPopupFrames(popup: Window, count: number, stepMs = 16) {
   }
 }
 
+async function mountScrollingHarness() {
+  const harness = mountLyricsWindowHarness()
+  const { api, popup } = harness
+  await api.toggleLyricsWindow()
+  const lines = Array.from({ length: 100 }, (_, index) => ({
+    time: index,
+    text: `Line ${index}`,
+    words: [{ time: index, duration: 1, text: `Line ${index}` }],
+  }))
+  const show = (activeIndex: number, tempoScale = 1) =>
+    api.setSnapshot({ status: 'ready', activeIndex, tempoScale, lines })
+  show(1)
+  const viewport = popup.document.querySelector<HTMLElement>('.lyrics')!
+  Object.defineProperty(viewport, 'clientHeight', { value: 600 })
+  runPopupFrames(popup, 1)
+  let drift = 0
+  const animations: Animation[] = []
+  const animate = vi.fn(() => {
+    const animation = {
+      cancel: vi.fn(() => {
+        drift = 0
+      }),
+      onfinish: null,
+    } as unknown as Animation
+    animations.push(animation)
+    return animation
+  })
+  popup.document.querySelector<HTMLElement>('.lyrics-lines')!.animate = animate
+  for (const node of popup.document.querySelectorAll<HTMLElement>('.line')) {
+    vi.spyOn(node, 'getBoundingClientRect').mockImplementation(
+      () => new DOMRect(0, [...node.parentNode!.children].indexOf(node) * 60 + drift, 300, 60),
+    )
+  }
+  return {
+    ...harness,
+    show,
+    animate,
+    animations,
+    setDrift: (value: number) => {
+      drift = value
+    },
+  }
+}
+
 describe('useLyricsWindow', () => {
   beforeEach(() => {
     vi.useFakeTimers()
@@ -166,6 +210,250 @@ describe('useLyricsWindow', () => {
     await opening
 
     expect(popup.close).toHaveBeenCalled()
+  })
+
+  it('prioritizes current lyrics and restores context when the popup grows', async () => {
+    const { api, popup, wrapper } = mountLyricsWindowHarness()
+    await api.toggleLyricsWindow()
+    api.setSnapshot({
+      status: 'ready',
+      activeIndex: 1,
+      lines: [
+        { time: 0, text: 'Previous' },
+        { time: 1, text: 'Current', translation: '当前句的译文' },
+        { time: 2, text: 'Next' },
+        { time: 3, text: 'Later' },
+      ],
+    })
+    const viewport = popup.document.querySelector<HTMLElement>('.lyrics')!
+    const container = popup.document.querySelector<HTMLElement>('.lyrics-lines')!
+    let height = 110
+    Object.defineProperty(viewport, 'clientHeight', { get: () => height })
+    Object.defineProperty(container, 'offsetHeight', {
+      get: () =>
+        [...container.children].reduce(
+          (total, node) =>
+            total +
+            ((node as HTMLElement).hidden ? 0 : node.querySelector('.translation') ? 100 : 40),
+          0,
+        ),
+    })
+    runPopupFrames(popup, 1)
+    const visibleText = () =>
+      [...container.querySelectorAll<HTMLElement>('.line')]
+        .filter((node) => !node.hidden)
+        .map((node) => node.querySelector('.main')?.textContent)
+    expect(visibleText()).toEqual(['Current'])
+    expect(container.querySelector('.translation')?.textContent).toBe('当前句的译文')
+
+    const resize = vi
+      .mocked(popup.addEventListener)
+      .mock.calls.find(([event]) => event === 'resize')![1] as EventListener
+    height = 160
+    resize(new Event('resize'))
+    runPopupFrames(popup, 1)
+    expect(visibleText()).toEqual(['Current', 'Next'])
+
+    height = 300
+    resize(new Event('resize'))
+    runPopupFrames(popup, 1)
+    expect(visibleText()).toEqual(['Previous', 'Current', 'Next', 'Later'])
+    wrapper.unmount()
+    expect(popup.removeEventListener).toHaveBeenCalledWith('resize', resize)
+  })
+
+  it('keeps the entire active duet and harmony group even when it needs scrolling', async () => {
+    const { api, popup, wrapper } = mountLyricsWindowHarness()
+    await api.toggleLyricsWindow()
+    api.setSnapshot({
+      status: 'ready',
+      activeIndex: 1,
+      activeIndices: [1, 2, 3],
+      lines: [
+        { time: 0, text: 'Previous' },
+        { time: 1, text: 'Lead' },
+        { time: 1, text: 'Duet', agent: 'secondary' },
+        { time: 1, text: 'Harmony', background: true },
+      ],
+    })
+    const viewport = popup.document.querySelector<HTMLElement>('.lyrics')!
+    const container = popup.document.querySelector<HTMLElement>('.lyrics-lines')!
+    Object.defineProperty(viewport, 'clientHeight', { value: 40 })
+    Object.defineProperty(container, 'offsetHeight', { value: 200 })
+    runPopupFrames(popup, 1)
+    expect(container.querySelector<HTMLElement>('.before')?.hidden).toBe(true)
+    expect(
+      [...container.querySelectorAll<HTMLElement>('.active')].every((node) => !node.hidden),
+    ).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('retains the first plain lyric and cancels pending layout on close', async () => {
+    const { api, popup, wrapper } = mountLyricsWindowHarness()
+    await api.toggleLyricsWindow()
+    api.setSnapshot({
+      status: 'ready',
+      activeIndex: -1,
+      lines: [
+        { time: null, text: 'First' },
+        { time: null, text: 'Second' },
+      ],
+    })
+    const viewport = popup.document.querySelector<HTMLElement>('.lyrics')!
+    const container = popup.document.querySelector<HTMLElement>('.lyrics-lines')!
+    Object.defineProperty(viewport, 'clientHeight', { value: 30 })
+    Object.defineProperty(container, 'offsetHeight', { value: 100 })
+    runPopupFrames(popup, 1)
+    const lines = container.querySelectorAll<HTMLElement>('.line')
+    expect(lines[0]?.hidden).toBe(false)
+    expect(lines[1]?.hidden).toBe(true)
+    api.setSnapshot({ status: 'ready', activeIndex: -1, lines: [{ time: null, text: 'Changed' }] })
+    wrapper.unmount()
+    expect(popup.cancelAnimationFrame).toHaveBeenCalled()
+  })
+
+  it('scrolls retained lyric nodes without rebuilding words or growing the DOM', async () => {
+    const { popup, show, animate, wrapper } = await mountScrollingHarness()
+    const nextLine = popup.document.querySelector('[data-index="2"]')!
+    const nextWord = nextLine.querySelector('.word')
+    show(2)
+    runPopupFrames(popup, 1)
+    expect(popup.document.querySelector('.active')).toBe(nextLine)
+    expect(nextLine.querySelector('.word')).toBe(nextWord)
+    expect(animate).toHaveBeenCalledWith(
+      [{ transform: 'translateY(60px)' }, { transform: 'translateY(0)' }],
+      { duration: 420, easing: 'cubic-bezier(.16,1,.3,1)' },
+    )
+    expect(animate).toHaveBeenCalledTimes(1)
+    for (let index = 3; index < 90; index += 1) {
+      show(index)
+      runPopupFrames(popup, 1)
+      expect(popup.document.querySelectorAll('.line')).toHaveLength(4)
+    }
+    wrapper.unmount()
+  })
+
+  it('interrupts rapid changes at the visual position and coalesces updates into one frame', async () => {
+    const { popup, show, animate, animations, setDrift, wrapper } = await mountScrollingHarness()
+    show(2)
+    runPopupFrames(popup, 1)
+    const firstAnimations = [...animations]
+    setDrift(20)
+    animate.mockClear()
+    show(3, 0.5)
+    show(4, 0.5)
+    expect(
+      firstAnimations.every((animation) => vi.mocked(animation.cancel).mock.calls.length === 1),
+    ).toBe(true)
+    expect(animate).not.toHaveBeenCalled()
+    runPopupFrames(popup, 1)
+    expect(animate).toHaveBeenCalledWith(
+      [{ transform: 'translateY(140px)' }, { transform: 'translateY(0)' }],
+      { duration: 210, easing: 'cubic-bezier(.16,1,.3,1)' },
+    )
+    expect(popup.document.querySelector('.active')?.getAttribute('data-index')).toBe('4')
+    wrapper.unmount()
+    expect(
+      animations.every((animation) => vi.mocked(animation.cancel).mock.calls.length === 1),
+    ).toBe(true)
+  })
+
+  it('does not restart scrolling or lose karaoke bindings for an unchanged snapshot', async () => {
+    const { popup, show, animate, animations, currentTime, lyricAnimation, wrapper } =
+      await mountScrollingHarness()
+    show(2)
+    runPopupFrames(popup, 1)
+    const calls = animate.mock.calls.length
+    const frames = vi.mocked(popup.requestAnimationFrame).mock.calls.length
+    show(2)
+    expect(animate).toHaveBeenCalledTimes(calls)
+    expect(popup.requestAnimationFrame).toHaveBeenCalledTimes(frames)
+    expect(
+      animations.every((animation) => vi.mocked(animation.cancel).mock.calls.length === 0),
+    ).toBe(true)
+    lyricAnimation.value = false
+    await nextTick()
+    expect(
+      animations.every((animation) => vi.mocked(animation.cancel).mock.calls.length === 1),
+    ).toBe(true)
+    lyricAnimation.value = true
+    currentTime.value = 2.5
+    await nextTick()
+    expect(
+      popup.document.querySelector<HTMLElement>('.active .word')?.style.getPropertyValue('--w'),
+    ).toBe('0.500')
+    wrapper.unmount()
+  })
+
+  it('skips scrolling with animation disabled and releases compositor hints after finishing', async () => {
+    const { popup, show, animate, animations, lyricAnimation, wrapper } =
+      await mountScrollingHarness()
+    lyricAnimation.value = false
+    await nextTick()
+    show(2)
+    runPopupFrames(popup, 1)
+    expect(animate).not.toHaveBeenCalled()
+    lyricAnimation.value = true
+    await nextTick()
+    show(3)
+    runPopupFrames(popup, 1)
+    expect(popup.document.querySelector('.lyrics.scrolling')).not.toBeNull()
+    for (const animation of animations) {
+      animation.onfinish?.call(animation, {} as AnimationPlaybackEvent)
+    }
+    expect(popup.document.querySelector('.lyrics.scrolling')).toBeNull()
+    expect(
+      [...popup.document.querySelectorAll<HTMLElement>('.line, .lyrics-lines')].every(
+        (node) => !node.style.willChange,
+      ),
+    ).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('moves mixed-height lyrics as one group when context is restored or playback reverses', async () => {
+    const { popup, show, animate, wrapper } = await mountScrollingHarness()
+    const nodes = [...popup.document.querySelectorAll<HTMLElement>('.line')]
+    const individualAnimations = nodes.map((node) => (node.animate = vi.fn()))
+    for (const node of nodes) {
+      vi.mocked(node.getBoundingClientRect).mockImplementation(() => {
+        const siblings = [...node.parentNode!.children] as HTMLElement[]
+        const heightOf = (element: HTMLElement) => (Number(element.dataset.index) % 2 ? 140 : 40)
+        const top = siblings
+          .slice(0, siblings.indexOf(node))
+          .reduce((y, row) => y + heightOf(row) + 12, 0)
+        return new DOMRect(0, top, 300, heightOf(node))
+      })
+    }
+    // 旧视图中曾被隐藏的行,在切句后重新显示。
+    nodes[2]!.hidden = true
+    show(2)
+    runPopupFrames(popup, 1)
+    expect(animate).toHaveBeenCalledTimes(1)
+    expect(individualAnimations.every((animation) => animation.mock.calls.length === 0)).toBe(true)
+    expect(popup.document.querySelector<HTMLElement>('.lyrics-lines')!.style.willChange).toBe(
+      'transform',
+    )
+    show(1)
+    runPopupFrames(popup, 1)
+    expect(animate).toHaveBeenCalledTimes(2)
+    expect(individualAnimations.every((animation) => animation.mock.calls.length === 0)).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('does not animate when the popup prefers reduced motion', async () => {
+    const popup = createPopupWindow()
+    popup.matchMedia = vi.fn(() => ({ ...window.matchMedia(''), matches: true }))
+    const { api, wrapper } = mountLyricsWindowHarness(popup)
+    await api.toggleLyricsWindow()
+    const lines = Array.from({ length: 5 }, (_, index) => ({ time: index, text: `Line ${index}` }))
+    api.setSnapshot({ status: 'ready', activeIndex: 1, lines })
+    runPopupFrames(popup, 1)
+    const nodes = [...popup.document.querySelectorAll<HTMLElement>('.line')]
+    const reads = nodes.map((node) => vi.spyOn(node, 'getBoundingClientRect'))
+    api.setSnapshot({ status: 'ready', activeIndex: 2, lines })
+    runPopupFrames(popup, 1)
+    expect(reads.every((read) => read.mock.calls.length === 0)).toBe(true)
+    wrapper.unmount()
   })
 
   it('renders syllable spans and fills only the active line', async () => {
