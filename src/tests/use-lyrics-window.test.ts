@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLyricsWindow } from '../composables/useLyricsWindow'
 import type { LyricsSnapshot, Track } from '../types/music'
 
-vi.mock('../utils/browser', () => ({
+vi.mock('../utils/browser', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/browser')>()),
   supportsDocumentPictureInPicture: vi.fn(() => false),
 }))
 

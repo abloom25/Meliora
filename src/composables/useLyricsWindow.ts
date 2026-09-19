@@ -1,6 +1,6 @@
 import { onBeforeUnmount, ref, watch, type Ref } from 'vue'
 import type { LyricLine, LyricWord, LyricsSnapshot, Track } from '../types/music'
-import { supportsDocumentPictureInPicture } from '../utils/browser'
+import { isApplePlatform, supportsDocumentPictureInPicture } from '../utils/browser'
 import { createLyricClock } from '../utils/lyric-clock'
 import { wordFillProgress } from '../utils/lyrics'
 import { listenMediaQuery } from '../utils/media-query'
@@ -60,6 +60,7 @@ const popupStyles = `
   .main { display: block; }
   .line.secondary { text-align: right; }
   .line.harmony { font-size: .84em; opacity: .82; }
+  .apple-font .line { font-family: -apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC",sans-serif; font-weight: 700; font-synthesis: weight; }
   /* 逐字扫光。弹窗文档里没有 @property 注册,var() 必须带兜底值,
      否则未写入的音节会让整条 background-image 失效、文字变透明 */
   /* padding 撑开背景绘制盒、负 margin 抵消排版影响:否则 background-clip: text 会把 g/y/p 的降部切掉;
@@ -258,6 +259,7 @@ export function useLyricsWindow({
       target.document.open()
       target.document.write(POPUP_HTML)
       target.document.close()
+      target.document.documentElement.classList.toggle('apple-font', isApplePlatform())
     } catch {
       // 极少数情况下 document.write 会抛错(如窗口已被回收),交给上层处理
       throw new Error('Failed to write lyrics window document')

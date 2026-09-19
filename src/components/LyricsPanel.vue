@@ -5,6 +5,7 @@
   import { hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
   import { createLyricClock } from '../utils/lyric-clock'
   import { listenMediaQuery } from '../utils/media-query'
+  import { isApplePlatform } from '../utils/browser'
   import {
     harmonyParentsOf,
     lyricTempoScale,
@@ -49,6 +50,7 @@
   const FALLBACK_GAPS = { gap: 28, harmonyGap: 8 }
 
   const store = usePlayerStore()
+  const applePlatform = isApplePlatform()
   const { currentTrack, currentTrackVersion, currentTime, isPlaying, settings } = storeToRefs(store)
 
   function emptyScene(): LyricScene {
@@ -594,6 +596,7 @@
     :class="{
       browsing: userBrowsing,
       'animation-disabled': !settings.lyricAnimation,
+      'apple-font': applePlatform,
     }"
     :style="lyricPanelStyle"
     aria-label="歌词"
@@ -925,6 +928,20 @@
     line-height: 1.26;
     letter-spacing: -0.02em;
     opacity: 0.76;
+  }
+
+  .lyrics-panel.apple-font {
+    .lyric-line {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC', sans-serif;
+      font-weight: 700;
+      // 覆盖全局的 font-synthesis: none,允许缺少粗体字形的回退字体合成粗体。
+      font-synthesis: weight;
+    }
+
+    .lyric-translation,
+    .lyric-roman {
+      font-weight: 700;
+    }
   }
 
   /* 用户正在滚动浏览歌词时,当前行的字不该还在上浮——那时的焦点是列表本身 */
