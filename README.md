@@ -293,6 +293,8 @@ netlify/             Netlify Function 入口
 
 特别感谢 [@OnyxAxisOwO](https://github.com/OnyxAxisOwO) 提供 Opus 5 与 Fable 5.1。
 
+特别感谢 [@L33Z22L11](https://github.com/L33Z22L11) 提供 GPT 6 Astra。
+
 本项目在开发过程中由多个 AI 模型参与协作,以下排名与贡献不分先后,包括但不限于:
 
 - GLM 5.2
@@ -301,6 +303,7 @@ netlify/             Netlify Function 入口
 - Fable 5.1
 - GPT 5.5
 - GPT 5.6 Sol
+- GPT 6 Astra
 - Kimi K3
 
 ---
