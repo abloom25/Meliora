@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isInteractiveElement } from '../utils/dom'
+import { isInteractiveElement } from '../platform/web/dom'
 
 describe('dom interaction helpers', () => {
   it('treats SVG descendants inside a button as interactive', () => {

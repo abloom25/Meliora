@@ -6,8 +6,8 @@ import {
   lyricTempoScale,
   resolveLyricScene,
   sameLyricScene,
-} from '../utils/lyric-scene'
-import type { LyricLine } from '../types/music'
+} from '../core/lyrics/scene'
+import type { LyricLine } from '../core/types'
 
 // Apple Music 规格的 TTML:两个声部同时开唱,背景和声有自己的 begin/end
 const duetLines: LyricLine[] = [

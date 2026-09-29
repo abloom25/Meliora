@@ -1,5 +1,42 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { loadLyricsText } from '../services/lyrics'
+import { loadLyricsText, setLyricsTextFetcher } from '../services/lyrics'
+
+describe('lyrics text transport', () => {
+  afterEach(() => {
+    setLyricsTextFetcher(null)
+    vi.restoreAllMocks()
+  })
+
+  it('takes the text from the injected fetcher instead of the browser fetch', async () => {
+    // 桌面端要走系统 HTTP 或直接读本地文件,传输方式必须能整个换掉
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const fetcher = vi.fn(
+      async (url: string, signal: AbortSignal) =>
+        `[00:01.00]from the desktop backend ${url.length}${signal.aborted ? '!' : ''}`,
+    )
+    setLyricsTextFetcher(fetcher)
+
+    await expect(loadLyricsText('https://example.com/injected.lrc')).resolves.toBe(
+      `[00:01.00]from the desktop backend ${'https://example.com/injected.lrc'.length}`,
+    )
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(fetcher.mock.calls[0]?.[0]).toBe('https://example.com/injected.lrc')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('restores the browser fetch when the injection is cleared', async () => {
+    setLyricsTextFetcher(async () => 'injected')
+    setLyricsTextFetcher(null)
+    const fetchMock = vi.fn(async () => new Response('[00:02.00]from fetch', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(loadLyricsText('https://example.com/restored.lrc')).resolves.toBe(
+      '[00:02.00]from fetch',
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('loadLyricsText timeout', () => {
   afterEach(() => {

@@ -1,7 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import DashboardView from '../admin/views/DashboardView.vue'
-import type { MusicConfig } from '../types/music'
+import type { MusicConfig } from '../../shared/music-config'
 
 const adminApiMock = vi.hoisted(() => ({
   fetchConfig: vi.fn(),

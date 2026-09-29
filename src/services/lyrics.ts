@@ -1,8 +1,9 @@
+import { httpFetch } from './http'
 import { toRaw } from 'vue'
-import { LruCache } from '../utils/lru-cache'
-import type { LyricLine, Track } from '../types/music'
-import { mergeLyricTranslations } from '../utils/lyrics'
-import { parseAnyLyrics } from '../utils/lyrics-source'
+import { LruCache } from '../core/util/lru-cache'
+import type { LyricLine, Track } from '../core/types'
+import { mergeLyricTranslations } from '../core/lyrics'
+import { parseAnyLyrics } from '../core/lyrics'
 import { loadWordLyrics, type WordLyricsQuery } from './lyrics-db'
 
 interface LyricsCacheEntry {
@@ -37,6 +38,26 @@ export function createLyricsTimeoutError(): Error {
 
 export function isLyricsTimeoutError(error: unknown): boolean {
   return error instanceof Error && error.name === LYRICS_TIMEOUT_ERROR_NAME
+}
+
+/**
+ * 取歌词文本的传输层。缓存、去重、超时、取消都在本模块里,与传输方式无关;
+ * 换平台只需换这一个函数 —— 桌面端可以走系统 HTTP(绕开 CORS)或直接读本地文件。
+ * 失败时抛错即可,调用方按错误处理;收到 abort 信号时应尽快中止。
+ */
+export type LyricsTextFetcher = (url: string, signal: AbortSignal) => Promise<string>
+
+const fetchLyricsTextViaHttp: LyricsTextFetcher = async (url, signal) => {
+  const response = await httpFetch(url, { cache: 'force-cache', signal })
+  if (!response.ok) throw new Error('Lyrics request failed')
+  return response.text()
+}
+
+let fetchLyricsText: LyricsTextFetcher = fetchLyricsTextViaHttp
+
+/** 替换歌词文本的取用方式。传 null 恢复为浏览器的 fetch */
+export function setLyricsTextFetcher(fetcher: LyricsTextFetcher | null): void {
+  fetchLyricsText = fetcher ?? fetchLyricsTextViaHttp
 }
 
 export interface TrackLyricsProvider {
@@ -74,11 +95,7 @@ export function loadLyricsText(url: string, signal?: AbortSignal): Promise<strin
     clearTimeout(timer)
   }
 
-  entry.promise = fetch(url, { cache: 'force-cache', signal: controller.signal })
-    .then((response) => {
-      if (!response.ok) throw new Error('Lyrics request failed')
-      return response.text()
-    })
+  entry.promise = fetchLyricsText(url, controller.signal)
     .then((text) => {
       entry.ready = true
       cleanup()

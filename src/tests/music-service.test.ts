@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
 import { loadConfiguredTracks, loadMusicConfig } from '../services/music'
-import type { PublicMusicConfig } from '../types/music'
+import type { PublicMusicConfig } from '../../shared/music-config'
 import type { MusicProviderAdapter } from '../services/music-adapters/types'
 
 function createDeferred<T>() {

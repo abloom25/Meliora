@@ -8,7 +8,7 @@ import {
   type MaybeRefOrGetter,
   toValue,
 } from 'vue'
-import { getFocusableEdges } from '../utils/dom'
+import { getFocusableEdges } from '../platform/web/dom'
 
 // 模块级 trap 栈:多个 trap 同时 active 时(如叠层抽屉/弹窗),
 // 只有最后激活的栈顶 trap 响应 Escape 与 Tab,避免一次按键触发所有 onClose。

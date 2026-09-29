@@ -1,12 +1,13 @@
 <script setup lang="ts">
   import { computed, ref } from 'vue'
-  import type { MusicConfig } from '../../types/music'
+  import type { MusicConfig } from '../../../shared/music-config'
   import { useDrawerSheet } from '../../composables/useDrawerSheet'
   import {
     BarChart3,
     Disc3,
     LibraryBig,
     Music4,
+    Radio,
     ShieldCheck,
     SlidersHorizontal,
     ArrowLeft,
@@ -37,6 +38,7 @@
 
   const tabs = [
     { id: 'site', label: '站点', icon: Disc3 },
+    { id: 'sources', label: '音乐源', icon: Radio },
     { id: 'playlists', label: '歌单', icon: LibraryBig },
     { id: 'local', label: '本地音乐', icon: Music4 },
     { id: 'analytics', label: '统计', icon: BarChart3 },

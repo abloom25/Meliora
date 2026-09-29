@@ -3,9 +3,9 @@
   import { storeToRefs } from 'pinia'
   import { usePlayerStore } from '../stores/player'
   import { hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
-  import { createLyricClock } from '../utils/lyric-clock'
-  import { listenMediaQuery } from '../utils/media-query'
-  import { isApplePlatform } from '../utils/browser'
+  import { createLyricClock } from '../core/lyrics'
+  import { listenMediaQuery } from '../platform/web/media-query'
+  import { isApplePlatform } from '../platform/web/browser'
   import {
     harmonyParentsOf,
     lyricTempoScale,
@@ -13,7 +13,7 @@
     resolveLyricScene,
     sameLyricScene,
     type LyricScene,
-  } from '../utils/lyric-scene'
+  } from '../core/lyrics'
   import { useLyricsEngine, type LyricsTransition } from '../composables/useLyricsEngine'
   import { useLyricsKaraoke } from '../composables/useLyricsKaraoke'
   import type {
@@ -22,7 +22,7 @@
     LyricStatus,
     LyricsSnapshot,
     Track,
-  } from '../types/music'
+  } from '../core/types'
 
   const emit = defineEmits<{
     seek: [time: number]

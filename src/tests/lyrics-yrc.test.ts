@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { looksLikeWordTimedLyrics, parseWordTimedLyrics } from '../utils/lyrics-yrc'
-import { detectLyricFormat, parseAnyLyrics } from '../utils/lyrics-source'
+import { looksLikeWordTimedLyrics, parseWordTimedLyrics } from '../core/lyrics/yrc'
+import { detectLyricFormat, parseAnyLyrics } from '../core/lyrics/source'
 
 const YRC = `{"t":0,"c":[{"tx":"作词: 某人"}]}
 [1000,1200](1000,400,0)你(1400,400,0)好(1800,400,0)啊

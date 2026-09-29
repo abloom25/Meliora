@@ -1,10 +1,15 @@
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
-import type { PlayMode, PlayerSettings, Track } from '../types/music'
-import { transferTrackLyricsProvider } from '../services/lyrics'
-import { safeStorage } from '../utils/storage'
-import { createDefaultEqualizer, sanitizeEqualizer } from '../utils/equalizer'
-import { sanitizeBeatFlashRate } from '../utils/beat-envelope'
+import type { PlayMode, PlayerSettings, Track } from '../core/types'
+import { settingsStore } from '../platform/settings-store'
+import { createDefaultEqualizer, sanitizeEqualizer } from '../core/audio/equalizer'
+import {
+  nextPlayMode,
+  selectNextTrack,
+  selectPreviousTrack,
+  type QueueState,
+} from '../core/audio/queue'
+import { sanitizeBeatFlashRate } from '../core/analysis/beat-envelope'
 
 const SETTINGS_KEY = 'meliora:settings'
 const LAST_TRACK_KEY = 'meliora:last-track'
@@ -94,7 +99,9 @@ function sanitizePlayMode(value: unknown): PlayMode {
 
 function loadSettings(): PlayerSettings {
   try {
-    const saved = JSON.parse(safeStorage.getItem(SETTINGS_KEY) || '{}') as Partial<PlayerSettings>
+    const saved = JSON.parse(
+      settingsStore().getItem(SETTINGS_KEY) || '{}',
+    ) as Partial<PlayerSettings>
     return migrateSettings(saved)
   } catch {
     return { ...defaultSettings }
@@ -106,7 +113,7 @@ export const usePlayerStore = defineStore('player', () => {
   const queue = ref<Track[]>([])
   const queueVersion = ref(0)
   const currentTrackVersion = ref(0)
-  const currentTrackId = ref<string | null>(safeStorage.getItem(LAST_TRACK_KEY))
+  const currentTrackId = ref<string | null>(settingsStore().getItem(LAST_TRACK_KEY))
   const isPlaying = ref(false)
   const currentTime = ref(0)
   const duration = ref(0)
@@ -133,12 +140,20 @@ export const usePlayerStore = defineStore('player', () => {
     currentTrackVersion.value += 1
   }
 
+  // 曲目对象被换新时,挂在旧对象上的东西(比如已解析的歌词来源)需要转移过去。
+  // 状态层不该知道"歌词是怎么取的",所以只留一个可注册的搬运钩子,由服务层在启动时装上
+  let carryTrackSideData: ((from: Track, to: Track) => void) | null = null
+
+  function onTrackReplaced(handler: ((from: Track, to: Track) => void) | null) {
+    carryTrackSideData = handler
+  }
+
   function setTracks(nextTracks: Track[]) {
     const activeTrack = currentTrack.value ?? undefined
     const mergedTracks = activeTrack
       ? nextTracks.map((track) => {
           if (track.id !== activeTrack.id) return track
-          transferTrackLyricsProvider(track, activeTrack)
+          carryTrackSideData?.(track, activeTrack)
           delete activeTrack.titleVersions
           delete activeTrack.shareAliases
           delete activeTrack.album
@@ -181,30 +196,21 @@ export const usePlayerStore = defineStore('player', () => {
     errorMessage.value = ''
   }
 
+  // 选曲规则本身是纯的,放在 core/audio/queue;这里只负责把当前状态喂进去
+  function queueState(): QueueState {
+    return {
+      queue: queue.value,
+      currentIndex: currentIndex.value,
+      playMode: settings.value.playMode,
+    }
+  }
+
   function peekNext(manual = false): Track | null {
-    if (!queue.value.length) return null
-    if (settings.value.playMode === 'single' && !manual && currentTrack.value)
-      return currentTrack.value
-    if (settings.value.playMode === 'shuffle' && queue.value.length > 1) {
-      let nextIndex: number
-      do {
-        nextIndex = Math.floor(Math.random() * queue.value.length)
-      } while (nextIndex === currentIndex.value)
-      return queue.value[nextIndex] ?? null
-    }
-    const nextIndex = currentIndex.value + 1
-    if (nextIndex >= queue.value.length) {
-      if (settings.value.playMode === 'sequence') return null
-      return queue.value[0] ?? null
-    }
-    return queue.value[nextIndex] ?? null
+    return selectNextTrack(queueState(), { manual })
   }
 
   function peekPrevious(): Track | null {
-    if (!queue.value.length) return null
-    let previousIndex = currentIndex.value - 1
-    if (previousIndex < 0) previousIndex = queue.value.length - 1
-    return queue.value[previousIndex] ?? null
+    return selectPreviousTrack(queueState())
   }
 
   function nextTrack(manual = false, preferredTrackId?: string): Track | null {
@@ -238,14 +244,12 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function cyclePlayMode() {
-    const modes: PlayMode[] = ['sequence', 'loop', 'single', 'shuffle']
-    const index = modes.indexOf(settings.value.playMode)
-    settings.value.playMode = modes[(index + 1) % modes.length] ?? 'loop'
+    settings.value.playMode = nextPlayMode(settings.value.playMode)
   }
 
   let saveSettingsTimer = 0
   function persistSettings() {
-    safeStorage.setItem(SETTINGS_KEY, JSON.stringify(settings.value))
+    settingsStore().setItem(SETTINGS_KEY, JSON.stringify(settings.value))
   }
   // store 被 dispose(其 effect scope 销毁)时清理挂起的防抖定时器,
   // 并立即落盘尚未写入的设置,避免丢失最后一次修改。
@@ -265,8 +269,8 @@ export const usePlayerStore = defineStore('player', () => {
     { deep: true },
   )
   watch(currentTrackId, (value) => {
-    if (value) safeStorage.setItem(LAST_TRACK_KEY, value)
-    else safeStorage.removeItem(LAST_TRACK_KEY)
+    if (value) settingsStore().setItem(LAST_TRACK_KEY, value)
+    else settingsStore().removeItem(LAST_TRACK_KEY)
   })
 
   // 把指定设置项恢复默认:置为 undefined 后交给 migrateSettings 走既有的兜底链路,
@@ -294,6 +298,7 @@ export const usePlayerStore = defineStore('player', () => {
     errorMessage,
     setTracks,
     selectTrack,
+    onTrackReplaced,
     peekNext,
     peekPrevious,
     nextTrack,

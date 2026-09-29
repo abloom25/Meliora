@@ -5,7 +5,7 @@
   import { type UpdateInfo } from '../services/admin-api'
   import { useAdminApi } from '../composables/useAdminApi'
   import { useUpdateStatus } from '../composables/useUpdateStatus'
-  import type { MusicConfig } from '../../types/music'
+  import type { MusicConfig } from '../../../shared/music-config'
   import ConfirmModal from '../components/ConfirmModal.vue'
 
   const { checkUpdate } = useAdminApi()

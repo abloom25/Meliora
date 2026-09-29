@@ -1,7 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { defineComponent, nextTick } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { useDeviceDetection } from '../composables/useDeviceDetection'
+import { useDeviceDetection } from '../platform/web/useDeviceDetection'
 
 function mountDevice(userAgent = 'iPhone', platform = 'iPhone') {
   vi.stubGlobal('navigator', { userAgent, platform, maxTouchPoints: platform === 'Win32' ? 0 : 5 })
