@@ -12,26 +12,18 @@
     Share2,
     Shuffle,
   } from '@lucide/vue'
-  import { musicConfig } from '../config/music'
   import { hasTrackLyricsSource } from '../services/lyrics'
-  import { loadConfiguredTracks, loadMusicConfig } from '../services/music'
   import { usePlayerStore } from '../stores/player'
-  import { filterTracks, trackMatchesShareId } from '../core/library/tracks'
-  import { applySiteIntegrations } from '../platform/web/site-integrations'
-  import { extractThemeColor, type ThemeColor } from '../platform/web/theme'
-  import { isInteractiveElement } from '../platform/web/dom'
+  import { usePlayerLibrary } from '../composables/usePlayerLibrary'
+  import { usePlayerArtwork } from '../composables/usePlayerArtwork'
+  import { usePlayerPanels } from '../composables/usePlayerPanels'
   import { useAudioPlayer } from '../composables/useAudioPlayer'
   import { useLyricsWindow } from '../platform/web/useLyricsWindow'
   import { usePwaInstall } from '../platform/web/usePwaInstall'
   import { useSleepTimer } from '../composables/useSleepTimer'
-  import { useThemeAccent } from '../composables/useThemeAccent'
   import { useFullscreen } from '../platform/web/useFullscreen'
-  import { useChromeAutoHide } from '../composables/useChromeAutoHide'
   import { useTrackShare } from '../composables/useTrackShare'
   import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
-  import { useCoverCache } from '../composables/useCoverCache'
-  import { useFocusTrap } from '../composables/useFocusTrap'
-  import { useDrawerSheet } from '../composables/useDrawerSheet'
   import { useHaptic } from '../platform/web/useHaptic'
   import { useDeviceDetection } from '../platform/web/useDeviceDetection'
   import ArtworkBackground from '../components/ArtworkBackground.vue'
@@ -41,7 +33,6 @@
   import TrackList from '../components/TrackList.vue'
   import Toast from '../components/Toast.vue'
   import type { LyricAvailability, LyricsSnapshot, Track } from '../core/types'
-  import type { PublicMusicConfig } from '../../shared/music-config'
 
   const PLAY_MODE_META = {
     sequence: { text: '顺序播放', icon: ArrowRight },
@@ -49,8 +40,6 @@
     single: { text: '单曲循环', icon: Repeat1 },
     shuffle: { text: '随机播放', icon: Shuffle },
   } as const
-
-  const runtimeConfig = ref<PublicMusicConfig>(musicConfig())
 
   const { triggerHaptic, withHaptic } = useHaptic()
 
@@ -114,10 +103,6 @@
     onShowNotice: showNotice,
   })
 
-  // Theme accent composable
-  const { accent, accentSoft, accentRgb, applyTheme, resetTheme, cssTransitionSupported } =
-    useThemeAccent()
-
   // Fullscreen composable
   const { fullscreenActive, fullscreenSupported, toggleFullscreenMode } = useFullscreen({
     onShowNotice: showNotice,
@@ -130,17 +115,6 @@
     onShowNotice: showNotice,
   })
 
-  // Cover cache composable (singleton)
-  const {
-    loadedCovers,
-    failedCovers,
-    mainCoverReadyTrackId,
-    markCoverLoaded,
-    markCoverFailed,
-    markMainCoverReady,
-    resetMainCover,
-  } = useCoverCache()
-
   // Keyboard shortcuts composable
   useKeyboardShortcuts({
     currentTime,
@@ -152,114 +126,53 @@
     onToggleLyrics: toggleLyrics,
   })
 
-  const query = ref('')
-  const loading = ref(true)
-  const loadFailed = ref(false)
-  const failedSources = ref(0)
-  const settingsOpen = ref(false)
-  const listOpen = ref(false)
-  const panelsSoftened = ref(false)
   const mobileView = ref<'cover' | 'lyrics'>('cover')
   const lyricsEnabled = ref(true)
   const lyricAvailability = ref<LyricAvailability>('unavailable')
   const lyricsSnapshot = ref<LyricsSnapshot | null>(null)
   const notice = ref('')
-  const sourceWarning = ref('')
-  // 封面 CORS 回退:crossorigin="anonymous" 首次加载失败(CDN 不返回 CORS 头)时,
-  // 移除 crossorigin 重新加载,保证封面显示(取色降级为默认色)。
-  // 用 trackId + cover URL 持久记录已回退项,避免回切同一首歌时重复发起一次必失败的 CORS 请求。
-  const coverCorsRetry = ref(new Set<string>())
-  const { chromeHidden, scheduleChromeHide, clearChromeTimer } = useChromeAutoHide({
+  const { runtimeConfig, query, loading, loadFailed, sourceWarning, filteredTracks, loadTracks } =
+    usePlayerLibrary({ showNotice, clearNotice })
+  const {
+    accent,
+    accentSoft,
+    accentRgb,
+    cssTransitionSupported,
+    loadedCovers,
+    failedCovers,
+    markCoverLoaded,
+    markCoverFailed,
+    mainCoverReadyTrackId,
+    backgroundImage,
+    mainCoverItems,
+    handleMainCoverLoaded,
+    handleMainCoverError,
+  } = usePlayerArtwork(currentTrack, settings)
+  const settingsAvailable = computed(() => tracks.value.length > 0)
+  const {
     listOpen,
     settingsOpen,
+    panelsSoftened,
+    chromeHidden,
+    libraryDrawerStyle,
+    settingsDrawerStyle,
+    libraryDragging,
+    settingsDragging,
+    anyDrawerHalf,
+    onTopbarClick,
+    closePanelsAnimated,
+    toggleLibrary,
+    toggleSettings,
+  } = usePlayerPanels({
+    compactViewport,
+    phoneDevice,
+    isPhoneLandscape,
+    isMobileSheet,
+    settingsAvailable,
     autoHideChrome: () => settings.value.autoHideChrome,
+    triggerHaptic,
   })
 
-  // Focus trap refs
-  const libraryDrawerRef = ref<HTMLElement | null>(null)
-  const settingsDrawerRef = ref<HTMLElement | null>(null)
-  const libraryHandleRef = ref<HTMLElement | null>(null)
-  const settingsHandleRef = ref<HTMLElement | null>(null)
-
-  // Focus trap for drawers
-  useFocusTrap(libraryDrawerRef, listOpen, closePanelsAnimated, {
-    autoFocus: () => !isMobileSheet.value,
-  })
-  useFocusTrap(settingsDrawerRef, settingsOpen, closePanelsAnimated)
-
-  // Pull-to-dismiss gesture (mobile sheet only)
-  const usesSheetDrawer = () => isMobileSheet.value
-  function getSheetHeight(el: HTMLElement | null): number {
-    if (!el) return window.innerHeight
-    const h = el.getBoundingClientRect().height
-    return h > 0 ? h : window.innerHeight
-  }
-  function getSheetHalfOffset(el: HTMLElement | null): number {
-    if (!el) return window.innerHeight * 0.5
-    const rect = el.getBoundingClientRect()
-    const visibleHeight = window.innerHeight - rect.top
-    return (visibleHeight > 0 ? visibleHeight : window.innerHeight) * 0.5
-  }
-  const {
-    detent: libraryDetent,
-    dragging: libraryDragging,
-    translateY: libraryTranslateY,
-    resetPosition: resetLibraryDrawerPosition,
-    dismissAnimated: libraryDismissAnimated,
-  } = useDrawerSheet({
-    containerRef: libraryDrawerRef,
-    handleRef: libraryHandleRef,
-    active: listOpen,
-    onDismiss: closeLibraryPanel,
-    sheetHeight: () => getSheetHeight(libraryDrawerRef.value),
-    halfOffset: () => getSheetHalfOffset(libraryDrawerRef.value),
-    enabled: usesSheetDrawer,
-  })
-  const {
-    detent: settingsDetent,
-    dragging: settingsDragging,
-    translateY: settingsTranslateY,
-    resetPosition: resetSettingsDrawerPosition,
-    dismissAnimated: settingsDismissAnimated,
-  } = useDrawerSheet({
-    containerRef: settingsDrawerRef,
-    handleRef: settingsHandleRef,
-    active: settingsOpen,
-    onDismiss: closeSettingsPanel,
-    sheetHeight: () => getSheetHeight(settingsDrawerRef.value),
-    halfOffset: () => getSheetHalfOffset(settingsDrawerRef.value),
-    enabled: usesSheetDrawer,
-  })
-  const libraryDrawerStyle = computed(() => {
-    if (!usesSheetDrawer()) return {}
-    return {
-      transform: `translateY(${libraryTranslateY.value}px)`,
-      transition: libraryDragging.value ? 'none' : undefined,
-    }
-  })
-  const settingsDrawerStyle = computed(() => {
-    if (!usesSheetDrawer()) return {}
-    return {
-      transform: `translateY(${settingsTranslateY.value}px)`,
-      transition: settingsDragging.value ? 'none' : undefined,
-    }
-  })
-  const anyDrawerHalf = computed(
-    () => libraryDetent.value === 'half' || settingsDetent.value === 'half',
-  )
-
-  function resetDrawerPositions() {
-    resetLibraryDrawerPosition(listOpen.value ? 'full' : 'closed')
-    resetSettingsDrawerPosition(settingsOpen.value ? 'full' : 'closed')
-  }
-
-  function onTopbarClick(e: MouseEvent) {
-    if (!listOpen.value && !settingsOpen.value) return
-    if (isInteractiveElement(e.target)) return
-    closePanelsAnimated()
-  }
-
-  const filteredTracks = computed(() => filterTracks(store.tracks, query.value))
   const currentDisplayTitle = computed(() => {
     const track = currentTrack.value
     if (!track) return null
@@ -271,38 +184,11 @@
   const lyricsAvailable = computed(() => lyricAvailability.value !== 'unavailable')
   const lyricsLayoutVisible = computed(() => lyricsEnabled.value && lyricsAvailable.value)
   const lyricsVisible = computed(() => lyricsLayoutVisible.value && lyricsAvailable.value)
-  const settingsAvailable = computed(() => tracks.value.length > 0)
   const lyricsPanelActive = computed(() =>
     isMobileSheet.value
       ? lyricsVisible.value && mobileView.value === 'lyrics'
       : lyricsVisible.value,
   )
-  const backgroundImage = computed(() => {
-    const track = currentTrack.value
-    if (!settings.value.dynamicBackground || !track?.cover || failedCovers.value.has(track.id)) {
-      return 'none'
-    }
-    // CSS url("...") 字符串需同时转义反斜杠与双引号,且顺序不能反:
-    // 只转义引号时,URL 里的反斜杠会吞掉闭合引号,导致整条声明失效甚至解析异常。
-    const escapedCover = track.cover.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
-    return `url("${escapedCover}")`
-  })
-  const mainCoverItems = computed(() => {
-    const track = currentTrack.value
-    if (!track?.cover || failedCovers.value.has(track.id)) return []
-    const corsKey = coverRetryKey(track.id, track.cover)
-    const corsRetried = coverCorsRetry.value.has(corsKey)
-    return [
-      {
-        id: track.id,
-        title: track.title,
-        cover: track.cover,
-        corsKey,
-        corsRetried,
-        key: `${corsKey}-${corsRetried}`,
-      },
-    ]
-  })
   const playModeText = computed(() => PLAY_MODE_META[settings.value.playMode].text)
 
   // 设置面板的入参按语义收成两组:定时关闭的状态、以及由各 composable 决定的能力开关。
@@ -366,168 +252,10 @@
     showNotice('网络已恢复')
   }
 
-  function resolveSiteIcon(icon: string | undefined): string {
-    if (!icon) return `${import.meta.env.BASE_URL}favicon.svg`
-    if (/^(https?:|data:|blob:)/i.test(icon)) return icon
-    const base = new URL(import.meta.env.BASE_URL, window.location.origin)
-    return new URL(icon, base).href
-  }
-
-  function applySiteBrand(config: PublicMusicConfig) {
-    document.title = `${config.siteName} · Music Player`
-    const iconHref = resolveSiteIcon(config.siteIcon)
-    let link = document.querySelector<HTMLLinkElement>("link[rel='icon']")
-    if (!link) {
-      link = document.createElement('link')
-      link.rel = 'icon'
-      document.head.appendChild(link)
-    }
-    link.href = iconHref
-  }
-
-  let loadTracksRequestId = 0
-
-  async function loadTracks() {
-    // 并发防护:onMounted 与 TrackList 的 @reload(连点重试)可能并发触发,
-    // 用单调递增的请求序号保证只有最新一次的结果落地,
-    // 避免后完成的旧响应覆盖 store/品牌信息/failedSources 等新状态。
-    const requestId = ++loadTracksRequestId
-    loading.value = true
-    sourceWarning.value = ''
-    loadFailed.value = false
-    clearNotice()
-    try {
-      const config = loadMusicConfig()
-      runtimeConfig.value = config
-      applySiteBrand(config)
-      applySiteIntegrations(config)
-      const result = await loadConfiguredTracks(config)
-      if (requestId !== loadTracksRequestId) return
-      store.setTracks(result.tracks)
-      const url = new URL(window.location.href)
-      const sharedTrackId = url.searchParams.get('share')
-      const sharedTrack = sharedTrackId
-        ? store.tracks.find((track) => trackMatchesShareId(track, sharedTrackId))
-        : null
-      if (sharedTrack) store.selectTrack(sharedTrack, store.tracks)
-      if (sharedTrackId) {
-        url.searchParams.delete('share')
-        window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}`)
-      }
-      failedSources.value = result.failedSources
-      loadFailed.value = !result.tracks.length && result.failedSources > 0
-      if (result.failedSources) {
-        sourceWarning.value = `${result.failedSources} 个音乐源暂时无法载入`
-        showNotice(
-          loadFailed.value ? '音乐源加载失败,请检查接口或在曲库中重试' : sourceWarning.value,
-        )
-      } else if (!result.tracks.length) {
-        showNotice('暂无可播放歌曲,请在管理后台添加音乐')
-      }
-    } catch {
-      if (requestId !== loadTracksRequestId) return
-      loadFailed.value = true
-      showNotice('音乐列表载入失败,请稍后重试')
-    } finally {
-      // 只有最新一次请求才允许复位 loading;过期请求的 finally 不得触碰新请求的状态
-      if (requestId === loadTracksRequestId) loading.value = false
-    }
-  }
-
   function selectTrack(track: Track) {
     triggerHaptic('selection')
     void selectAndPlay(track, filteredTracks.value)
   }
-
-  function closePanels() {
-    triggerHaptic('light')
-    listOpen.value = false
-    settingsOpen.value = false
-  }
-
-  function closeLibraryPanel() {
-    listOpen.value = false
-  }
-
-  function closeSettingsPanel() {
-    settingsOpen.value = false
-  }
-
-  function closePanelsAnimated() {
-    if (!usesSheetDrawer()) {
-      closePanels()
-      return
-    }
-    triggerHaptic('light')
-    if (listOpen.value) {
-      libraryDismissAnimated()
-    }
-    if (settingsOpen.value) {
-      settingsDismissAnimated()
-    }
-  }
-
-  function toggleLibrary() {
-    triggerHaptic('light')
-    if (listOpen.value) {
-      // Closing the currently-open library
-      if (usesSheetDrawer()) {
-        libraryDismissAnimated()
-      } else {
-        listOpen.value = false
-      }
-      return
-    }
-    listOpen.value = true
-    if (settingsOpen.value) {
-      if (usesSheetDrawer()) {
-        settingsDismissAnimated()
-      } else {
-        settingsOpen.value = false
-      }
-    }
-  }
-
-  function toggleSettings() {
-    if (!settingsAvailable.value) return
-    triggerHaptic('light')
-    if (settingsOpen.value) {
-      if (usesSheetDrawer()) {
-        settingsDismissAnimated()
-      } else {
-        settingsOpen.value = false
-      }
-      return
-    }
-    settingsOpen.value = true
-    if (listOpen.value) {
-      if (usesSheetDrawer()) {
-        libraryDismissAnimated()
-      } else {
-        listOpen.value = false
-      }
-    }
-  }
-
-  watch([listOpen, settingsOpen], ([libraryVisible, settingsVisible]) => {
-    chromeHidden.value = false
-    scheduleChromeHide()
-    if (libraryVisible || settingsVisible) {
-      panelsSoftened.value = true
-      return
-    }
-
-    panelsSoftened.value = false
-  })
-  watch(settingsAvailable, (available) => {
-    if (!available && settingsOpen.value) {
-      settingsOpen.value = false
-    }
-  })
-
-  watch([compactViewport, phoneDevice, isPhoneLandscape], () => {
-    resetDrawerPositions()
-  })
 
   function toggleLyrics() {
     if (!lyricsLayoutVisible.value && !lyricsAvailable.value) return
@@ -590,70 +318,6 @@
     setLyricsWindowSnapshot(snapshot)
   }
 
-  async function handleMainCoverLoaded(trackId: string, event: Event) {
-    const image = event.currentTarget as HTMLImageElement
-    // 等图片完整解码完成后再标记 loaded：
-    // 避免浏览器渲染半解码的图像（视觉上"从上往下"逐行加载的效果），
-    // 让 fade-in transition 真正发生在一张完整图像上。
-    try {
-      await image.decode?.()
-    } catch {
-      // 部分浏览器对跨域 / data URL 图片会拒绝 decode()，
-      // 图片可能未完整解码，此时提取的主题色不可靠，直接回退到默认色。
-      if (currentTrack.value?.id === trackId) {
-        markCoverLoaded(trackId)
-        markMainCoverReady(trackId)
-        resetTheme()
-      }
-      return
-    }
-    if (currentTrack.value?.id !== trackId) return
-    markCoverLoaded(trackId)
-    markMainCoverReady(trackId)
-    // extractThemeColor 现在是 async（Worker 化）；直接 await 即可。
-    // 如果 Worker 路径成功就返回新主题色；失败时内部已自动 fallback 到主线程 + null 兜底。
-    let immediateTheme: ThemeColor | null
-    try {
-      immediateTheme = await extractThemeColor(image)
-    } catch {
-      immediateTheme = null
-    }
-    if (currentTrack.value?.id !== trackId) return
-    if (!immediateTheme) {
-      resetTheme()
-      return
-    }
-    applyTheme(immediateTheme)
-  }
-
-  function coverRetryKey(trackId: string, cover: string) {
-    return `${trackId}\n${cover}`
-  }
-
-  function rememberCoverCorsRetry(corsKey: string) {
-    const next = new Set(coverCorsRetry.value)
-    if (next.has(corsKey)) next.delete(corsKey)
-    next.add(corsKey)
-    while (next.size > 512) {
-      const oldest = next.values().next().value
-      if (!oldest) break
-      next.delete(oldest)
-    }
-    coverCorsRetry.value = next
-  }
-
-  function handleMainCoverError(trackId: string, corsKey: string) {
-    // crossorigin="anonymous" 模式下,CDN 不返回 Access-Control-Allow-Origin 会触发 onerror。
-    // 首次失败时回退:标记该 trackId 并通过 :key 变化重建 <img>(移除 crossorigin),
-    // 保证封面显示;此时取色因 canvas 污染降级为默认色。
-    // 已回退过仍失败说明资源本身不可用,走正常的 failedCovers 标记流程。
-    if (!coverCorsRetry.value.has(corsKey)) {
-      rememberCoverCorsRetry(corsKey)
-      return
-    }
-    markCoverFailed(trackId)
-  }
-
   onMounted(() => {
     window.addEventListener('offline', showOfflineNotice)
     window.addEventListener('online', showOnlineNotice)
@@ -670,17 +334,11 @@
   watch(
     currentTrackId,
     () => {
-      // 切歌时立即重置主封面"已就绪"状态，让新封面重新走 fade-in transition；
-      // 列表里的小封面缓存（loadedCovers）保留，避免抽屉滚动时小图重复闪现。
-      resetMainCover()
       const nextTrackHasLyrics = hasTrackLyricsSource(currentTrack.value)
       setLyricAvailability(nextTrackHasLyrics ? 'loading' : 'unavailable')
       lyricsSnapshot.value = null
       if (!nextTrackHasLyrics && isMobileSheet.value) {
         mobileView.value = 'cover'
-      }
-      if (!currentTrack.value?.cover) {
-        resetTheme()
       }
     },
     { flush: 'sync' },
@@ -692,14 +350,6 @@
     () => store.errorMessage,
     (message) => {
       if (message) showNotice(message)
-    },
-  )
-  watch(
-    () => settings.value.autoHideChrome,
-    (enabled) => {
-      chromeHidden.value = false
-      if (enabled) scheduleChromeHide()
-      else clearChromeTimer()
     },
   )
 </script>
