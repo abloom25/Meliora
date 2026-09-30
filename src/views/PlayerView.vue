@@ -34,6 +34,7 @@
   import { useDrawerSheet } from '../composables/useDrawerSheet'
   import { useHaptic } from '../platform/web/useHaptic'
   import { useDeviceDetection } from '../platform/web/useDeviceDetection'
+  import ArtworkBackground from '../components/ArtworkBackground.vue'
   import LyricsPanel from '../components/LyricsPanel.vue'
   import PlayerControls from '../components/PlayerControls.vue'
   import SettingsPanel from '../components/SettingsPanel.vue'
@@ -69,7 +70,7 @@
     storeToRefs(store)
   // --beat-level 高频写入的目标节点：封面层(其 ::after 亮层只改 opacity)与叠加层(::before 光晕),
   // 节拍渲染适配器会在 RAF 中直接 setProperty 到这些节点，跳过根 :style 的样式重算。
-  // 两层的 filter 都是静态的:每帧变化的只有 opacity / transform,不会整屏重栅格化。
+  // Canvas 只在封面/设置/尺寸变化时预绘制,每帧节拍只调整亮层透明度。
   const artworkBackgroundRef = ref<HTMLElement | null>(null)
   const backgroundOverlayRef = ref<HTMLElement | null>(null)
   // 队列小频谱 meter 由 TrackList 暴露,--spectrum-level-N 同样走 RAF 直写
@@ -725,7 +726,13 @@
         ref="artworkBackgroundRef"
         class="artwork-background"
         :style="{ '--cover-image': backgroundImage, '--beat-level': '0' }"
-      />
+      >
+        <ArtworkBackground
+          :cover="currentTrack?.cover || ''"
+          :blur="settings.backgroundBlur"
+          :saturation="settings.backgroundSaturation"
+        />
+      </div>
     </Transition>
     <div
       ref="backgroundOverlayRef"
@@ -1076,10 +1083,7 @@
     z-index: -2;
     pointer-events: none;
   }
-  // 封面背景分两层同一张图:::before 是静态模糊版;::after 烘焙好"更亮、更饱和、稍清晰"的静态滤镜,
-  // 节拍只改它的 opacity——两层各栅格化一次,淡入淡出等价于对封面本身做 brightness(1 + level × 亮度),
-  // 颜色全部来自封面自己,而不是往画面上蒙一层光。容器本身不挂 filter,换封面的进出场只动
-  // opacity / transform,进场时的一次性 blur 过渡由 artwork-bg-swap 负责。
+  // Canvas 就绪后撤掉 CSS 滤镜层;不支持 Canvas filter 或加载失败时保留原背景兜底。
   .artwork-background {
     transform: scale(1.18);
   }
@@ -1101,6 +1105,13 @@
       saturate(calc(var(--background-saturation) + 0.3)) brightness(1.8);
     opacity: calc(var(--beat-level) * var(--beat-brightness));
   }
+  .artwork-background:has(.canvas-ready)::before,
+  .artwork-background:has(.canvas-ready)::after {
+    display: none;
+  }
+  .beat-active .artwork-background {
+    --artwork-will-change: opacity;
+  }
   .beat-active .artwork-background::after {
     will-change: opacity;
   }
@@ -1108,7 +1119,6 @@
   .artwork-bg-swap-leave-active {
     transition:
       opacity 720ms cubic-bezier(0.22, 1, 0.36, 1),
-      filter 720ms ease,
       transform 920ms cubic-bezier(0.16, 1, 0.3, 1);
   }
   .artwork-bg-swap-enter-active {
@@ -1119,12 +1129,10 @@
   }
   .artwork-bg-swap-enter-from {
     opacity: 0;
-    filter: blur(32px);
     transform: scale(1.28);
   }
   .artwork-bg-swap-leave-to {
     opacity: 0;
-    filter: blur(24px);
     transform: scale(1.12);
   }
   .background-overlay {
@@ -1185,6 +1193,9 @@
     z-index: 1;
   }
   // 节奏闪光单独关闭:封面亮层与光晕层都不渲染,合成层随之回收
+  .beat-disabled .artwork-background {
+    --artwork-bright-display: none;
+  }
   .beat-disabled .artwork-background::after,
   .beat-disabled .background-overlay::before {
     display: none;
@@ -2472,11 +2483,16 @@
   }
 
   @supports (-webkit-touch-callout: none) {
+    .phone-landscape .artwork-background {
+      --artwork-bright-display: none;
+    }
     .phone-landscape .artwork-background::after {
       display: none;
     }
     @media (max-width: 720px) {
       .artwork-background {
+        --artwork-bright-display: none;
+        --artwork-base-opacity: 0.62;
         inset: -18%;
         transform: scale(1.18) translateZ(0);
         backface-visibility: hidden;
@@ -2492,6 +2508,10 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .artwork-background {
+      --artwork-bright-display: none;
+      transition: none;
+    }
     .now-playing-layout,
     .artwork-column,
     .lyrics-column,
