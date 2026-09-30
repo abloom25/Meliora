@@ -1,7 +1,7 @@
 <script setup lang="ts">
   import { ref, toRaw } from 'vue'
   import { Plus, Trash2, Pencil, Check, X, ChevronDown } from '@lucide/vue'
-  import type { MetingPlaylistConfig, MusicServer } from '../../types/music'
+  import type { MetingPlaylistConfig, MusicServer } from '../../../shared/music-config'
   import ToggleSwitch from '../../components/ToggleSwitch.vue'
   import Dropdown from '../../components/Dropdown.vue'
   import ConfirmModal from './ConfirmModal.vue'

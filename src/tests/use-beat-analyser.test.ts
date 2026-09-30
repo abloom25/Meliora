@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, nextTick, ref } from 'vue'
 import { mount } from '@vue/test-utils'
-import { useBeatAnalyser } from '../composables/useBeatAnalyser'
-import { createBeatVisualRenderer } from '../utils/beat-visuals'
+import { useBeatAnalyser } from '../platform/web/useBeatAnalyser'
+import { createBeatVisualRenderer } from '../platform/web/beat-visuals'
 
 function createHarness(setup: () => Record<string, unknown>) {
   return defineComponent({ setup, render: () => h('div') })

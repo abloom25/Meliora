@@ -3,7 +3,7 @@ import { defineComponent, nextTick, type PropType } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import DashboardView from '../admin/views/DashboardView.vue'
 import { useFileStagingState } from '../admin/composables/useFileStagingState'
-import type { MusicConfig } from '../types/music'
+import type { MusicConfig } from '../../shared/music-config'
 
 const adminApiMock = vi.hoisted(() => ({
   fetchConfig: vi.fn(),

@@ -1,33 +1,35 @@
-import type {
-  LocalTrackConfig,
-  MetingPlaylistConfig,
-  PublicMusicConfig,
-  Track,
-} from '../types/music'
+import type { Track } from '../core/types'
+import type { PublicMusicConfig } from '../../shared/music-config'
 import { musicConfig } from '../config/music'
 import { mergeTrackLyricsProvider } from './lyrics'
 import { localMusicAdapter } from './music-adapters/local'
 import { metingMusicAdapter } from './music-adapters/meting'
 import type { MusicProviderAdapter } from './music-adapters/types'
-import { deduplicateTracks, mergeTrackShareAliases } from '../utils/tracks'
+import {
+  MUSIC_SOURCE_KINDS,
+  isMusicSourceEnabled,
+  musicSourceEntries,
+} from '../../shared/music-sources'
+import { deduplicateTracks, mergeTrackShareAliases } from '../core/library/tracks'
 
 export interface TrackLoadResult {
   tracks: Track[]
   failedSources: number
 }
 
-export interface MusicAdapterRegistry {
-  meting: MusicProviderAdapter<MetingPlaylistConfig>
-  local: MusicProviderAdapter<LocalTrackConfig>
-}
+/**
+ * 音源 id → 适配器。开放形状:加一种音源只需在 shared/music-sources.ts 补一项声明,
+ * 再往这里注册一个适配器,装配逻辑与后台界面都不用改
+ */
+export type MusicAdapterRegistry = Record<string, MusicProviderAdapter<never>>
 
 export interface LoadConfiguredTracksOptions {
   adapters?: Partial<MusicAdapterRegistry>
 }
 
 const DEFAULT_ADAPTERS: MusicAdapterRegistry = {
-  meting: metingMusicAdapter,
-  local: localMusicAdapter,
+  meting: metingMusicAdapter as MusicProviderAdapter<never>,
+  local: localMusicAdapter as MusicProviderAdapter<never>,
 }
 
 const MUSIC_SOURCE_TIMEOUT_MS = 8000
@@ -51,15 +53,28 @@ function createConfiguredSource<TSource>(
   }
 }
 
+/** 该条目自身是否启用。目前只有远程歌单支持逐条开关,其余音源的条目恒为启用 */
+function isEntryEnabled(entry: unknown): boolean {
+  if (typeof entry !== 'object' || entry === null) return true
+  return (entry as { enabled?: boolean }).enabled !== false
+}
+
 function createConfiguredSources(
   config: PublicMusicConfig,
   adapters: MusicAdapterRegistry,
 ): ConfiguredSource[] {
-  const playlists = config.playlists.filter((playlist) => playlist.enabled !== false)
-  return [
-    ...playlists.map((playlist) => createConfiguredSource(adapters.meting, playlist)),
-    ...config.localTracks.map((track) => createConfiguredSource(adapters.local, track)),
-  ]
+  const sources: ConfiguredSource[] = []
+  for (const kind of MUSIC_SOURCE_KINDS) {
+    // 音源总开关关掉时整类都不加载;没注册适配器的声明直接跳过
+    if (!isMusicSourceEnabled(config, kind.id)) continue
+    const adapter = adapters[kind.id]
+    if (!adapter) continue
+    for (const entry of musicSourceEntries(config, kind)) {
+      if (!isEntryEnabled(entry)) continue
+      sources.push(createConfiguredSource(adapter, entry as never))
+    }
+  }
+  return sources
 }
 
 async function settleConfiguredSources(
@@ -100,9 +115,10 @@ export async function loadConfiguredTracks(
   config: PublicMusicConfig,
   options: LoadConfiguredTracksOptions = {},
 ): Promise<TrackLoadResult> {
-  const adapters: MusicAdapterRegistry = {
-    ...DEFAULT_ADAPTERS,
-    ...options.adapters,
+  // Partial 覆盖里可能显式传 undefined,过滤掉才不会把默认适配器擦掉
+  const adapters: MusicAdapterRegistry = { ...DEFAULT_ADAPTERS }
+  for (const [id, adapter] of Object.entries(options.adapters ?? {})) {
+    if (adapter) adapters[id] = adapter
   }
   const sources = createConfiguredSources(config, adapters)
   const settled = await settleConfiguredSources(sources, config, MUSIC_SOURCE_CONCURRENCY)
@@ -143,6 +159,7 @@ function injectPreconnect(url: string) {
 }
 
 export function loadMusicConfig(): PublicMusicConfig {
-  injectPreconnect(musicConfig.apiEndpoint)
-  return musicConfig
+  const config = musicConfig()
+  injectPreconnect(config.apiEndpoint)
+  return config
 }

@@ -1,7 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { MusicConfig } from '../types/music'
+import type { MusicConfig } from '../../shared/music-config'
 import LocalTrackEditor from '../admin/components/LocalTrackEditor.vue'
 import AdvancedSettingsEditor from '../admin/components/AdvancedSettingsEditor.vue'
 import SecurityEditor from '../admin/components/SecurityEditor.vue'

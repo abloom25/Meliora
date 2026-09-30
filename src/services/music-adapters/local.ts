@@ -1,5 +1,6 @@
-import type { LocalTrackConfig, Track } from '../../types/music'
-import { mapLocalTrack } from '../../utils/tracks'
+import type { Track } from '../../core/types'
+import type { LocalTrackConfig } from '../../../shared/music-config'
+import { mapLocalTrack } from './track-mapping'
 import { hasCachedLyrics, loadLrcLyrics, registerTrackLyrics } from '../lyrics'
 import type { MusicProviderAdapter } from './types'
 

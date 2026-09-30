@@ -1,7 +1,7 @@
 <script setup lang="ts">
   import { ChevronDown } from '@lucide/vue'
   import { computed, ref } from 'vue'
-  import type { MusicConfig } from '../../types/music'
+  import type { MusicConfig } from '../../../shared/music-config'
   import ToggleSwitch from '../../components/ToggleSwitch.vue'
   import Collapse from '../../components/Collapse.vue'
   import BaseInput from '../../components/BaseInput.vue'

@@ -3,7 +3,7 @@
   import { usePlayerStore } from '../stores/player'
   import ProgressControl from './ProgressControl.vue'
   import TransportButtons from './TransportButtons.vue'
-  import type { LyricsSnapshot } from '../types/music'
+  import type { LyricsSnapshot } from '../core/types'
 
   withDefaults(
     defineProps<{

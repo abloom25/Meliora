@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createTempoRuler } from '../utils/tempo-ruler'
+import { createTempoRuler } from '../core/analysis/tempo-ruler'
 
 function createRandom(seed: number) {
   let state = seed >>> 0

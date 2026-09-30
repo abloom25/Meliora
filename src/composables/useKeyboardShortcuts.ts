@@ -1,5 +1,5 @@
 import { onMounted, onBeforeUnmount, type Ref } from 'vue'
-import { isInteractiveElement } from '../utils/dom'
+import { isInteractiveElement } from '../platform/web/dom'
 
 export function useKeyboardShortcuts({
   currentTime,

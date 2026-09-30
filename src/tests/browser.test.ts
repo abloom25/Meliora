@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { isApplePlatform } from '../utils/browser'
+import { isApplePlatform } from '../platform/web/browser'
 
 afterEach(() => {
   vi.restoreAllMocks()

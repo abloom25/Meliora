@@ -110,7 +110,7 @@ describe('generate-public-config', () => {
       playlists: [],
       localTracks: [],
     })
-    expect(source).toContain("import type { PublicMusicConfig } from '../types/music'")
+    expect(source).toContain("import type { PublicMusicConfig } from '../../shared/music-config'")
     expect(source).toContain('export const publicMusicConfig')
   })
 

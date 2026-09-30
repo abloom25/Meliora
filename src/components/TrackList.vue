@@ -10,7 +10,7 @@
     type ComponentPublicInstance,
   } from 'vue'
   import { Music, RefreshCw, Search, X } from '@lucide/vue'
-  import type { Track } from '../types/music'
+  import type { Track } from '../core/types'
   import { useCoverCache } from '../composables/useCoverCache'
 
   const props = withDefaults(

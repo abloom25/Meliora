@@ -264,6 +264,17 @@ describe('validateMusicConfig', () => {
 })
 
 describe('getPlaybackSupportError', () => {
+  it('allows a token config while the remote source is disabled, but rejects it after enabling', () => {
+    const config: MusicConfig = {
+      ...validConfig,
+      apiToken: 'secret',
+      sources: { meting: { enabled: false } },
+    }
+    expect(getPlaybackSupportError(config)).toBeNull()
+    config.sources!.meting!.enabled = true
+    expect(getPlaybackSupportError(config)).toBe(TOKEN_PLAYBACK_UNSUPPORTED)
+  })
+
   it('rejects a token-protected source while a playlist is still enabled', () => {
     expect(getPlaybackSupportError({ ...validConfig, apiToken: 'secret' } as MusicConfig)).toBe(
       TOKEN_PLAYBACK_UNSUPPORTED,

@@ -6,8 +6,8 @@ import {
   stepSpring,
   type SpringConfig,
   type SpringState,
-} from '../utils/spring'
-import { layoutLyricLines, lyricFocusOffset, type LyricLayout } from '../utils/lyric-scene'
+} from '../core/motion/spring'
+import { layoutLyricLines, lyricFocusOffset, type LyricLayout } from '../core/lyrics'
 
 // 歌词行的位移引擎。
 //

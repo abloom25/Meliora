@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createBeatVisualRenderer } from '../utils/beat-visuals'
+import { createBeatVisualRenderer } from '../platform/web/beat-visuals'
 
 describe('beat visual renderer', () => {
   afterEach(() => {

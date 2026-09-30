@@ -2,7 +2,7 @@
   import { Download, GitFork, PictureInPicture2, SlidersHorizontal } from '@lucide/vue'
   import { storeToRefs } from 'pinia'
   import { computed } from 'vue'
-  import { BEAT_FLASH_RATE_STEPS, sanitizeBeatFlashRate } from '../utils/beat-envelope'
+  import { BEAT_FLASH_RATE_STEPS, sanitizeBeatFlashRate } from '../core/analysis/beat-envelope'
   import { APP_VERSION } from '../generated/app-version'
   import { usePlayerStore, type ResettableSettingKey } from '../stores/player'
   import Collapse from './Collapse.vue'

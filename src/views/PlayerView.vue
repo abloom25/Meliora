@@ -16,30 +16,31 @@
   import { hasTrackLyricsSource } from '../services/lyrics'
   import { loadConfiguredTracks, loadMusicConfig } from '../services/music'
   import { usePlayerStore } from '../stores/player'
-  import { filterTracks, trackMatchesShareId } from '../utils/tracks'
-  import { applySiteIntegrations } from '../utils/site-integrations'
-  import { extractThemeColor, type ThemeColor } from '../utils/theme'
-  import { isInteractiveElement } from '../utils/dom'
+  import { filterTracks, trackMatchesShareId } from '../core/library/tracks'
+  import { applySiteIntegrations } from '../platform/web/site-integrations'
+  import { extractThemeColor, type ThemeColor } from '../platform/web/theme'
+  import { isInteractiveElement } from '../platform/web/dom'
   import { useAudioPlayer } from '../composables/useAudioPlayer'
-  import { useLyricsWindow } from '../composables/useLyricsWindow'
-  import { usePwaInstall } from '../composables/usePwaInstall'
+  import { useLyricsWindow } from '../platform/web/useLyricsWindow'
+  import { usePwaInstall } from '../platform/web/usePwaInstall'
   import { useSleepTimer } from '../composables/useSleepTimer'
   import { useThemeAccent } from '../composables/useThemeAccent'
-  import { useFullscreen } from '../composables/useFullscreen'
+  import { useFullscreen } from '../platform/web/useFullscreen'
   import { useChromeAutoHide } from '../composables/useChromeAutoHide'
   import { useTrackShare } from '../composables/useTrackShare'
   import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
   import { useCoverCache } from '../composables/useCoverCache'
   import { useFocusTrap } from '../composables/useFocusTrap'
   import { useDrawerSheet } from '../composables/useDrawerSheet'
-  import { useHaptic } from '../composables/useHaptic'
-  import { useDeviceDetection } from '../composables/useDeviceDetection'
+  import { useHaptic } from '../platform/web/useHaptic'
+  import { useDeviceDetection } from '../platform/web/useDeviceDetection'
   import LyricsPanel from '../components/LyricsPanel.vue'
   import PlayerControls from '../components/PlayerControls.vue'
   import SettingsPanel from '../components/SettingsPanel.vue'
   import TrackList from '../components/TrackList.vue'
   import Toast from '../components/Toast.vue'
-  import type { LyricAvailability, LyricsSnapshot, PublicMusicConfig, Track } from '../types/music'
+  import type { LyricAvailability, LyricsSnapshot, Track } from '../core/types'
+  import type { PublicMusicConfig } from '../../shared/music-config'
 
   const PLAY_MODE_META = {
     sequence: { text: '顺序播放', icon: ArrowRight },
@@ -48,7 +49,7 @@
     shuffle: { text: '随机播放', icon: Shuffle },
   } as const
 
-  const runtimeConfig = ref<PublicMusicConfig>(musicConfig)
+  const runtimeConfig = ref<PublicMusicConfig>(musicConfig())
 
   const { triggerHaptic, withHaptic } = useHaptic()
 

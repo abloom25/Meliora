@@ -1,11 +1,13 @@
+import { httpFetch } from './http'
 import {
   WORD_LYRICS_MIRRORS,
   WORD_LYRICS_PLATFORMS,
   WORD_LYRICS_TIMEOUT_MS,
 } from '../config/lyrics'
-import type { LyricLine, MusicServer } from '../types/music'
-import { LruCache } from '../utils/lru-cache'
-import { parseAnyLyrics } from '../utils/lyrics-source'
+import type { LyricLine } from '../core/types'
+import type { MusicServer } from '../../shared/music-config'
+import { LruCache } from '../core/util/lru-cache'
+import { parseAnyLyrics } from '../core/lyrics'
 
 // AMLL TTML DB 逐字歌词查询。命中即返回真实字级时间轴,未命中返回 null,
 // 由调用方回退到普通 LRC(再由 resolveLyricTimings 做插值兜底)。
@@ -56,7 +58,7 @@ async function fetchFromMirror(url: string): Promise<FetchOutcome> {
   const timer = setTimeout(() => controller.abort(), WORD_LYRICS_TIMEOUT_MS)
 
   try {
-    const response = await fetch(url, { cache: 'force-cache', signal: controller.signal })
+    const response = await httpFetch(url, { cache: 'force-cache', signal: controller.signal })
     // 404 是"这首歌不在库里"的确定答案,换镜像也是一样的结果;
     // 5xx / 网络错误才说明是这个镜像本身不可用,需要换下一个
     if (response.status === 404) return { text: null, definitive: true }

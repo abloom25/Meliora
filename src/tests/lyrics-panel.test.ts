@@ -5,7 +5,7 @@ import { nextTick } from 'vue'
 import LyricsPanel from '../components/LyricsPanel.vue'
 import { hasCachedTrackLyrics, hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
 import { usePlayerStore } from '../stores/player'
-import type { LyricLine, LyricsSnapshot, Track } from '../types/music'
+import type { LyricLine, LyricsSnapshot, Track } from '../core/types'
 
 vi.mock('../services/lyrics', () => ({
   hasCachedTrackLyrics: vi.fn(() => false),

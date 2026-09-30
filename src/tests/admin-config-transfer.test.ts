@@ -3,7 +3,7 @@ import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import AdminSidebar from '../admin/components/AdminSidebar.vue'
 import ConfigTransferView from '../admin/views/ConfigTransferView.vue'
-import type { MusicConfig } from '../types/music'
+import type { MusicConfig } from '../../shared/music-config'
 
 function validConfig(patch: Partial<MusicConfig> = {}): MusicConfig {
   return {

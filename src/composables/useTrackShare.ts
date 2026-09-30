@@ -1,7 +1,7 @@
 import type { Ref } from 'vue'
-import type { Track } from '../types/music'
-import { createTrackShareId, formatTrackDisplayTitle } from '../utils/tracks'
-import type { HapticStyle } from './useHaptic'
+import type { Track } from '../core/types'
+import { createTrackShareId, formatTrackDisplayTitle } from '../core/library/tracks'
+import type { HapticStyle } from '../platform/web/useHaptic'
 
 export interface UseTrackShareOptions {
   currentTrack: Ref<Track | null>

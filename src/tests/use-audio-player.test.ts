@@ -4,20 +4,20 @@ import { defineComponent, h, nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
 import { useAudioPlayer } from '../composables/useAudioPlayer'
 import { usePlayerStore } from '../stores/player'
-import { shouldUseIOSBackgroundSafeAudio } from '../utils/browser'
-import type { Track } from '../types/music'
+import { shouldUseIOSBackgroundSafeAudio } from '../platform/web/browser'
+import type { Track } from '../core/types'
 
 const startBeatAnalysisMock = vi.fn()
 
-vi.mock('../utils/browser', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../utils/browser')>()
+vi.mock('../platform/web/browser', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../platform/web/browser')>()
   return {
     ...actual,
     shouldUseIOSBackgroundSafeAudio: vi.fn(() => false),
   }
 })
 
-vi.mock('../composables/useBeatAnalyser', () => ({
+vi.mock('../platform/web/useBeatAnalyser', () => ({
   useBeatAnalyser: vi.fn(() => ({
     beatLevel: { value: 0 },
     spectrumLevels: { value: [0.1, 0.1, 0.1, 0.1, 0.1] },
@@ -308,6 +308,86 @@ describe('useAudioPlayer', () => {
       expect(playMock).toHaveBeenCalledTimes(2)
     } finally {
       HTMLAudioElement.prototype.play = originalPlay
+      vi.useRealTimers()
+    }
+  })
+
+  it('treats a pause during startup as a cancellation, not a failed track', async () => {
+    vi.useFakeTimers()
+    const originalPlay = HTMLAudioElement.prototype.play
+    const originalPause = HTMLAudioElement.prototype.pause
+    // 启动还没完成就被暂停:浏览器会把悬着的 play() 打断成 AbortError
+    let rejectPendingPlay: ((error: unknown) => void) | null = null
+    HTMLAudioElement.prototype.play = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectPendingPlay = reject
+        }),
+    )
+    HTMLAudioElement.prototype.pause = vi.fn(() => {
+      rejectPendingPlay?.(new DOMException('interrupted by pause', 'AbortError'))
+      rejectPendingPlay = null
+    })
+    try {
+      const { player, store } = mountPlayer()
+      store.settings.playMode = 'loop'
+      store.settings.skipOnError = true
+
+      await player.selectAndPlay(tracks[0]!, tracks)
+      player.pause()
+      await vi.runOnlyPendingTimersAsync()
+      await Promise.resolve()
+
+      // 取消不是失败:不能跳到下一首,也不该弹任何提示
+      expect(store.currentTrackId).toBe('1')
+      expect(store.isPlaying).toBe(false)
+      expect(store.errorMessage).toBe('')
+      expect(player.preloadMessage.value).toBe('')
+    } finally {
+      HTMLAudioElement.prototype.play = originalPlay
+      HTMLAudioElement.prototype.pause = originalPause
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the audible channel to itself after the library reloads empty', async () => {
+    vi.useFakeTimers()
+    const createdAudios: HTMLAudioElement[] = []
+    const originalAudio = globalThis.Audio
+    vi.stubGlobal(
+      'Audio',
+      vi.fn(function AudioMock() {
+        const audio = document.createElement('audio')
+        createdAudios.push(audio)
+        return audio
+      }),
+    )
+    const restore = stubAudioPlay()
+    try {
+      const { player, store } = mountPlayer()
+      store.settings.playMode = 'loop'
+      store.settings.smoothTrackChange = false
+      store.settings.preloadNextTrack = true
+
+      // 切过一次歌之后三路会轮转:第一路(出声通道的初始位置)落到了某个预加载槽手里
+      await player.selectAndPlay(tracks[0]!, tracks)
+      await player.next(true)
+      await vi.runOnlyPendingTimersAsync()
+
+      // 曲库重载成空(音源全挂/离线):播放停下,出声通道被拨回第一路
+      store.setTracks([])
+      expect(store.currentTrackId).toBeNull()
+
+      // 曲库回来了,继续放一首
+      store.setTracks(tracks)
+      store.selectTrack(tracks[0]!, tracks)
+      await vi.runOnlyPendingTimersAsync()
+
+      // 预加载不能把正在出声的这一路 release 掉再塞进别的歌
+      expect(createdAudios[0]?.src).toContain('/1.mp3')
+    } finally {
+      restore()
+      vi.stubGlobal('Audio', originalAudio)
       vi.useRealTimers()
     }
   })
