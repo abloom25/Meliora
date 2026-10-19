@@ -228,4 +228,25 @@ describe('web audio backend', () => {
     expect(load).toHaveBeenCalled()
     audio.dispose()
   })
+  it.each(['pause', 'load', 'release'] as const)(
+    'cancels stale CORS resume after %s',
+    (operation) => {
+      const audio = backend()
+      const channel = audio.active()
+      channel.load('/old.mp3')
+      const previous = audio.elementOf(channel)
+      defineProp(previous, 'paused', false)
+      previous.currentTime = 42
+      audio.degradeForTaint(previous)
+      const replacement = audio.elementOf(channel)
+      const play = vi.spyOn(replacement, 'play').mockResolvedValue(undefined)
+      play.mockClear()
+      if (operation === 'load') channel.load('/new.mp3')
+      else channel[operation]()
+      replacement.dispatchEvent(new Event('loadedmetadata'))
+      expect(play).not.toHaveBeenCalled()
+      if (operation !== 'pause') expect(replacement.currentTime).toBe(0)
+      audio.dispose()
+    },
+  )
 })

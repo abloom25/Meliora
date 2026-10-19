@@ -65,11 +65,21 @@
   // 队列小频谱 meter 由 TrackList 暴露,--spectrum-level-N 同样走 RAF 直写
   const trackListRef = ref<InstanceType<typeof TrackList> | null>(null)
 
-  const { preloadMessage, spectrumAvailable, toggle, pause, seek, next, previous, selectAndPlay } =
-    useAudioPlayer({
-      getBeatTargets: () => [artworkBackgroundRef.value, backgroundOverlayRef.value],
-      getSpectrumTargets: () => [trackListRef.value?.spectrumMeter],
-    })
+  const {
+    preloadMessage,
+    spectrumAvailable,
+    toggle,
+    pause,
+    seek,
+    next,
+    previous,
+    selectAndPlay,
+    beatBuildStatus,
+    retryBeatBuild,
+  } = useAudioPlayer({
+    getBeatTargets: () => [artworkBackgroundRef.value, backgroundOverlayRef.value],
+    getSpectrumTargets: () => [trackListRef.value?.spectrumMeter],
+  })
 
   const toggleWithHaptic = withHaptic(toggle)
   const previousWithHaptic = withHaptic(previous, 'selection')
@@ -696,6 +706,7 @@
         </header>
         <SettingsPanel
           :play-mode-text="playModeText"
+          :beat-build="beatBuildStatus"
           :sleep-timer="settingsSleepTimer"
           :capabilities="settingsCapabilities"
           @cycle-play-mode="cyclePlayModeWithHaptic"
@@ -704,6 +715,7 @@
           @toggle-fullscreen-mode="toggleFullscreenMode"
           @open-lyrics-window="openLyricsWindow"
           @install-pwa="installPwa"
+          @beat-build-retry="retryBeatBuild"
           @show-ios-install-guide="showIosInstallGuide"
         />
       </aside>

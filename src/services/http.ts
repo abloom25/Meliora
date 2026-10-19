@@ -7,6 +7,8 @@
 /** 请求选项刻意只留可移植的几项:缓存策略与取消信号,别的平台也都有对应概念 */
 export interface HttpRequestInit {
   signal?: AbortSignal
+  /** 简单请求头也由传输实现透传，例如音频预分析的 Accept。 */
+  headers?: Record<string, string>
   /** 与 fetch 的 cache 同义。不支持的平台可以忽略 */
   cache?: 'default' | 'force-cache' | 'no-store' | 'reload'
 }

@@ -36,6 +36,8 @@ self.addEventListener('fetch', (event) => {
   if (rangeHeader && rangeHeader.trim().length > 0) return
   // 对音频与视频资源直接放行，交由浏览器默认处理，确保流式与 seek 行为正常
   if (event.request.destination === 'audio' || event.request.destination === 'video') return
+  // Analysis reads the full audio through fetch; do not duplicate it in the app shell cache.
+  if (/(?:^|,)\s*audio\//i.test(event.request.headers.get('accept') || '')) return
 
   if (event.request.method !== 'GET') return
   const requestUrl = new URL(event.request.url)
@@ -44,6 +46,8 @@ self.addEventListener('fetch', (event) => {
   // 缓存优先策略会让退出登录后的 /api/auth 仍返回旧的 { authenticated: true },
   // 刷新页面后重新进入已登录态,导致退出登录在生产环境失效。
   if (requestUrl.pathname.startsWith('/api/')) return
+  // Optional models have a separate user-controlled download/delete lifecycle.
+  if (requestUrl.pathname.startsWith('/models/')) return
   // 后台上传的图标、封面和本地音乐使用稳定 URL。它们不是 Vite hash 资源,
   // 缓存优先会让用户替换文件后仍看到旧内容,所以直接交给网络和浏览器缓存策略。
   if (MUTABLE_ASSET_PATTERN.test(requestUrl.pathname)) return

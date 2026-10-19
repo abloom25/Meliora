@@ -1,9 +1,15 @@
-import { onBeforeUnmount, ref, type Ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue'
 import { EQ_BAND_FREQUENCIES, bandFilterType } from '../../core/audio/equalizer'
 import { createAudioContextCompatible } from './browser'
-import { createBeatEnvelope, sanitizeBeatFlashRate } from '../../core/analysis/beat-envelope'
-import { createRealtimeHpss, type RealtimeHpss } from '../../core/analysis/hpss'
-import { createTempoRuler } from '../../core/analysis/tempo-ruler'
+import {
+  isBeatTimelineReadyAt,
+  sampleBeatTimeline,
+  type BeatPreloadTarget,
+} from '../../core/analysis/beat-timeline'
+import { useBeatPreanalysis } from './useBeatPreanalysis'
+import { useBeatThisModels } from './useBeatThisModels'
+import type { BeatAnalysisMode } from '../../core/types'
+import type { BeatPlaybackState } from '../../core/analysis/beat-scheduling'
 
 // 模块级音频上下文与 source 缓存：
 // 浏览器对同一个 audio 节点只允许 createMediaElementSource 一次。
@@ -21,13 +27,30 @@ function smoothingAlpha(dtSeconds: number, tauSeconds: number) {
   return 1 - Math.exp(-dtSeconds / tauSeconds)
 }
 
-// byte 频谱(analyser 默认 -100…-30dB 映射到 0…255)到线性幅度的查表,供 HPSS 掩膜使用
-const LINEAR_MAGNITUDE_LUT = new Float32Array(256)
-for (let index = 0; index < 256; index += 1) {
-  LINEAR_MAGNITUDE_LUT[index] = Math.pow(10, (-100 + (index / 255) * 70) / 20)
-}
+const SPECTRUM_BANDS: Array<{ from: number; to: number }> = [
+  { from: 30, to: 120 },
+  { from: 120, to: 400 },
+  { from: 400, to: 1500 },
+  { from: 1500, to: 5000 },
+  { from: 5000, to: 12000 },
+]
+// 快起慢落,逐段略有差异,柱子才有"活"的感觉而不是整齐划一
+const RISE_TAUS = [0.05, 0.045, 0.06, 0.04, 0.035]
+const FALL_TAUS = [0.3, 0.26, 0.24, 0.2, 0.16]
+const BAND_IDLE_AMP = [0.16, 0.2, 0.22, 0.15, 0.12]
+const BAND_IDLE_BASE = [0.18, 0.24, 0.26, 0.2, 0.15]
+
+const PULSE_WEIGHTS = [0.28, 0.2, 0.12, 0.06, 0.03]
+const SEEK_SETTLE_MS = 180
 
 export interface BeatAnalyserOptions {
+  mode?: Ref<BeatAnalysisMode>
+  source?: Ref<string>
+  durationSeconds?: Ref<number>
+  adjacent?: Ref<readonly BeatPreloadTarget[]>
+  preloadEnabled?: Ref<boolean>
+  enabled?: Ref<boolean>
+  unavailableReason?: Ref<string | null>
   players: readonly HTMLAudioElement[]
   getActiveAudio: () => HTMLAudioElement
   isPlaying: Ref<boolean>
@@ -45,8 +68,7 @@ export interface BeatAnalyserOptions {
   onEqFiltersReady?: (filters: BiquadFilterNode[]) => void
   /**
    * 可选：当某 audio 元素因跨域污染(tainted)导致无法通过 Web Audio API 读取数据时回调。
-   * 触发途径有两种：createMediaElementSource 抛 SecurityError(少数浏览器)，
-   * 或播放推进期间 analyser 输出持续全零(多数浏览器对跨源媒体不抛错而是输出静音)。
+   * 仅在 createMediaElementSource 明确抛 SecurityError 时触发。
    * 调用方应重建该 audio 为无 crossOrigin 元素，并降级节拍分析。
    */
   onTainted?: (audio: HTMLAudioElement) => void
@@ -56,53 +78,78 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   const { players, getActiveAudio, isPlaying } = options
   const beatLevel = ref(0)
   const spectrumLevels = ref([0.1, 0.1, 0.1, 0.1, 0.1])
+  const reducedMotion = ref(false)
+  const visualEnabled = computed(() => options.enabled?.value !== false && !reducedMotion.value)
+  const models = useBeatThisModels()
+  void models.initialize()
+  const selectedModel = computed(() =>
+    options.mode?.value === 'beat-this-small'
+      ? 'small'
+      : options.mode?.value === 'beat-this-standard'
+        ? 'standard'
+        : null,
+  )
+  const selectedState = computed(() =>
+    selectedModel.value ? models.status.value[selectedModel.value] : null,
+  )
+  const unavailableReason = computed(
+    () =>
+      options.unavailableReason?.value ??
+      (selectedState.value?.phase === 'error'
+        ? selectedState.value.error
+        : selectedState.value?.phase === 'missing'
+          ? '请在设置中下载并启用所选模型'
+          : null),
+  )
+  let seekSettleTimer: ReturnType<typeof setTimeout> | null = null
+  let settlingAudio: HTMLAudioElement | null = null
+  let stalledAudio: HTMLAudioElement | null = null
+  function playbackState(): BeatPlaybackState {
+    const audio = getActiveAudio()
+    return {
+      timeSeconds: audio.currentTime,
+      playing:
+        isPlaying.value &&
+        !audio.paused &&
+        !audio.ended &&
+        stalledAudio !== audio &&
+        audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA,
+      playbackRate: audio.playbackRate,
+      seeking: audio.seeking || settlingAudio === audio,
+    }
+  }
+  const preanalysis = useBeatPreanalysis({
+    source: options.source ?? ref(''),
+    mode: options.mode,
+    durationSeconds: options.durationSeconds,
+    adjacent: options.adjacent,
+    preloadEnabled: options.preloadEnabled,
+    getPlaybackState: playbackState,
+    enabled: computed(
+      () => visualEnabled.value && (!selectedState.value || selectedState.value.phase === 'ready'),
+    ),
+    unavailableReason,
+  })
+  let readyMix = 0
+  const timelineSample = { level: 0, sustain: 0 }
   let audioContext: AudioContext | null = null
   let analyser: AnalyserNode | null = null
   let frequencyData: Uint8Array<ArrayBuffer> | null = null
-  // 实时 HPSS 给出每 bin 的打击掩膜;背景亮度只看打击成分在 30–150Hz 的线性功率
-  let hpss: RealtimeHpss | null = null
-  let linearMagnitude: Float32Array | null = null
-  // 速度尺子吃的是 dB 域(byte/255)打击成分低频正向通量,峰值拾取需要这个量纲
-  let prevPercussiveLow: Float32Array | null = null
   const connectedSources: Array<{
     source: MediaElementAudioSourceNode
     target: AudioNode
   }> = []
   let eqFilters: BiquadFilterNode[] = []
   let beatFrame = 0
-  let energyFloor = 0.08
   // 每个频谱段的慢速基线(自适应归一化用,0 表示未初始化)
   const bandBaselines = [0, 0, 0, 0, 0]
   // 每段上一帧电平:帧间突变(鼓点/拨弦/咬字)瞬态直通,不等待基线拉开差距
   const prevBandDbs = [0, 0, 0, 0, 0]
-  // ---- 节奏包络(实时 HPSS → 打击成分低频功率 → core/analysis/beat-envelope)----
-  // 这是表现效果的驱动源:一条连续的快起慢落包络,不做击点判定、不选乐器。
-  // 真歌离线实验(9 首,EDM 到钢琴独奏)确认:有鼓的歌拍点覆盖约 90%,拍外误闪每秒 0.2 次左右
-  const envelope = createBeatEnvelope()
-  // 输出延迟补偿:analyser 读到的是送往声卡之前的信号,声音真正到耳朵还要再等
-  // baseLatency + outputLatency(Windows 共享模式 20–50ms,蓝牙耳机常在 100ms 以上)。
-  // 视觉链路自己只有约 25ms(FFT 窗中心 + 平滑 + 合成上屏),所以画面会先于声音。
-  // 把包络按差值延后再写入 CSS 变量;Safari 拿不到 outputLatency,按 0 处理即不延迟
-  // 用户还可以在设置里手动加减:设备报的 outputLatency 不一定准(蓝牙编解码延迟往往不在里面)
-  const VISUAL_PIPELINE_MS = 25
-  const MAX_VISUAL_DELAY_MS = 600
-  const levelHistory: Array<{ at: number; level: number; sustain: number }> = []
-  // 速度尺子只提供拍长:决定包络释放时长与「闪烁频率」档位的最小间距
-  const tempoRuler = createTempoRuler()
-  // pauseBeatAnalysis 会把上一帧频谱清零,恢复后首帧对零向量求差分会产生
-  // 全频谱伪 flux;该标志让恢复首帧跳过 ODF 采样(只更新上一帧基线)
-  let skipNextOdfSample = false
-  // 慢包络:低频能量高出自适应底的部分,给背景一点随段落起伏的呼吸(CSS 侧权重很低)
   let sustainLevel = 0
   let lastFrameAt = 0
   let visibilityListenerRegistered = false
   let isUnmounted = false
-  // CORS 污染检测状态:跨源媒体经 createMediaElementSource 通常不抛 SecurityError,
-  // 而是让 analyser 持续输出全零(静音)。这里累计"播放推进中但输出全零"的时长,
-  // 超过宽限即判定该源被污染并回调 onTainted 降级重建。
-  let taintedSilenceMs = 0
-  let lastBeatFrameAt = 0
-  let lastObservedCurrentTime = 0
+  let motionQuery: MediaQueryList | null = null
 
   function disconnectAnalysisGraph() {
     for (const { source, target } of connectedSources) {
@@ -128,48 +175,41 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     }
     analyser = null
     frequencyData = null
-    hpss = null
-    linearMagnitude = null
-    prevPercussiveLow = null
   }
 
-  function visualDelayMs() {
-    const context = audioContext as (AudioContext & { outputLatency?: number }) | null
-    const deviceLatencyMs = ((context?.baseLatency ?? 0) + (context?.outputLatency ?? 0)) * 1000
-    const manual = options.beatVisualDelay?.value
-    const manualMs = typeof manual === 'number' && Number.isFinite(manual) ? manual : 0
-    return clamp(deviceLatencyMs - VISUAL_PIPELINE_MS + manualMs, 0, MAX_VISUAL_DELAY_MS)
-  }
-
-  // 延迟线:记录每帧的包络,取"延迟量之前"那一帧写出;延迟为 0 时原样返回
-  function delayedLevels(now: number, level: number, sustain: number) {
-    const delay = visualDelayMs()
-    if (delay <= 0) {
-      levelHistory.length = 0
-      return { level, sustain }
-    }
-    levelHistory.push({ at: now, level, sustain })
-    const target = now - delay
-    let picked = levelHistory[0] ?? { at: now, level, sustain }
-    while (levelHistory.length > 1 && (levelHistory[1]?.at ?? Infinity) <= target) {
-      levelHistory.shift()
-      picked = levelHistory[0] ?? picked
-    }
-    // 还没积累到延迟量的时长:先保持暗,避免开播首帧提前亮
-    if (picked.at > target) return { level: 0, sustain: 0 }
-    return { level: picked.level, sustain: picked.sustain }
+  // Timeline samples already use media time. Only compensate output latency and
+  // the user's offset; a negative offset can now read ahead without late inference.
+  function visualDelaySeconds() {
+    const deviceLatency = (audioContext?.baseLatency ?? 0) + (audioContext?.outputLatency ?? 0)
+    const manual = options.beatVisualDelay?.value ?? 0
+    return clamp(deviceLatency + (Number.isFinite(manual) ? manual / 1000 : 0), -0.6, 0.6)
   }
 
   function resetBeatTracking() {
-    levelHistory.length = 0
-    envelope.reset()
-    tempoRuler.reset()
+    readyMix = 0
+    beatLevel.value = 0
+    sustainLevel = 0
     bandBaselines.fill(0)
     prevBandDbs.fill(0)
-    hpss?.reset()
-    prevPercussiveLow?.fill(0)
-    sustainLevel = 0
+    options.onBeat?.(0, 0)
   }
+
+  watch(
+    preanalysis.timeline,
+    (next, previous) => {
+      // Extending the same track's verified ranges must not interrupt an ongoing pulse.
+      // Source/model changes always invalidate to null before publishing a new timeline.
+      if (!next || !previous) resetBeatTracking()
+    },
+    { flush: 'sync' },
+  )
+  watch(
+    visualEnabled,
+    (enabled) => {
+      if (!enabled) resetBeatTracking()
+    },
+    { flush: 'sync' },
+  )
 
   function stopBeatAnalysis() {
     window.cancelAnimationFrame(beatFrame)
@@ -178,8 +218,6 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     resetBeatTracking()
     lastFrameAt = 0
     options.onBeat?.(0, 0)
-    prevPercussiveLow?.fill(0)
-    hpss?.reset()
     spectrumLevels.value = spectrumLevels.value.map(() => 0.08)
     options.onSpectrum?.(spectrumLevels.value)
     if (visibilityListenerRegistered) {
@@ -192,19 +230,14 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     if (!beatFrame) return
     window.cancelAnimationFrame(beatFrame)
     beatFrame = 0
-    prevPercussiveLow?.fill(0)
-    hpss?.reset()
-    skipNextOdfSample = true
-    // 重置污染检测计时,避免恢复后首帧把整段后台时长一次性累加
-    taintedSilenceMs = 0
-    lastBeatFrameAt = 0
     spectrumLevels.value = spectrumLevels.value.map((level) => Math.max(0.08, level * 0.82))
     options.onSpectrum?.(spectrumLevels.value)
     options.onBeat?.(0, 0)
   }
 
   function handleVisibilityChange() {
-    if (document.hidden) {
+    reducedMotion.value = motionQuery?.matches ?? false
+    if (document.hidden || motionQuery?.matches) {
       pauseBeatAnalysis()
     } else {
       if (audioContext?.state === 'suspended') {
@@ -220,8 +253,8 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       const ctx = createAudioContextCompatible()
       if (!ctx) throw new Error('AudioContext unavailable')
       sharedAudioContext = ctx
-      ensureGestureResume()
     }
+    ensureGestureResume()
     return sharedAudioContext
   }
 
@@ -240,17 +273,6 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     document.addEventListener('keydown', handleGestureResume, true)
   }
 
-  function bandEnergy(data: Uint8Array<ArrayBuffer>, from: number, to: number) {
-    const start = Math.max(1, Math.min(data.length - 1, from))
-    const end = Math.max(start + 1, Math.min(data.length, to))
-    let energy = 0
-    for (let index = start; index < end; index += 1) {
-      const value = data[index] ?? 0
-      energy += value * value
-    }
-    return Math.sqrt(energy / Math.max(1, end - start)) / 255
-  }
-
   // 频段 dB 均值:byte 频谱本身是 dB 映射(默认 -100…-30dB 压到 0…255),
   // 均值落在压缩域,适合与自适应基线做相对比较
   function bandAverage(data: Uint8Array<ArrayBuffer>, from: number, to: number) {
@@ -261,55 +283,12 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     return sum / 255 / Math.max(1, end - start)
   }
 
-  // 打击成分 30–150Hz 的线性功率(每 bin 平均),包络的输入
-  function percussiveLowPower(
-    magnitude: Float32Array,
-    mask: Float32Array,
-    fromBin: number,
-    toBin: number,
-  ) {
-    const start = Math.max(1, fromBin)
-    const end = Math.max(start + 1, Math.min(magnitude.length, toBin))
-    let power = 0
-    for (let index = start; index < end; index += 1) {
-      const value = magnitude[index] ?? 0
-      power += value * value * (mask[index] ?? 0.5)
-    }
-    return power / (end - start)
-  }
-
-  // 打击成分低频 dB 域正向通量(每 bin 平均),速度尺子的 ODF
-  function percussiveLowFlux(
-    data: Uint8Array<ArrayBuffer>,
-    mask: Float32Array,
-    previous: Float32Array,
-    fromBin: number,
-    toBin: number,
-  ) {
-    const start = Math.max(1, fromBin)
-    const end = Math.max(start + 1, Math.min(data.length, toBin))
-    let flux = 0
-    for (let index = start; index < end; index += 1) {
-      const compressed = ((data[index] ?? 0) / 255) * (mask[index] ?? 0.5)
-      const rise = compressed - (previous[index] ?? 0)
-      if (rise > 0) flux += rise
-      previous[index] = compressed
-    }
-    return flux / (end - start)
-  }
-
-  const TAINTED_SILENCE_GRACE_MS = 3000
-
   function updateBeatLevel() {
     const activeAudio = getActiveAudio()
     const now = performance.now()
     const dt = lastFrameAt ? clamp((now - lastFrameAt) / 1000, 0.001, 0.1) : 1 / 60
     lastFrameAt = now
     if (!analyser || !frequencyData || activeAudio.paused) {
-      // 暂停/无 analyser 时重置污染检测进度,恢复播放后重新累计
-      taintedSilenceMs = 0
-      lastBeatFrameAt = 0
-      lastObservedCurrentTime = activeAudio.currentTime
       beatLevel.value *= Math.exp(-dt / 0.13)
       sustainLevel *= Math.exp(-dt / 0.3)
       options.onBeat?.(beatLevel.value, sustainLevel)
@@ -323,110 +302,34 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     }
     analyser.getByteFrequencyData(frequencyData)
     const data = frequencyData
-    // CORS 污染检测:跨源媒体不抛错而是让 analyser 持续输出全零。
-    // 仅累计"currentTime 在前进(确实在出声)且上下文运行中但频谱全零"的时长,
-    // 暂停、缓冲 stall 与 AudioContext suspended(Safari 手势前)均不计入,避免误判。
-    let allZero = true
-    for (let index = 0; index < data.length; index += 1) {
-      if (data[index] !== 0) {
-        allZero = false
-        break
-      }
-    }
-    const progressed = activeAudio.currentTime > lastObservedCurrentTime + 0.001
-    lastObservedCurrentTime = activeAudio.currentTime
-    if (!allZero) {
-      taintedSilenceMs = 0
-    } else if (progressed && audioContext?.state === 'running') {
-      // 仅在上下文运行时累计:AudioContext suspended(Safari 手势前)同样输出全零,
-      // 那不是跨源污染,不能误判(会错误重建 audio 并永久降级)
-      // 单帧 delta 钳制:页面 hidden 期间 rAF 停转,恢复后首帧的
-      // now - lastBeatFrameAt 会包含整个后台时长,不得一次性累加
-      taintedSilenceMs += lastBeatFrameAt ? Math.min(now - lastBeatFrameAt, 100) : 0
-      if (taintedSilenceMs >= TAINTED_SILENCE_GRACE_MS) {
-        // 判定该源被 CORS 污染:通知调用方重建 audio(去 crossOrigin)并降级节拍分析
-        taintedSilenceMs = 0
-        lastBeatFrameAt = 0
-        stopBeatAnalysis()
-        options.onTainted?.(activeAudio)
-        return
-      }
-    }
-    lastBeatFrameAt = now
-    // 分离缓冲与 data 等长(fftSize 变化时重建),在任何读操作之前执行
-    if (!hpss || !linearMagnitude || !prevPercussiveLow || linearMagnitude.length !== data.length) {
-      hpss = createRealtimeHpss({ bins: data.length })
-      linearMagnitude = new Float32Array(data.length)
-      prevPercussiveLow = new Float32Array(data.length)
-    }
-    // 频段按 Hz 划分再换算 bin:fftSize 或采样率变化时语义不变。
-    // 底鼓基频集中在 30–130Hz,旧实现(fftSize 256)一个 bin 就 ~187Hz,
-    // "低频段"实际混入 2kHz 以下全部低中频,军鼓/人声都会误触发节拍
     const binHz = audioContext ? audioContext.sampleRate / analyser.fftSize : 187.5
     const binOf = (hz: number) => clamp(Math.round(hz / binHz), 1, data.length - 1)
-
-    const kickEnergy = bandEnergy(data, binOf(30), binOf(130))
-    const bassEnergy = bandEnergy(data, binOf(130), binOf(260))
-    const lowMidEnergy = bandEnergy(data, binOf(260), binOf(2000))
-    const beatEnergy = kickEnergy * 0.62 + bassEnergy * 0.26 + lowMidEnergy * 0.12
-
-    // 自适应能量底:EMA 跟踪近期平均能量,持续低音提供少量环境亮度
-    energyFloor += (beatEnergy - energyFloor) * smoothingAlpha(dt, 1.1)
-
-    // 实时 HPSS 掩膜 → 打击成分 30–150Hz 功率 → 连续包络;恢复首帧跳过差分避免伪 flux
-    for (let index = 0; index < data.length; index += 1) {
-      linearMagnitude[index] = LINEAR_MAGNITUDE_LUT[data[index] ?? 0] ?? 0
-    }
-    const percussiveMask = hpss.process(linearMagnitude).percussiveMask
-    const lowFrom = binOf(30)
-    const lowTo = binOf(150)
-    const rulerFlux = percussiveLowFlux(data, percussiveMask, prevPercussiveLow, lowFrom, lowTo)
-    const lowPower = percussiveLowPower(linearMagnitude, percussiveMask, lowFrom, lowTo)
-    const flashRate = sanitizeBeatFlashRate(options.beatFlashRate?.value)
-    if (skipNextOdfSample) {
-      skipNextOdfSample = false
-      tempoRuler.pushSample(now, 0)
-      // 用当前功率"预热"包络的上一帧,本帧不产生上升
-      envelope.update({
-        power: lowPower,
-        dtSeconds: 0.001,
-        nowMs: now,
-        periodMs: 0,
-        rate: flashRate,
-      })
+    const timeline = visualEnabled.value ? preanalysis.timeline.value : null
+    const time = activeAudio.currentTime - visualDelaySeconds() * (activeAudio.playbackRate || 1)
+    if (
+      timeline &&
+      isBeatTimelineReadyAt(timeline, time) &&
+      !activeAudio.seeking &&
+      activeAudio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA &&
+      audioContext?.state === 'running'
+    ) {
+      const levels = sampleBeatTimeline(
+        timeline,
+        time,
+        options.beatFlashRate?.value ?? 1,
+        timelineSample,
+      )
+      readyMix += (1 - readyMix) * smoothingAlpha(dt, 0.18)
+      beatLevel.value = levels.level * readyMix
+      sustainLevel = levels.sustain * readyMix
     } else {
-      tempoRuler.pushSample(now, rulerFlux)
+      readyMix = 0
+      beatLevel.value = 0
+      sustainLevel = 0
     }
-    const tempo = tempoRuler.getState()
-    const rawLevel = envelope.update({
-      power: lowPower,
-      dtSeconds: dt,
-      nowMs: now,
-      periodMs: tempo.locked ? tempo.periodMs : 0,
-      rate: flashRate,
-    })
-
-    const sustainTarget = clamp((beatEnergy - energyFloor * 1.05) * 6, 0, 1)
-    sustainLevel +=
-      (sustainTarget - sustainLevel) * smoothingAlpha(dt, sustainTarget > sustainLevel ? 0.15 : 0.6)
-    const delayed = delayedLevels(now, rawLevel, sustainLevel)
-    beatLevel.value = delayed.level
-    // 同步通知宿主，渲染适配器可直接写 DOM，不需要根样式响应式更新。
-    options.onBeat?.(delayed.level, delayed.sustain)
+    options.onBeat?.(beatLevel.value, sustainLevel)
 
     // 频谱柱五段 Hz 划分(sub/low/mid/high/air)
-    const spectrumBands: Array<{ from: number; to: number }> = [
-      { from: 30, to: 120 },
-      { from: 120, to: 400 },
-      { from: 400, to: 1500 },
-      { from: 1500, to: 5000 },
-      { from: 5000, to: 12000 },
-    ]
-    // 快起慢落,逐段略有差异,柱子才有"活"的感觉而不是整齐划一
-    const riseTaus = [0.05, 0.045, 0.06, 0.04, 0.035]
-    const fallTaus = [0.3, 0.26, 0.24, 0.2, 0.16]
-    const bandIdleAmp = [0.16, 0.2, 0.22, 0.15, 0.12]
-    const bandIdleBase = [0.18, 0.24, 0.26, 0.2, 0.15]
     const idlePhase = now / 1000
     const idleWave = [
       Math.sin(idlePhase * 4.26) * 0.55 + Math.sin(idlePhase * 1.74 + 1.3) * 0.45,
@@ -435,12 +338,11 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       Math.sin(idlePhase * 9.42 + 0.5) * 0.6 + Math.sin(idlePhase * 1.38 + 5.1) * 0.4,
       Math.sin(idlePhase * 11.82 + 4.4) * 0.45 + Math.sin(idlePhase * 3.18 + 2.7) * 0.55,
     ]
-    const pulseWeights = [0.28, 0.2, 0.12, 0.06, 0.03]
     // 整体电平门:接近静默时淡出到 idle 波浪,有内容时交给自适应动态
     const overallLevel = bandAverage(data, binOf(30), binOf(12000))
     const audioGate = clamp((overallLevel - 0.06) * 8, 0, 1)
     const nextSpectrum = spectrumLevels.value.map((previous, band) => {
-      const def = spectrumBands[band] ?? spectrumBands[0]!
+      const def = SPECTRUM_BANDS[band] ?? SPECTRUM_BANDS[0]!
       const db = bandAverage(data, binOf(def.from), binOf(def.to))
       // 自适应归一化:byte 频谱是 dB 压缩域,绝对电平动态范围很窄(直接映射
       // 不是顶满就是贴地)。改为跟踪每段自身的慢速基线,映射"相对近期的
@@ -455,14 +357,14 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       const raw = Math.max(relative, transient)
       const stretched = clamp(0.18 + (raw - 0.18) * 2.4, 0, 1)
       const idleHeight =
-        (bandIdleBase[band] ?? 0.2) + (bandIdleAmp[band] ?? 0.18) * (idleWave[band] ?? 0)
-      const pulseLift = beatLevel.value * (pulseWeights[band] ?? 0.1)
+        (BAND_IDLE_BASE[band] ?? 0.2) + (BAND_IDLE_AMP[band] ?? 0.18) * (idleWave[band] ?? 0)
+      const pulseLift = beatLevel.value * (PULSE_WEIGHTS[band] ?? 0.1)
       const target = clamp(
         idleHeight * (1 - audioGate) + (0.08 + stretched * 0.9) * audioGate + pulseLift,
         0.08,
         0.98,
       )
-      const tau = target > previous ? (riseTaus[band] ?? 0.05) : (fallTaus[band] ?? 0.24)
+      const tau = target > previous ? (RISE_TAUS[band] ?? 0.05) : (FALL_TAUS[band] ?? 0.24)
       return previous + (target - previous) * smoothingAlpha(dt, tau)
     })
     spectrumLevels.value = nextSpectrum
@@ -471,7 +373,14 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   }
 
   async function startBeatAnalysis() {
-    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (!motionQuery) {
+      motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
+      motionQuery.addEventListener?.('change', handleVisibilityChange)
+    }
+    const prefersReducedMotion = motionQuery.matches
+    reducedMotion.value = prefersReducedMotion
+    preanalysis.prioritize(getActiveAudio().currentTime, playbackState())
+    preanalysis.start()
     try {
       if (!audioContext) {
         audioContext = getAudioContext()
@@ -509,12 +418,9 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
             source.connect(eqInput)
             connectedSources.push({ source, target: eqInput })
           } catch (error) {
-            const isTainted =
-              error instanceof DOMException &&
-              (error.name === 'SecurityError' || error.name === 'InvalidStateError')
+            const isTainted = error instanceof DOMException && error.name === 'SecurityError'
             if (isTainted) {
-              // 少数浏览器对跨源媒体抛 SecurityError(多数不抛错而是输出静音,
-              // 由 updateBeatLevel 的全零检测兜底),无法通过 Web Audio API 读取数据。
+              // 明确的安全异常才是污染证据；全零频谱也可能是正常静音。
               // 通知调用方降级重建 audio(去掉 crossOrigin)，牺牲节拍分析保播放
               taintedSourceDetected = true
               options.onTainted?.(audio)
@@ -550,11 +456,14 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
         pauseBeatAnalysis()
         return
       }
+      if (document.hidden) {
+        pauseBeatAnalysis()
+      }
       if (!visibilityListenerRegistered) {
         document.addEventListener('visibilitychange', handleVisibilityChange)
         visibilityListenerRegistered = true
       }
-      if (!beatFrame) beatFrame = window.requestAnimationFrame(updateBeatLevel)
+      if (!document.hidden && !beatFrame) beatFrame = window.requestAnimationFrame(updateBeatLevel)
     } catch (error) {
       // 启动失败不再静默:此前任何异常都会永久关闭分析且无任何线索
       console.warn('[useBeatAnalyser] 启动节拍分析失败', error)
@@ -564,6 +473,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
 
   onBeforeUnmount(() => {
     isUnmounted = true
+    motionQuery?.removeEventListener?.('change', handleVisibilityChange)
     stopBeatAnalysis()
     disconnectAnalysisGraph()
     // 挂起共享 AudioContext 释放音频硬件资源；SPA 生命周期内不 close，
@@ -579,5 +489,85 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     audioContext = null
   })
 
-  return { beatLevel, spectrumLevels, startBeatAnalysis, stopBeatAnalysis }
+  // Keep pending windows near the actual playhead, including during model loading
+  // and when the tab is hidden (where RAF no longer runs).
+  function clearSeekSettlement(): void {
+    if (seekSettleTimer !== null) clearTimeout(seekSettleTimer)
+    seekSettleTimer = null
+    settlingAudio = null
+  }
+  if (options.source)
+    watch(
+      options.source,
+      () => {
+        clearSeekSettlement()
+        stalledAudio = null
+      },
+      { flush: 'sync' },
+    )
+  const priorityListeners: Array<() => void> = []
+  for (const audio of players) {
+    const updatePriority = (): void => {
+      if (audio === getActiveAudio()) preanalysis.prioritize(audio.currentTime, playbackState())
+    }
+    const settleSeek = (): void => {
+      if (audio !== getActiveAudio()) return
+      clearSeekSettlement()
+      settlingAudio = audio
+      updatePriority()
+      seekSettleTimer = setTimeout(() => {
+        seekSettleTimer = null
+        if (audio !== getActiveAudio()) {
+          settlingAudio = null
+          return
+        }
+        // An outstanding native seek will emit seeked later. Do not poll or
+        // release its hold merely because pointer movement stopped briefly.
+        if (audio.seeking) return
+        settlingAudio = null
+        updatePriority()
+      }, SEEK_SETTLE_MS)
+    }
+    const resetOnSeek = (): void => {
+      if (audio !== getActiveAudio()) return
+      resetBeatTracking()
+      settleSeek()
+    }
+    const markStalled = (): void => {
+      if (audio !== getActiveAudio()) return
+      stalledAudio = audio
+      updatePriority()
+    }
+    const markPlaying = (): void => {
+      if (audio !== getActiveAudio()) return
+      stalledAudio = null
+      updatePriority()
+    }
+    audio.addEventListener?.('seeking', resetOnSeek)
+    audio.addEventListener?.('seeked', settleSeek)
+    audio.addEventListener?.('waiting', markStalled)
+    audio.addEventListener?.('playing', markPlaying)
+    const stateEvents = ['timeupdate', 'pause', 'ended', 'ratechange'] as const
+    for (const event of stateEvents) audio.addEventListener?.(event, updatePriority)
+    priorityListeners.push(() => {
+      audio.removeEventListener?.('seeking', resetOnSeek)
+      audio.removeEventListener?.('seeked', settleSeek)
+      audio.removeEventListener?.('waiting', markStalled)
+      audio.removeEventListener?.('playing', markPlaying)
+      for (const event of stateEvents) audio.removeEventListener?.(event, updatePriority)
+    })
+  }
+  onBeforeUnmount(() => {
+    clearSeekSettlement()
+    for (const remove of priorityListeners) remove()
+  })
+
+  return {
+    beatLevel,
+    spectrumLevels,
+    startBeatAnalysis,
+    stopBeatAnalysis,
+    preanalysis,
+    resetBeatTracking,
+  }
 }

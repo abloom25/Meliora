@@ -4,6 +4,7 @@
 // 那些是"这个部署怎么配"的事,后端和构建脚本也要用;核心层只认"在放什么"。
 
 export type PlayMode = 'sequence' | 'loop' | 'single' | 'shuffle'
+export type BeatAnalysisMode = 'basic' | 'beat-this-small' | 'beat-this-standard'
 export type LyricAvailability = 'available' | 'loading' | 'unavailable'
 export type LyricStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'error'
 export type EqPresetId = 'flat' | 'pop' | 'rock' | 'jazz' | 'vocal' | 'bass-boost' | 'custom'
@@ -80,6 +81,8 @@ export interface PlayerSettings {
   dynamicBackground: boolean
   /** 背景随节奏闪光(与动态封面背景独立) */
   beatFlash: boolean
+  /** 默认基础模式；增强模型由用户手动下载并启用。 */
+  beatAnalysisMode: BeatAnalysisMode
   backgroundBlur: number
   backgroundSaturation: number
   beatBrightness: number

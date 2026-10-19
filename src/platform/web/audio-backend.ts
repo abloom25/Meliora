@@ -18,6 +18,7 @@ const CHANNEL_EVENTS: readonly AudioChannelEvent[] = [
   'canplay',
   'loadeddata',
   'play',
+  'playing',
   'pause',
   'ended',
   'error',
@@ -76,6 +77,12 @@ function createChannel(
   let forwarders: Array<{ type: string; handler: EventListener }> = []
   // 时长未知时 <audio> 写 currentTime 不生效,先记下来等 metadata 就绪再落位
   let pendingSeek: number | null = null
+  let cancelResume: (() => void) | null = null
+
+  function clearResume(): void {
+    cancelResume?.()
+    cancelResume = null
+  }
 
   function emit(event: AudioChannelEvent) {
     for (const listener of listeners.get(event) ?? []) listener()
@@ -126,6 +133,7 @@ function createChannel(
   const channel: AudioChannel = {
     id,
     load(url) {
+      clearResume()
       pendingSeek = null
       element.src = url
       element.load()
@@ -134,6 +142,7 @@ function createChannel(
       return element.currentSrc || element.src || ''
     },
     release() {
+      clearResume()
       pendingSeek = null
       element.pause()
       element.removeAttribute('src')
@@ -141,9 +150,11 @@ function createChannel(
       element.load()
     },
     play() {
+      clearResume()
       return element.play()
     },
     pause() {
+      clearResume()
       element.pause()
     },
     currentTime() {
@@ -191,6 +202,7 @@ function createChannel(
     channel,
     element: () => element,
     swapElement(next) {
+      clearResume()
       const previous = element
       const wasPlaying = !previous.paused
       const position = previous.currentTime
@@ -198,18 +210,14 @@ function createChannel(
       element = next
       attach(next)
       applyGain()
-      // 新元素要接着放:等 metadata 就绪后回到原位置再继续,免得降级后进度回到 0
+      // 进度沿用通道的 pending seek；之后用户 seek/load 可覆盖它。
+      // 自动恢复监听由 pause/play/load/release 取消，不能覆盖更新的用户意图。
+      pendingSeek ??= Number.isFinite(position) && position > 0 ? position : null
       const resume = () => {
-        next.removeEventListener('loadedmetadata', resume)
-        if (Number.isFinite(position) && position > 0) {
-          try {
-            next.currentTime = position
-          } catch {
-            // 少数浏览器在 metadata 刚就绪时仍会拒绝 seek,忽略即可
-          }
-        }
-        if (wasPlaying) void next.play().catch(() => undefined)
+        clearResume()
+        if (element === next && wasPlaying) void next.play().catch(() => undefined)
       }
+      cancelResume = () => next.removeEventListener('loadedmetadata', resume)
       next.addEventListener('loadedmetadata', resume)
       const source = previous.currentSrc || previous.src
       if (source) {

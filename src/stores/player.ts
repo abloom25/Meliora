@@ -1,6 +1,6 @@
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
-import type { PlayMode, PlayerSettings, Track } from '../core/types'
+import type { BeatAnalysisMode, PlayMode, PlayerSettings, Track } from '../core/types'
 import { settingsStore } from '../platform/settings-store'
 import { createDefaultEqualizer, sanitizeEqualizer } from '../core/audio/equalizer'
 import {
@@ -23,6 +23,7 @@ const defaultSettings: PlayerSettings = {
   preloadNextTrack: true,
   dynamicBackground: true,
   beatFlash: true,
+  beatAnalysisMode: 'basic',
   backgroundBlur: 90,
   backgroundSaturation: 1.15,
   beatBrightness: 0.28,
@@ -51,6 +52,7 @@ export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings 
     preloadNextTrack: sanitizeBoolean(input.preloadNextTrack, defaultSettings.preloadNextTrack),
     dynamicBackground: sanitizeBoolean(input.dynamicBackground, defaultSettings.dynamicBackground),
     beatFlash: sanitizeBoolean(input.beatFlash, defaultSettings.beatFlash),
+    beatAnalysisMode: sanitizeBeatAnalysisMode(input.beatAnalysisMode),
     backgroundBlur: sanitizeNumber(input.backgroundBlur, defaultSettings.backgroundBlur, 45, 130),
     backgroundSaturation: sanitizeNumber(
       input.backgroundSaturation,
@@ -95,6 +97,11 @@ function sanitizeBoolean(value: unknown, fallback: boolean): boolean {
 function sanitizePlayMode(value: unknown): PlayMode {
   const modes: PlayMode[] = ['sequence', 'loop', 'single', 'shuffle']
   return modes.includes(value as PlayMode) ? (value as PlayMode) : defaultSettings.playMode
+}
+
+function sanitizeBeatAnalysisMode(value: unknown): BeatAnalysisMode {
+  if (value === 'beat-this-small' || value === 'beat-this-standard') return value
+  return 'basic'
 }
 
 function loadSettings(): PlayerSettings {

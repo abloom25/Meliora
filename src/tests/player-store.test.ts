@@ -321,6 +321,36 @@ describe('player store peekNext / peekPrevious', () => {
 })
 
 describe('player settings migration', () => {
+  it('migrates removed BeatNet and invalid preferences to the available basic mode', () => {
+    expect(
+      migrateSettings({ beatAnalysisMode: 'beatnet' as PlayerSettings['beatAnalysisMode'] })
+        .beatAnalysisMode,
+    ).toBe('basic')
+    expect(migrateSettings({ beatAnalysisMode: 'basic' }).beatAnalysisMode).toBe('basic')
+    expect(migrateSettings({ volume: 0.4 }).beatAnalysisMode).toBe('basic')
+    expect(
+      migrateSettings({
+        beatAnalysisMode: 'unknown-model' as PlayerSettings['beatAnalysisMode'],
+      }).beatAnalysisMode,
+    ).toBe('basic')
+  })
+
+  it('preserves the manually selected Beat This model across settings loads and resets of unrelated options', () => {
+    for (const mode of ['beat-this-small', 'beat-this-standard'] as const) {
+      expect(migrateSettings({ beatAnalysisMode: mode }).beatAnalysisMode).toBe(mode)
+    }
+    localStorage.setItem(
+      'meliora:settings',
+      JSON.stringify({ beatAnalysisMode: 'beat-this-standard' }),
+    )
+    const store = usePlayerStore()
+    expect(store.settings.beatAnalysisMode).toBe('beat-this-standard')
+    store.resetSettings(['volume'])
+    expect(store.settings.beatAnalysisMode).toBe('beat-this-standard')
+    store.resetSettings(['beatAnalysisMode'])
+    expect(store.settings.beatAnalysisMode).toBe('basic')
+  })
+
   beforeEach(() => setActivePinia(createPinia()))
 
   it('defaultSettings has settingsVersion 1', () => {
@@ -332,6 +362,7 @@ describe('player settings migration', () => {
     expect(result.autoHideChrome).toBe(true)
     expect(result.lyricTranslation).toBe(true)
     expect(result.progressLyricPreview).toBe(false)
+    expect(result.beatAnalysisMode).toBe('basic')
   })
 
   it('migrates legacy settings without settingsVersion to version 1 while preserving user preferences', () => {

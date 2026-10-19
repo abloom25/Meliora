@@ -21,6 +21,7 @@ export type AudioChannelEvent =
   | 'canplay'
   | 'loadeddata'
   | 'play'
+  | 'playing'
   | 'pause'
   | 'ended'
   | 'error'

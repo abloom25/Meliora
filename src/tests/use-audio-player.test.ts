@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, h, nextTick } from 'vue'
+import { defineComponent, h, nextTick, watch } from 'vue'
 import { mount } from '@vue/test-utils'
 import { useAudioPlayer } from '../composables/useAudioPlayer'
 import { usePlayerStore } from '../stores/player'
 import { shouldUseIOSBackgroundSafeAudio } from '../platform/web/browser'
 import type { Track } from '../core/types'
+import { useBeatAnalyser } from '../platform/web/useBeatAnalyser'
 
 const startBeatAnalysisMock = vi.fn()
 
@@ -23,6 +24,14 @@ vi.mock('../platform/web/useBeatAnalyser', () => ({
     spectrumLevels: { value: [0.1, 0.1, 0.1, 0.1, 0.1] },
     startBeatAnalysis: startBeatAnalysisMock,
     stopBeatAnalysis: vi.fn(),
+    resetBeatTracking: vi.fn(),
+    preanalysis: {
+      status: { value: { phase: 'idle', progress: 0, error: null } },
+      timeline: { value: null },
+      start: vi.fn(),
+      reset: vi.fn(),
+      retry: vi.fn(),
+    },
   })),
 }))
 
@@ -86,6 +95,67 @@ describe('useAudioPlayer', () => {
       expect(typeof player.selectAndPlay).toBe('function')
     } finally {
       restore()
+    }
+  })
+
+  it('passes real preload targets to beat analysis and rotates previous/next with playback', async () => {
+    vi.useFakeTimers()
+    const restore = stubAudioPlay()
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined)
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined)
+    const { player, store, wrapper } = mountPlayer()
+    try {
+      const options = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0]
+      store.settings.smoothTrackChange = false
+      store.selectTrack(tracks[0]!, tracks)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(options.adjacent?.value).toEqual([
+        { direction: 'next', source: '/2.mp3', title: 'Two' },
+        { direction: 'previous', source: '/3.mp3', title: 'Three' },
+      ])
+      const nextAudio = options.players.find((audio) => audio.src.endsWith('/2.mp3'))!
+      Object.defineProperty(nextAudio, 'duration', { configurable: true, value: 90 })
+      nextAudio.dispatchEvent(new Event('loadedmetadata'))
+      nextAudio.dispatchEvent(new Event('canplay'))
+      expect(options.adjacent?.value[0]?.durationSeconds).toBe(90)
+
+      let candidatesAtPromotion: readonly string[] = []
+      const stopPromotionWatch = watch(
+        options.source!,
+        (source) => {
+          if (source === '/2.mp3')
+            candidatesAtPromotion = options.adjacent!.value.map((target) => target.source)
+        },
+        { flush: 'sync' },
+      )
+
+      // A paused switch still promotes the exact prepared source and puts the
+      // outgoing song in the opposite slot without a fresh shuffle prediction.
+      await player.next(true)
+      stopPromotionWatch()
+      expect(options.source?.value).toBe('/2.mp3')
+      expect(candidatesAtPromotion).toContain('/2.mp3')
+      expect(options.adjacent?.value.some((target) => target.source === '/2.mp3')).toBe(false)
+      expect(options.adjacent?.value).toContainEqual({
+        direction: 'previous',
+        source: '/1.mp3',
+        title: 'One',
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(options.adjacent?.value[0]?.source).toBe('/3.mp3')
+
+      store.settings.preloadNextTrack = false
+      expect(options.preloadEnabled?.value).toBe(false)
+      expect(options.adjacent?.value).toEqual([])
+      store.settings.preloadNextTrack = true
+      await vi.advanceTimersByTimeAsync(0)
+      expect(options.adjacent?.value).toHaveLength(2)
+      store.setTracks([])
+      expect(options.adjacent?.value).toEqual([])
+    } finally {
+      wrapper.unmount()
+      restore()
+      vi.useRealTimers()
     }
   })
 
@@ -185,6 +255,65 @@ describe('useAudioPlayer', () => {
       expect(startBeatAnalysisMock).not.toHaveBeenCalled()
     } finally {
       restore()
+    }
+  })
+
+  it('migrates a runtime legacy BeatNet preference to basic preanalysis', () => {
+    const store = usePlayerStore()
+    Object.assign(store.settings, { beatAnalysisMode: 'beatnet' })
+    const { wrapper, player } = mountPlayer()
+    expect(store.settings.beatAnalysisMode).toBe('basic')
+    expect(player.beatBuildStatus.value.phase).toBe('idle')
+    expect(typeof player.retryBeatBuild).toBe('function')
+    wrapper.unmount()
+  })
+
+  it('waits for fulfilled play before starting preanalysis, not the earlier play event', async () => {
+    let finishPlay!: () => void
+    const playMock = vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(function (
+      this: HTMLMediaElement,
+    ) {
+      this.dispatchEvent(new Event('play'))
+      return new Promise<void>((resolve) => {
+        finishPlay = resolve
+      })
+    })
+    const { wrapper, player, store } = mountPlayer()
+    store.settings.preloadNextTrack = false
+    store.selectTrack(tracks[0]!, tracks)
+    const pending = player.play()
+    await nextTick()
+    expect(playMock).toHaveBeenCalledTimes(1)
+    expect(startBeatAnalysisMock).not.toHaveBeenCalled()
+    finishPlay()
+    await pending
+    expect(startBeatAnalysisMock).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('starts analysis on active playing events but ignores a preload channel playing', async () => {
+    const createdAudios: HTMLAudioElement[] = []
+    const originalAudio = globalThis.Audio
+    vi.stubGlobal(
+      'Audio',
+      vi.fn(function () {
+        const audio = document.createElement('audio')
+        createdAudios.push(audio)
+        return audio
+      }),
+    )
+    try {
+      const { wrapper, store } = mountPlayer()
+      store.selectTrack(tracks[0]!, tracks)
+      createdAudios[0]!.dispatchEvent(new Event('play'))
+      expect(startBeatAnalysisMock).not.toHaveBeenCalled()
+      createdAudios[1]!.dispatchEvent(new Event('playing'))
+      expect(startBeatAnalysisMock).not.toHaveBeenCalled()
+      createdAudios[0]!.dispatchEvent(new Event('playing'))
+      expect(startBeatAnalysisMock).toHaveBeenCalledTimes(1)
+      wrapper.unmount()
+    } finally {
+      vi.stubGlobal('Audio', originalAudio)
     }
   })
 
@@ -594,15 +723,17 @@ describe('useAudioPlayer', () => {
       await player.play()
 
       // sequence 模式下自动切到队尾 track3,其预加载失败 → 之后无实际后继
+      Object.defineProperty(createdAudios[0]!, 'ended', { configurable: true, value: true })
       createdAudios[0]!.dispatchEvent(new Event('ended'))
       await vi.advanceTimersByTimeAsync(0)
       createdAudios[2]!.dispatchEvent(new Event('error'))
       await vi.advanceTimersByTimeAsync(200)
 
-      // 不提示"继续播放",也不调度 next(false);当前曲目不受影响继续播放
+      // 原曲已经自然结束，失败后停止并显示真实错误。
       expect(player.preloadMessage.value).not.toContain('继续播放')
       expect(store.currentTrackId).toBe('2')
-      expect(store.isPlaying).toBe(true)
+      expect(store.isPlaying).toBe(false)
+      expect(store.errorMessage).toContain('音频加载失败')
     } finally {
       restore()
       vi.stubGlobal('Audio', originalAudio)

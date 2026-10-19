@@ -2,10 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h, ref, type Ref } from 'vue'
 import { mount } from '@vue/test-utils'
-import { preloadCover, usePreloadPool } from '../composables/usePreloadPool'
+import {
+  preloadCover,
+  usePreloadPool,
+  type PreloadPoolOptions,
+} from '../composables/usePreloadPool'
 import { usePlayerStore } from '../stores/player'
 import type { PlayerSettings, Track } from '../core/types'
 import { createWebAudioBackend } from '../platform/web/audio-backend'
+import type { AudioChannel } from '../core/audio/backend'
 
 const tracks: Track[] = [
   { id: '1', title: 'One', artist: 'A', audioUrl: '/1.mp3', kind: 'local' },
@@ -21,6 +26,7 @@ const defaultSettings: PlayerSettings = {
   preloadNextTrack: true,
   dynamicBackground: true,
   beatFlash: true,
+  beatAnalysisMode: 'basic',
   backgroundBlur: 90,
   backgroundSaturation: 1.15,
   beatBrightness: 0.28,
@@ -84,7 +90,10 @@ function resolveDeferred(callback: (() => void) | null) {
   callback?.()
 }
 
-function mountPool(settings: Ref<PlayerSettings>) {
+function mountPool(
+  settings: Ref<PlayerSettings>,
+  options: Pick<PreloadPoolOptions, 'onTargetsChanged' | 'isChannelProtected'> = {},
+) {
   const store = usePlayerStore()
   store.setTracks(tracks)
   const backend = createBackend()
@@ -96,6 +105,7 @@ function mountPool(settings: Ref<PlayerSettings>) {
         store,
         settings,
         transitionInProgress: () => false,
+        ...options,
       })
       return { pool }
     },
@@ -129,6 +139,169 @@ describe('usePreloadPool', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  it('publishes the actual loaded sources and refreshes their duration after readiness', async () => {
+    const changed = vi.fn()
+    const { pool, store, backend, wrapper } = mountPool(ref({ ...defaultSettings }), {
+      onTargetsChanged: changed,
+    })
+    store.selectTrack(tracks[1]!, tracks)
+    pool.preloadAdjacentTracks()
+    expect(changed.mock.lastCall?.[0]).toEqual([
+      { direction: 'next', source: '/3.mp3', title: 'Three' },
+      { direction: 'previous', source: '/1.mp3', title: 'One' },
+    ])
+    const nextAudio = backend.elementOf(pool.preloadSlots.next.channel)
+    Object.defineProperty(nextAudio, 'duration', { configurable: true, value: 180 })
+    nextAudio.dispatchEvent(new Event('loadedmetadata'))
+    expect(changed.mock.lastCall?.[0][0].durationSeconds).toBe(180)
+    nextAudio.dispatchEvent(new Event('canplay'))
+    await expect(pool.preloadSlots.next.ready).resolves.toBe(true)
+    Object.defineProperty(nextAudio, 'duration', { configurable: true, value: 181.5 })
+    nextAudio.dispatchEvent(new Event('durationchange'))
+    expect(changed.mock.lastCall?.[0][0].durationSeconds).toBe(181.5)
+    Object.defineProperty(nextAudio, 'duration', { configurable: true, value: Infinity })
+    nextAudio.dispatchEvent(new Event('durationchange'))
+    expect(changed.mock.lastCall?.[0][0]).not.toHaveProperty('durationSeconds')
+    wrapper.unmount()
+    expect(changed.mock.lastCall?.[0]).toEqual([])
+  })
+
+  it('keeps the already chosen shuffle target without drawing a second successor', () => {
+    const changed = vi.fn()
+    const { pool, store, wrapper } = mountPool(ref({ ...defaultSettings }), {
+      onTargetsChanged: changed,
+    })
+    store.selectTrack(tracks[0]!, tracks)
+    store.settings.playMode = 'shuffle'
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.45)
+    pool.preloadAdjacentTracks()
+    const selected = pool.preloadSlots.next.track!
+    random.mockClear()
+    random.mockReturnValue(0.99)
+    pool.refreshTargets()
+    expect(random).not.toHaveBeenCalled()
+    expect(changed.mock.lastCall?.[0][0].source).toBe(selected.audioUrl)
+    expect(pool.predictNextTrack(true)?.id).toBe(selected.id)
+    wrapper.unmount()
+  })
+
+  it('publishes no separate next target during automatic single-song repeat', () => {
+    const changed = vi.fn()
+    const { pool, store, wrapper } = mountPool(ref({ ...defaultSettings }), {
+      onTargetsChanged: changed,
+    })
+    store.selectTrack(tracks[1]!, tracks)
+    store.settings.playMode = 'single'
+    pool.preloadAdjacentTracks()
+    expect(changed.mock.lastCall?.[0]).toEqual([
+      { direction: 'previous', source: '/1.mp3', title: 'One' },
+    ])
+    expect(pool.preloadSlots.next.track).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('keeps a shared previous/next song loaded during repeated two-song queue refreshes', async () => {
+    const changed = vi.fn()
+    const { pool, store, backend, wrapper } = mountPool(ref({ ...defaultSettings }), {
+      onTargetsChanged: changed,
+    })
+    store.selectTrack(tracks[0]!, tracks.slice(0, 2))
+    pool.preloadAdjacentTracks()
+    const nextAudio = backend.elementOf(pool.preloadSlots.next.channel)
+    Object.defineProperty(nextAudio, 'duration', { configurable: true, value: 180 })
+    nextAudio.dispatchEvent(new Event('canplay'))
+    await expect(pool.preloadSlots.next.ready).resolves.toBe(true)
+    changed.mockClear()
+    const load = vi.spyOn(nextAudio, 'load')
+    load.mockClear()
+    pool.preloadAdjacentTracks()
+    pool.preloadAdjacentTracks()
+    expect(load.mock.contexts).not.toContain(nextAudio)
+    expect(changed).not.toHaveBeenCalled()
+    expect(pool.preloadSlots.next.track?.id).toBe('2')
+    expect(pool.preloadSlots.previous.track).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('clears analysis targets synchronously when disabled and ignores stale metadata after clearing', () => {
+    const settings = ref({ ...defaultSettings })
+    const changed = vi.fn()
+    const { pool, store, backend, wrapper } = mountPool(settings, { onTargetsChanged: changed })
+    store.selectTrack(tracks[0]!, tracks)
+    void pool.loadSlot('next', tracks[1]!)
+    const audio = backend.elementOf(pool.preloadSlots.next.channel)
+    settings.value.preloadNextTrack = false
+    expect(changed.mock.lastCall?.[0]).toEqual([])
+    pool.clearPreloads()
+    settings.value.preloadNextTrack = true
+    audio.dispatchEvent(new Event('loadedmetadata'))
+    expect(changed.mock.lastCall?.[0]).toEqual([])
+    wrapper.unmount()
+  })
+
+  it('removes a neighbor whose audio fails after canplay without affecting current playback', async () => {
+    const changed = vi.fn()
+    const { pool, store, backend, wrapper } = mountPool(ref({ ...defaultSettings }), {
+      onTargetsChanged: changed,
+    })
+    store.selectTrack(tracks[0]!, tracks)
+    const ready = pool.loadSlot('next', tracks[1]!)
+    const audio = backend.elementOf(pool.preloadSlots.next.channel)
+    audio.dispatchEvent(new Event('canplay'))
+    await expect(ready).resolves.toBe(true)
+    audio.dispatchEvent(new Event('error'))
+    expect(changed.mock.lastCall?.[0]).toEqual([])
+    expect(pool.isTrackFailed('2')).toBe(true)
+    expect(store.currentTrackId).toBe('1')
+    wrapper.unmount()
+  })
+
+  it('excludes the active and retiring channels and publishes the actual previous song after rotation', () => {
+    const changed = vi.fn()
+    let protectedChannel: AudioChannel | null = null
+    const { pool, store, backend, wrapper } = mountPool(ref({ ...defaultSettings }), {
+      onTargetsChanged: changed,
+      isChannelProtected: (channel) => channel === protectedChannel,
+    })
+    store.selectTrack(tracks[0]!, tracks)
+    const outgoing = backend.active()
+    outgoing.load(tracks[0]!.audioUrl)
+    void pool.loadSlot('next', tracks[1]!)
+    const incoming = pool.preloadSlots.next.channel
+    backend.setActive(incoming)
+    pool.preloadSlots.previous.channel = outgoing
+    pool.preloadSlots.previous.track = tracks[0]!
+    protectedChannel = outgoing
+    store.selectTrack(tracks[1]!, tracks)
+    pool.refreshTargets()
+    expect(changed.mock.lastCall?.[0]).toEqual([])
+    protectedChannel = null
+    pool.refreshTargets()
+    expect(changed.mock.lastCall?.[0]).toEqual([
+      { direction: 'previous', source: '/1.mp3', title: 'One' },
+    ])
+    wrapper.unmount()
+  })
+
+  it('reloads a changed source even when its track id has not changed', async () => {
+    const changed = vi.fn()
+    const { pool, store, backend, wrapper } = mountPool(ref({ ...defaultSettings }), {
+      onTargetsChanged: changed,
+    })
+    store.selectTrack(tracks[0]!, tracks)
+    const first = pool.loadSlot('next', tracks[1]!)
+    const replaced = { ...tracks[1]!, audioUrl: '/2-new.mp3' }
+    store.queue = [tracks[0]!, replaced]
+    const second = pool.loadSlot('next', replaced)
+    await expect(first).resolves.toBe(false)
+    expect(second).not.toBe(first)
+    expect(backend.elementOf(pool.preloadSlots.next.channel).src).toContain('/2-new.mp3')
+    expect(changed.mock.lastCall?.[0]).toEqual([
+      { direction: 'next', source: '/2-new.mp3', title: 'Two' },
+    ])
+    wrapper.unmount()
   })
 
   it('predictNextTrack matches store.peekNext in loop mode', () => {
@@ -327,5 +500,24 @@ describe('usePreloadPool', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+  it('settles a cancelled preload without blacklisting the track', async () => {
+    const { pool, wrapper } = mountPool(ref({ ...defaultSettings }))
+    const settled = vi.fn()
+    void pool.loadSlot('next', tracks[1]!).then(settled)
+    pool.clearPreloads()
+    await Promise.resolve()
+    expect(settled).toHaveBeenCalledWith(false)
+    expect(pool.isTrackFailed(tracks[1]!.id)).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('settles waiters when the pool unmounts', async () => {
+    const { pool, wrapper } = mountPool(ref({ ...defaultSettings }))
+    const settled = vi.fn()
+    void pool.loadSlot('next', tracks[1]!).then(settled)
+    wrapper.unmount()
+    await Promise.resolve()
+    expect(settled).toHaveBeenCalledWith(false)
   })
 })
