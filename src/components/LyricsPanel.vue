@@ -1,16 +1,15 @@
 <script setup lang="ts">
-  import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+  import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
   import { storeToRefs } from 'pinia'
   import { usePlayerStore } from '../stores/player'
-  import { hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
+  import { getLyricsSource, hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
   import { createLyricClock } from '../core/lyrics'
   import { listenMediaQuery } from '../platform/web/media-query'
   import { isApplePlatform } from '../platform/web/browser'
   import {
-    harmonyParentsOf,
+    createLyricTimeline,
     lyricTempoScale,
     nextPrimaryTime,
-    resolveLyricScene,
     sameLyricScene,
     type LyricScene,
   } from '../core/lyrics'
@@ -59,8 +58,9 @@
 
   // timeupdate 只有约 4Hz,逐字扫光需要每帧的播放位置,这里统一走外推时钟
   const clock = createLyricClock()
-  const lines = ref<LyricLine[]>([])
-  const scene = ref<LyricScene>(emptyScene())
+  const lines = shallowRef<LyricLine[]>([])
+  // 场景按时间区间整体替换,保留快照引用即可跳过逐帧的活跃行集合比较。
+  const scene = shallowRef<LyricScene>(emptyScene())
   const status = ref<LyricStatus>('idle')
   const lyricTempo = ref(1)
   const viewport = ref<HTMLElement>()
@@ -104,7 +104,7 @@
       return copy
     })
   })
-  const harmonyParents = computed(() => harmonyParentsOf(lines.value))
+  const timeline = computed(() => createLyricTimeline(lines.value))
   const backgroundFlags = computed(() => lines.value.map((line) => Boolean(line.background)))
   const activeSet = computed(() => new Set(scene.value.active))
 
@@ -164,6 +164,8 @@
       activeIndex: scene.value.anchor,
       activeIndices: [...scene.value.active],
       status: status.value,
+      // 翻译开关会复制显示行,来源仍从已加载的原始时间轴读取。
+      source: getLyricsSource(lines.value) ?? undefined,
       tempoScale: lyricTempo.value,
     })
   }
@@ -200,7 +202,7 @@
    * 变了就更新高亮、扫光绑定、快照,并让引擎按 transition 重新排版
    */
   function syncScene(time: number, transition: LyricsTransition = 'spring', force = false) {
-    const next = resolveLyricScene(lines.value, time, harmonyParents.value)
+    const next = timeline.value.read(time)
     const changed = !sameLyricScene(next, scene.value)
     if (!changed && !force) return
     scene.value = next
@@ -220,9 +222,9 @@
     }
     updateStatus('loading')
     lyricsController = new AbortController()
-    try {
-      const parsedLines = await loadTrackLyrics(track, lyricsController.signal)
+    const applyLines = (parsedLines: LyricLine[]) => {
       if (id !== requestId) return
+      if (lines.value === parsedLines) return
       if (!parsedLines.length) {
         lines.value = []
         updateStatus('empty')
@@ -231,12 +233,19 @@
       lines.value = parsedLines
       clock.anchor(currentTime.value, performance.now())
       if (isPlaying.value) clock.resume(currentTime.value, performance.now())
-      scene.value = resolveLyricScene(lines.value, readClock(), harmonyParents.value)
+      scene.value = timeline.value.read(readClock())
       lyricTempo.value =
         scene.value.anchor < 0 ? 1 : lyricTempoScale(lines.value, scene.value.anchor)
       // 行节点要等舞台切换过渡结束才会挂上来,排版由 lyricsContent 的 watcher 接手
       updateStatus('ready')
       startRenderLoop()
+      void nextTick(() => {
+        if (id === requestId) relayout()
+      })
+    }
+    try {
+      const parsedLines = await loadTrackLyrics(track, lyricsController.signal, applyLines)
+      applyLines(parsedLines)
     } catch (error) {
       // 只有面板自己 abort(切歌/卸载)才静默返回;服务层的加载超时
       // 已包装为 LyricsTimeoutError(见 services/lyrics),会落到 error 态

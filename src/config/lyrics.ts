@@ -2,18 +2,30 @@ import type { MusicServer } from '../../shared/music-config'
 
 // 逐字歌词数据源:AMLL TTML DB(github.com/amll-dev/amll-ttml-db)。
 // 社区维护的 Apple Music 规格逐词歌词库,按平台歌曲 ID 直接寻址静态文件,
-// 三个镜像都带 `Access-Control-Allow-Origin: *`,浏览器可直连,不需要后端代理。
+// 官方 API 支持平台 ID 与元数据检索,静态镜像在 API 不可用时兜底。
 //
-// 覆盖率是有限的(以日系、欧美、游戏音乐为主),命中不了的曲目由
-// core/lyrics 的字符权重插值兜底,渲染层通过 LyricLine.wordSource 区分两者。
+// 社区词库的覆盖率有限,未命中的曲目回退普通歌词。
+// 没有真实字级时间轴时保持整行高亮,不合成猜测的逐字数据。
+
+export const WORD_LYRICS_API_URL = 'https://api.amll.dev/v1/lyrics'
+export const WORD_LYRICS_POSITIVE_TTL_MS = 24 * 60 * 60 * 1000
+export const WORD_LYRICS_NEGATIVE_TTL_MS = 15 * 60 * 1000
+export const WORD_LYRICS_QUERY_TIMEOUT_MS = 8000
+export const WORD_LYRICS_MAX_CONCURRENT_REQUESTS = 4
+export const WORD_LYRICS_MAX_QUEUED_REQUESTS = 32
+
+export const NATIVE_LYRICS_API_URL = '/api/lyrics'
+export const NATIVE_LYRICS_POSITIVE_TTL_MS = 24 * 60 * 60 * 1000
+export const NATIVE_LYRICS_NEGATIVE_TTL_MS = 15 * 60 * 1000
+export const NATIVE_LYRICS_TIMEOUT_MS = 8000
 
 export interface WordLyricsMirror {
-  /** 展示用名称,只出现在开发期告警里 */
+  /** 镜像标识 */
   name: string
   baseUrl: string
 }
 
-// 按顺序尝试:jsDelivr 在国内可达性更好,raw.githubusercontent 作为权威兜底
+// API 不可用时在统一并发预算内查询镜像,首个有效结果返回。
 export const WORD_LYRICS_MIRRORS: readonly WordLyricsMirror[] = [
   { name: 'jsdelivr', baseUrl: 'https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main' },
   { name: 'jsdelivr-fastly', baseUrl: 'https://fastly.jsdelivr.net/gh/amll-dev/amll-ttml-db@main' },

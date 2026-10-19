@@ -71,7 +71,57 @@ export function resolveLyricScene(
   }
 }
 
+export interface LyricTimeline {
+  /** 返回共享的区间快照,调用方不应修改其中的数组。歌词内容变化后需重建时间轴。 */
+  read: (time: number) => LyricScene
+}
+
+/**
+ * 场景只会在行首 / 行尾发生变化,逐字进度不参与场景计算。
+ * 预先排序这些边界,同一区间内直接复用场景,避免每个动画帧扫描整首歌词。
+ * seek 或越过边界时才重新解析,继续沿用对唱、无结束时间与无序行的既有语义。
+ * 只保存当前区间,不预生成全部场景(每个场景的 harmonyOpen 都与全曲等长)。
+ */
+export function createLyricTimeline(
+  lines: readonly LyricLine[],
+  parents: ReadonlyMap<number, number> = harmonyParentsOf(lines),
+): LyricTimeline {
+  const times = new Set<number>()
+  for (const line of lines) {
+    const { time, endTime } = line
+    if (time !== null && Number.isFinite(time)) times.add(time)
+    if (endTime !== undefined && Number.isFinite(endTime)) times.add(endTime)
+  }
+  const boundaries = [...times].sort((left, right) => left - right)
+  let from = Number.NEGATIVE_INFINITY
+  let until = Number.POSITIVE_INFINITY
+  let cached: LyricScene | null = null
+
+  function read(time: number): LyricScene {
+    // NaN 与 ±Infinity 的比较行为不同于普通区间,保持原解析结果,
+    // 且不能让异常时钟读数覆盖有限时间的缓存。
+    if (!Number.isFinite(time)) return resolveLyricScene(lines, time, parents)
+    if (cached && time >= from && time < until) return cached
+
+    // upper_bound:行首在精确边界处已开始,行尾在精确边界处已结束。
+    let low = 0
+    let high = boundaries.length
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2)
+      if (boundaries[middle]! <= time) low = middle + 1
+      else high = middle
+    }
+    from = boundaries[low - 1] ?? Number.NEGATIVE_INFINITY
+    until = boundaries[low] ?? Number.POSITIVE_INFINITY
+    cached = resolveLyricScene(lines, time, parents)
+    return cached
+  }
+
+  return { read }
+}
+
 export function sameLyricScene(left: LyricScene, right: LyricScene): boolean {
+  if (left === right) return true
   if (left.held !== right.held || left.anchor !== right.anchor) return false
   if (left.active.length !== right.active.length) return false
   return left.active.every((value, position) => value === right.active[position])

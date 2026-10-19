@@ -6,6 +6,8 @@
 export type PlayMode = 'sequence' | 'loop' | 'single' | 'shuffle'
 export type LyricAvailability = 'available' | 'loading' | 'unavailable'
 export type LyricStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'error'
+/** 当前歌词正文/时间轴实际采用的来源,不把字级格式当成平台来源。 */
+export type LyricProviderSource = 'amll' | 'netease' | 'qq' | 'meting' | 'local'
 export type EqPresetId = 'flat' | 'pop' | 'rock' | 'jazz' | 'vocal' | 'bass-boost' | 'custom'
 
 /** 音节时间轴来源。目前只有一种:歌词文件自带的字级时间轴。
@@ -57,6 +59,8 @@ export interface Track {
 
 export interface LyricsSnapshot {
   lines: LyricLine[]
+  /** 当前显示歌词的主来源;翻译/音译补充不会改变此值。 */
+  source?: LyricProviderSource
   /** 锚点行:活跃集合里最靠后的主行,决定居中与前后分段 */
   activeIndex: number
   /** 当前正在唱的所有行。对唱双声部与背景和声可以同时在唱,缺省视为只有锚点行 */

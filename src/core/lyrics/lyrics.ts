@@ -505,14 +505,31 @@ export function mergeLyricTranslations(
   lines: LyricLine[],
   donor: readonly LyricLine[],
 ): LyricLine[] {
+  return mergeLyricField(lines, donor, 'translation')
+}
+
+/** 补全来自其他歌词源的翻译与音译,原有文本优先且无变化时保留引用。 */
+export function mergeLyricAnnotations(
+  lines: LyricLine[],
+  donor: readonly LyricLine[],
+): LyricLine[] {
+  return mergeLyricField(mergeLyricTranslations(lines, donor), donor, 'roman')
+}
+
+function mergeLyricField(
+  lines: LyricLine[],
+  donor: readonly LyricLine[],
+  field: 'translation' | 'roman',
+): LyricLine[] {
   const candidates = donor.filter(
-    (line): line is LyricLine & { time: number } => line.time !== null && Boolean(line.translation),
+    (line): line is LyricLine & { time: number } => line.time !== null && Boolean(line[field]),
   )
   if (!candidates.length) return lines
 
   let cursor = 0
-  return lines.map((line) => {
-    if (line.translation || line.time === null || line.background) return line
+  let changed = false
+  const merged = lines.map((line) => {
+    if (line[field] || line.time === null || line.background) return line
     const time = line.time
     // 两边都按时间升序,用游标线性推进,不需要每行二分
     while (cursor < candidates.length - 1 && candidates[cursor + 1].time <= time) cursor += 1
@@ -529,8 +546,11 @@ export function mergeLyricTranslations(
       if (!best || distance < Math.abs(best.time - time)) best = candidate
     }
 
-    return best ? { ...line, translation: best.translation } : line
+    if (!best) return line
+    changed = true
+    return { ...line, [field]: best[field] }
   })
+  return changed ? merged : lines
 }
 
 // ---- 逐字扫光包络 ----

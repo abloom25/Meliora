@@ -112,6 +112,86 @@ describe('music service', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('publishes local tracks while all remote concurrency slots are waiting', async () => {
+    const config: PublicMusicConfig = {
+      siteName: 'test',
+      apiEndpoint: 'https://api.example.com',
+      playlists: ['one', 'two', 'three', 'four'].map((playlistId) => ({
+        server: 'netease' as const,
+        playlistId,
+      })),
+      localTracks: [{ id: 'local-fast', title: 'Local', artist: 'Artist', audio: '/local.mp3' }],
+    }
+    const pending = createDeferred<import('../core/types').Track[]>()
+    const progress = vi.fn()
+    const result = loadConfiguredTracks(config, {
+      adapters: { meting: { id: 'slow', load: () => pending.promise } },
+      onProgress: progress,
+    })
+    await flushPromises()
+    expect(
+      progress.mock.calls
+        .at(-1)?.[0]
+        .tracks.map((track: import('../core/types').Track) => track.id),
+    ).toEqual(['local:local-fast'])
+    pending.resolve([])
+    expect((await result).tracks[0]?.id).toBe('local:local-fast')
+  })
+
+  it('keeps a displayed track identity when a slower source brings a duplicate', async () => {
+    const pending = createDeferred<import('../core/types').Track[]>()
+    const config: PublicMusicConfig = {
+      siteName: 'test',
+      apiEndpoint: 'https://api.example.com',
+      playlists: [{ server: 'netease', playlistId: 'slow' }],
+      localTracks: [{ id: 'first', title: 'Same', artist: 'Artist', audio: '/local.mp3' }],
+    }
+    const progress = vi.fn()
+    const result = loadConfiguredTracks(config, {
+      adapters: { meting: { id: 'slow', load: () => pending.promise } },
+      onProgress: progress,
+    })
+    await flushPromises()
+    const first = progress.mock.calls.at(-1)?.[0].tracks[0]
+    pending.resolve([
+      {
+        id: 'remote-late',
+        title: 'Same',
+        artist: 'Artist',
+        audioUrl: '/remote.mp3',
+        kind: 'remote',
+      },
+    ])
+    expect((await result).tracks).toEqual([first])
+    expect(first.id).toBe('local:first')
+  })
+
+  it('stops publishing and starting queued sources after cancellation', async () => {
+    const config: PublicMusicConfig = {
+      siteName: 'test',
+      apiEndpoint: 'https://api.example.com',
+      playlists: ['one', 'two', 'three', 'four'].map((playlistId) => ({
+        server: 'netease' as const,
+        playlistId,
+      })),
+      localTracks: [],
+    }
+    const pending = createDeferred<import('../core/types').Track[]>()
+    const load = vi.fn(() => pending.promise)
+    const controller = new AbortController()
+    const progress = vi.fn()
+    const result = loadConfiguredTracks(config, {
+      adapters: { meting: { id: 'slow', load } },
+      signal: controller.signal,
+      onProgress: progress,
+    })
+    controller.abort()
+    pending.resolve([])
+    await expect(result).rejects.toMatchObject({ name: 'AbortError' })
+    expect(load).toHaveBeenCalledTimes(3)
+    expect(progress).not.toHaveBeenCalled()
+  })
+
   it('limits configured source loading concurrency while preserving result order and failures', async () => {
     const config: PublicMusicConfig = {
       siteName: 'test',
