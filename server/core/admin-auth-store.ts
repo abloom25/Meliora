@@ -126,12 +126,12 @@ function timingSafeEqualString(a: string, b: string): boolean {
   return result === 0
 }
 
-async function readAdminData(env: Env): Promise<AdminData> {
+async function readAdminSnapshot(env: Env): Promise<{ data: AdminData; sha?: string }> {
   if (isDevelopmentMode(env)) {
-    return localAdminCache || {}
+    return { data: { ...localAdminCache }, sha: `local-${localAdminCache?.tokenVersion ?? 0}` }
   }
   const file = await readFile(ADMIN_PATH, env)
-  if (!file) return {}
+  if (!file) return { data: {} }
   // 生产模式下仅接受密文。明文 JSON 或解密失败均视为损坏,
   // 抛错而非返回空对象,避免 isInitialized 误判为 false 进而重新开放 /setup
   // (CONFIG_ENCRYPTION_KEY 被更换后旧密文不可解,绝不能因此开放重新设置密码)。
@@ -139,19 +139,25 @@ async function readAdminData(env: Env): Promise<AdminData> {
     throw new Error('admin.json is not encrypted')
   }
   const content = await decryptString(file.content, env)
-  return JSON.parse(content) as AdminData
+  return { data: JSON.parse(content) as AdminData, sha: file.sha }
 }
 
-async function writeAdminData(data: AdminData, env: Env): Promise<void> {
+async function readAdminData(env: Env): Promise<AdminData> {
+  return (await readAdminSnapshot(env)).data
+}
+
+async function writeAdminData(data: AdminData, env: Env, expectedSha?: string): Promise<void> {
   if (isDevelopmentMode(env)) {
+    if (expectedSha !== `local-${localAdminCache?.tokenVersion ?? 0}`) {
+      throw new GitHubWriteError('Admin data changed', 409, '')
+    }
     localAdminCache = data
     return
   }
   const content = JSON.stringify(data, null, 2)
   const encrypted = await encryptString(content, env)
-  const existing = await readFile(ADMIN_PATH, env)
   const message = `chore(admin): update admin data via admin ${new Date().toISOString()}`
-  await writeFile(ADMIN_PATH, utf8ToBase64(encrypted), env, message, existing?.sha)
+  await writeFile(ADMIN_PATH, utf8ToBase64(encrypted), env, message, expectedSha)
 }
 
 async function createAdminData(
@@ -257,18 +263,21 @@ export async function changePassword(
     return { ok: false, error: `新密码至少 ${MIN_PASSWORD_LENGTH} 位` }
   }
   try {
-    const valid = await verifyAdminPassword(current, env)
+    const snapshot = await readAdminSnapshot(env)
+    const valid = snapshot.data.passwordHash
+      ? await verifyPassword(current, snapshot.data.passwordHash)
+      : false
     if (!valid) return { ok: false, error: '当前密码错误' }
 
     const passwordHash = await hashPassword(next)
-    const adminData = await readAdminData(env)
+    const adminData = snapshot.data
     adminData.passwordHash = passwordHash
     // bump tokenVersion:旧 Cookie token 的 ver 与新版本不匹配,verifyAuth 拒绝,
     // 从而在改密码后立即吊销所有已签发的 token。
     adminData.tokenVersion = (adminData.tokenVersion ?? 0) + 1
     // 先持久化再更新缓存:写库失败时若缓存已 bump,TTL 窗口内签发的新 token
     // 会在缓存从磁盘重载回旧版本后随机失效。
-    await writeAdminData(adminData, env)
+    await writeAdminData(adminData, env, snapshot.sha)
     cachedTokenVersion = adminData.tokenVersion
     tokenVersionExpiresAt = Date.now() + TOKEN_VERSION_TTL_MS
     return { ok: true }

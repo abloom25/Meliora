@@ -44,6 +44,22 @@ describe('config-handler', () => {
     githubMocks.commitTreeAtomically.mockReset()
   })
 
+  it('rejects an outdated revision before creating blobs or deleting assets', async () => {
+    githubMocks.getBranchSnapshot.mockResolvedValue({ commitSha: 'head', treeSha: 'tree' })
+    githubMocks.readFile.mockResolvedValue({ content: 'v1:payload', sha: 'new-revision' })
+    const { putConfig } = await import('../core/config-handler')
+    const response = await putConfig(
+      {
+        config: { siteName: 'Stale', apiEndpoint: '', playlists: [], localTracks: [] },
+        revision: 'old-revision',
+      },
+      ENV,
+    )
+    expect(response.status).toBe(409)
+    expect(githubMocks.createBlob).not.toHaveBeenCalled()
+    expect(githubMocks.listTreePaths).not.toHaveBeenCalled()
+  })
+
   it('returns the default config only when config.json does not exist', async () => {
     githubMocks.readFile.mockResolvedValue(null)
     const { getConfig } = await import('../core/config-handler')
@@ -170,7 +186,7 @@ describe('config-handler', () => {
     const data = (await response.json()) as { sha?: string; committedUploads?: number }
 
     expect(response.status).toBe(200)
-    expect(data).toEqual({ sha: 'commit-next', committedUploads: 1 })
+    expect(data).toEqual({ sha: 'commit-next', revision: 'c'.repeat(40), committedUploads: 1 })
     expect(githubMocks.readFile).toHaveBeenCalledWith('public/config.json', ENV, 'commit-base')
     expect(githubMocks.commitTreeAtomically).toHaveBeenCalledWith(
       expect.arrayContaining([

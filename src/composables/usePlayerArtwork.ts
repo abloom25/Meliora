@@ -35,7 +35,7 @@ export function usePlayerArtwork(
   const coverCorsRetry = ref(new Set<string>())
   const backgroundImage = computed(() => {
     const track = currentTrack.value
-    if (!settings.value.dynamicBackground || !track?.cover || failedCovers.value.has(track.id)) {
+    if (!settings.value.dynamicBackground || !track?.cover || failedCovers.value.has(track.cover)) {
       return 'none'
     }
     // CSS url("...") 字符串需同时转义反斜杠与双引号,且顺序不能反:
@@ -45,7 +45,7 @@ export function usePlayerArtwork(
   })
   const mainCoverItems = computed(() => {
     const track = currentTrack.value
-    if (!track?.cover || failedCovers.value.has(track.id)) return []
+    if (!track?.cover || failedCovers.value.has(track.cover)) return []
     const corsKey = coverRetryKey(track.id, track.cover)
     const corsRetried = coverCorsRetry.value.has(corsKey)
     return [
@@ -61,6 +61,7 @@ export function usePlayerArtwork(
   })
   async function handleMainCoverLoaded(trackId: string, event: Event) {
     const image = event.currentTarget as HTMLImageElement
+    const coverUrl = image.getAttribute('src') ?? undefined
     // 等图片完整解码完成后再标记 loaded：
     // 避免浏览器渲染半解码的图像（视觉上"从上往下"逐行加载的效果），
     // 让 fade-in transition 真正发生在一张完整图像上。
@@ -69,15 +70,20 @@ export function usePlayerArtwork(
     } catch {
       // 部分浏览器对跨域 / data URL 图片会拒绝 decode()，
       // 图片可能未完整解码，此时提取的主题色不可靠，直接回退到默认色。
-      if (!disposed && currentTrack.value?.id === trackId) {
-        markCoverLoaded(trackId)
+      if (
+        !disposed &&
+        currentTrack.value?.id === trackId &&
+        currentTrack.value?.cover === coverUrl
+      ) {
+        markCoverLoaded(trackId, coverUrl)
         markMainCoverReady(trackId)
         resetTheme()
       }
       return
     }
-    if (disposed || currentTrack.value?.id !== trackId) return
-    markCoverLoaded(trackId)
+    if (disposed || currentTrack.value?.id !== trackId || currentTrack.value?.cover !== coverUrl)
+      return
+    markCoverLoaded(trackId, coverUrl)
     markMainCoverReady(trackId)
     // extractThemeColor 现在是 async（Worker 化）；直接 await 即可。
     // 如果 Worker 路径成功就返回新主题色；失败时内部已自动 fallback 到主线程 + null 兜底。
@@ -87,7 +93,8 @@ export function usePlayerArtwork(
     } catch {
       immediateTheme = null
     }
-    if (disposed || currentTrack.value?.id !== trackId) return
+    if (disposed || currentTrack.value?.id !== trackId || currentTrack.value?.cover !== coverUrl)
+      return
     if (!immediateTheme) {
       resetTheme()
       return
@@ -120,11 +127,11 @@ export function usePlayerArtwork(
       rememberCoverCorsRetry(corsKey)
       return
     }
-    markCoverFailed(trackId)
+    markCoverFailed(trackId, corsKey.slice(corsKey.indexOf('\n') + 1))
   }
 
   watch(
-    () => currentTrack.value?.id,
+    () => [currentTrack.value?.id, currentTrack.value?.cover],
     () => {
       resetMainCover()
       if (!currentTrack.value?.cover) resetTheme()

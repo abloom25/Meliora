@@ -40,6 +40,42 @@ describe('music api tester', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('keeps the timeout active while reading a stalled response body', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url, init) => {
+        const stream = new ReadableStream({
+          start(controller) {
+            init.signal.addEventListener('abort', () =>
+              controller.error(new DOMException('Aborted', 'AbortError')),
+            )
+          },
+        })
+        return Promise.resolve(new Response(stream))
+      }),
+    )
+    const pending = testMusicApi(CONFIG)
+    await vi.advanceTimersByTimeAsync(8001)
+    const response = await pending
+    expect((await response.json()).playlists[0].error).toBe('请求超时')
+  })
+
+  it('aborts an unconsumed error response body before returning', async () => {
+    let signal: AbortSignal | undefined
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url, init) => {
+        signal = init.signal
+        return Promise.resolve(new Response(new ReadableStream(), { status: 500 }))
+      }),
+    )
+    const response = await testMusicApi(CONFIG)
+    expect((await response.json()).ok).toBe(false)
+    expect(signal?.aborted).toBe(true)
   })
 
   it('does not follow redirects while testing a configured music API', async () => {

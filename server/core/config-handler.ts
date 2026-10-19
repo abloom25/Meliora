@@ -26,6 +26,7 @@ const DEFAULT_CONFIG = JSON.stringify(defaultMusicConfig)
 const MAX_STAGED_UPLOADS = 50
 
 let localConfigCache: string | null = null
+let localConfigRevision = 0
 
 const CONFIG_HEADERS = {
   'Content-Type': 'application/json',
@@ -37,7 +38,7 @@ export async function getConfig(env: Env): Promise<Response> {
     const content = localConfigCache || DEFAULT_CONFIG
     return new Response(content, {
       status: 200,
-      headers: CONFIG_HEADERS,
+      headers: { ...CONFIG_HEADERS, 'X-Config-Revision': `local-${localConfigRevision}` },
     })
   }
 
@@ -54,7 +55,7 @@ export async function getConfig(env: Env): Promise<Response> {
   if (!file) {
     return new Response(DEFAULT_CONFIG, {
       status: 200,
-      headers: CONFIG_HEADERS,
+      headers: { ...CONFIG_HEADERS, 'X-Config-Revision': 'missing' },
     })
   }
   try {
@@ -63,7 +64,7 @@ export async function getConfig(env: Env): Promise<Response> {
       const plaintext = await decryptString(file.content, env)
       return new Response(plaintext, {
         status: 200,
-        headers: CONFIG_HEADERS,
+        headers: { ...CONFIG_HEADERS, 'X-Config-Revision': file.sha },
       })
     }
     console.error('config.json is not encrypted')
@@ -121,11 +122,21 @@ export async function putConfig(body: unknown, env: Env): Promise<Response> {
   const content = JSON.stringify(config, null, 2)
 
   if (isDevelopmentMode(env)) {
+    if (request.revision !== undefined && request.revision !== `local-${localConfigRevision}`) {
+      return new Response(JSON.stringify({ error: '配置已被其他操作修改,请刷新后重试' }), {
+        status: 409,
+        headers: CONFIG_HEADERS,
+      })
+    }
     localConfigCache = content
-    return new Response(JSON.stringify({ sha: 'local-dev', local: true }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    })
+    localConfigRevision += 1
+    return new Response(
+      JSON.stringify({ sha: 'local-dev', local: true, revision: `local-${localConfigRevision}` }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      },
+    )
   }
 
   let snapshot: GitHubBranchSnapshot
@@ -137,6 +148,13 @@ export async function putConfig(body: unknown, env: Env): Promise<Response> {
     return new Response(JSON.stringify({ error: '读取当前配置失败,请稍后重试' }), {
       status: 502,
       headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  if (request.revision !== undefined && request.revision !== (existing?.sha ?? 'missing')) {
+    return new Response(JSON.stringify({ error: '配置已被其他操作修改,请刷新后重试' }), {
+      status: 409,
+      headers: CONFIG_HEADERS,
     })
   }
 
@@ -172,10 +190,17 @@ export async function putConfig(body: unknown, env: Env): Promise<Response> {
     ]
     const message = `chore(config): update config and assets via admin ${new Date().toISOString()}`
     const sha = await commitTreeAtomically(entries, env, message, snapshot)
-    return new Response(JSON.stringify({ sha, committedUploads: stagedResult.uploads.length }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    })
+    return new Response(
+      JSON.stringify({
+        sha,
+        revision: configBlobSha,
+        committedUploads: stagedResult.uploads.length,
+      }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      },
+    )
   } catch (error) {
     // sha 乐观锁冲突:配置已被其他操作修改,提示用户刷新重试,而非直接 500。
     if (error instanceof GitHubWriteError && (error.status === 409 || error.status === 422)) {
@@ -196,6 +221,7 @@ interface StagedUploadInput {
 interface ConfigWriteRequest {
   config: unknown
   uploads: unknown
+  revision?: unknown
 }
 
 interface ValidatedStagedUpload {
@@ -212,6 +238,7 @@ function parseConfigWriteRequest(body: unknown): ConfigWriteRequest {
     return {
       config: body.config,
       uploads: body.uploads ?? [],
+      revision: body.revision,
     }
   }
   // 兼容未更新的管理前端：旧请求体本身就是配置，且没有暂存文件。

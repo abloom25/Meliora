@@ -269,15 +269,15 @@
           :style="{ position: 'absolute', top: `${offset}px`, left: '0', right: '0' }"
           @click="emit('select', track)"
         >
-          <span class="thumb" :class="{ loaded: loadedCovers.has(track.id) }">
+          <span class="thumb" :class="{ loaded: loadedCovers.has(track.cover ?? track.id) }">
             <span class="cover-placeholder"><Music :size="20" fill="currentColor" /></span>
             <img
-              v-if="track.cover && !failedCovers.has(track.id)"
+              v-if="track.cover && !failedCovers.has(track.cover ?? track.id)"
               :src="track.cover"
               alt=""
               loading="lazy"
-              @load="markCoverLoaded(track.id)"
-              @error="markCoverFailed(track.id)"
+              @load="markCoverLoaded(track.id, track.cover)"
+              @error="markCoverFailed(track.id, track.cover)"
             />
           </span>
           <span class="track-copy">

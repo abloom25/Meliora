@@ -3,12 +3,13 @@ export class ResponseTooLargeError extends Error {}
 // 带字节上限的 JSON 读取:先查 Content-Length 快速拒绝,再按流式分块累计,
 // 超过 maxBytes 立即 cancel 并抛错,避免不可信上游把超大响应全量读入内存。
 // 同时适用于上游 Response 与入站 Request(未认证端点的请求体 DoS 防护)。
-export async function readJsonWithLimit(
+export async function readBytesWithLimit(
   response: Response | Request,
   maxBytes: number,
-): Promise<unknown> {
+): Promise<Uint8Array> {
   const contentLength = Number(response.headers.get('Content-Length'))
   if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    void response.body?.cancel('response body exceeds limit').catch(() => {})
     throw new ResponseTooLargeError('response body exceeds limit')
   }
 
@@ -17,7 +18,7 @@ export async function readJsonWithLimit(
     if (new TextEncoder().encode(text).byteLength > maxBytes) {
       throw new ResponseTooLargeError('response body exceeds limit')
     }
-    return JSON.parse(text)
+    return new TextEncoder().encode(text)
   }
 
   const reader = response.body.getReader()
@@ -29,7 +30,7 @@ export async function readJsonWithLimit(
       if (done) break
       receivedBytes += value.byteLength
       if (receivedBytes > maxBytes) {
-        await reader.cancel('response body exceeds limit')
+        void reader.cancel('response body exceeds limit').catch(() => {})
         throw new ResponseTooLargeError('response body exceeds limit')
       }
       chunks.push(value)
@@ -44,5 +45,12 @@ export async function readJsonWithLimit(
     bytes.set(chunk, offset)
     offset += chunk.byteLength
   }
-  return JSON.parse(new TextDecoder().decode(bytes))
+  return bytes
+}
+
+export async function readJsonWithLimit(
+  response: Response | Request,
+  maxBytes: number,
+): Promise<unknown> {
+  return JSON.parse(new TextDecoder().decode(await readBytesWithLimit(response, maxBytes)))
 }

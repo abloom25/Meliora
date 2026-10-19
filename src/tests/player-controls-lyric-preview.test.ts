@@ -504,6 +504,22 @@ describe('PlayerControls lyric preview', () => {
     wrapper.unmount()
   })
 
+  it('cancels an old progress drag immediately when the current track changes', async () => {
+    const store = usePlayerStore()
+    store.duration = 100
+    const onSeek = vi.fn()
+    const wrapper = mountProgressControls({ onSeek })
+    const range = wrapper.get<HTMLElement>('.range')
+    mockProgressRect(range.element)
+    dispatchPointerEvent(range.element, 'pointerdown', { clientX: 40, clientY: 120 })
+    store.currentTrackId = 'another-track'
+    dispatchPointerEvent(window, 'pointerup', { clientX: 160, clientY: 120 })
+    await nextTick()
+    expect(onSeek).not.toHaveBeenCalled()
+    expect(range.classes()).not.toContain('is-dragging')
+    wrapper.unmount()
+  })
+
   it('hides lyric preview bubbles when a pointer drag is canceled', async () => {
     const store = usePlayerStore()
     store.duration = 100

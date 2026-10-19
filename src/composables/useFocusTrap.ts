@@ -44,10 +44,18 @@ export function useFocusTrap(
     if (!containerRef.value || !active.value) return
 
     const { first, last } = getFocusableEdges(containerRef.value)
-    if (!first || !last) return
+    if (!first || !last) {
+      e.preventDefault()
+      containerRef.value.focus()
+      return
+    }
 
     const activeElement = document.activeElement
-    if (!activeElement || !containerRef.value.contains(activeElement)) {
+    if (
+      !activeElement ||
+      activeElement === containerRef.value ||
+      !containerRef.value.contains(activeElement)
+    ) {
       // focus 落在容器外(既非 first 也非 last):拉回容器,
       // 按 shift 方向决定从头部还是尾部进入
       e.preventDefault()
@@ -90,6 +98,10 @@ export function useFocusTrap(
     if (first) {
       first.focus()
       return document.activeElement === first
+    }
+    if (containerRef.value.hasAttribute('tabindex')) {
+      containerRef.value.focus()
+      return document.activeElement === containerRef.value
     }
     return false
   }

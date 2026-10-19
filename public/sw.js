@@ -5,6 +5,15 @@ const CACHE_PREFIX = 'meliora-shell-'
 const APP_SHELL = ['./', './manifest.webmanifest', './favicon.svg', './pwa-icon.svg']
 const MUTABLE_ASSET_PATTERN = /^\/(?:music\/|icon\.(?:png|jpe?g|webp|ico)$)/i
 
+function updateCache(event, key, response) {
+  event.waitUntil(
+    caches
+      .open(CACHE_NAME)
+      .then((cache) => cache.put(key, response))
+      .catch(() => {}),
+  )
+}
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
@@ -58,11 +67,13 @@ self.addEventListener('fetch', (event) => {
           // 只缓存成功响应,避免部署窗口期的 5xx 错误页污染离线兜底外壳
           if (response.ok) {
             const copy = response.clone()
-            void caches.open(CACHE_NAME).then((cache) => cache.put('./', copy))
+            updateCache(event, './', copy)
           }
           return response
         })
-        .catch(() => caches.match('./')),
+        .catch(() =>
+          caches.match('./').then((cached) => cached || new Response('', { status: 504 })),
+        ),
     )
     return
   }
@@ -72,13 +83,13 @@ self.addEventListener('fetch', (event) => {
       const network = fetch(event.request).then((response) => {
         if (response.ok) {
           const copy = response.clone()
-          void caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy))
+          updateCache(event, event.request, copy)
         }
         return response
       })
       // 缓存命中时仅做后台更新;吞掉网络失败,避免离线时 unhandled rejection
       if (cached) {
-        void network.catch(() => {})
+        event.waitUntil(network.catch(() => {}))
         return cached
       }
       return network.catch(() =>

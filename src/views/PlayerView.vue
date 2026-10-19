@@ -635,16 +635,19 @@
           @reload="loadTracks"
         />
         <div v-if="currentTrack" class="drawer-mini-player">
-          <span class="mini-artwork" :class="{ loaded: loadedCovers.has(currentTrack.id) }">
+          <span
+            class="mini-artwork"
+            :class="{ loaded: loadedCovers.has(currentTrack.cover ?? currentTrack.id) }"
+          >
             <span class="small-cover-placeholder"><Music :size="18" fill="currentColor" /></span>
             <img
-              v-if="currentTrack.cover && !failedCovers.has(currentTrack.id)"
+              v-if="currentTrack.cover && !failedCovers.has(currentTrack.cover ?? currentTrack.id)"
               :src="currentTrack.cover"
               alt=""
               loading="lazy"
               decoding="async"
-              @load="markCoverLoaded(currentTrack.id)"
-              @error="markCoverFailed(currentTrack.id)"
+              @load="markCoverLoaded(currentTrack.id, currentTrack.cover)"
+              @error="markCoverFailed(currentTrack.id, currentTrack.cover)"
             />
           </span>
           <div>

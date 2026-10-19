@@ -107,9 +107,9 @@ label {
 }
 
 @media (max-width: 720px) {
-  input,
-  select,
-  textarea {
+  #app input,
+  #app select,
+  #app textarea {
     font-size: 16px;
   }
 }
