@@ -1,7 +1,12 @@
-import { BEAT_THIS_BANDS, BEAT_THIS_FPS, type BeatThisSpectrogram } from './beat-this-features'
+import {
+  BEAT_THIS_BANDS,
+  BEAT_THIS_FPS,
+  BEAT_THIS_CHUNK_FRAMES,
+  type BeatThisSpectrogram,
+} from './beat-this-features'
 import type { BeatTimeRange } from './beat-timeline'
 
-export const BEAT_THIS_CHUNK_FRAMES = 1500
+export { BEAT_THIS_CHUNK_FRAMES } from './beat-this-features'
 export const BEAT_THIS_BORDER_FRAMES = 6
 
 export interface BeatThisPrediction {

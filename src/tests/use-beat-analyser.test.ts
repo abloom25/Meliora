@@ -4,13 +4,32 @@ import { enableAutoUnmount, mount } from '@vue/test-utils'
 import { useBeatAnalyser } from '../platform/web/useBeatAnalyser'
 import { createBeatVisualRenderer } from '../platform/web/beat-visuals'
 import { buildBeatTimeline } from '../platform/web/beat-preanalysis'
+import { useBeatThisModels, type BeatThisModelStatus } from '../platform/web/useBeatThisModels'
+import type { BeatAnalysisMode } from '../core/types'
 import type {
   BeatBuildStatus,
   BeatPreloadTarget,
   BeatTimeline,
 } from '../core/analysis/beat-timeline'
 
-vi.mock('../platform/web/beat-preanalysis', () => ({ buildBeatTimeline: vi.fn() }))
+vi.mock('../platform/web/beat-preanalysis', () => ({
+  buildBeatTimeline: vi.fn(),
+  protectBeatAudioSource: vi.fn(),
+  persistKnownBeatCheckpoint: vi.fn(),
+}))
+vi.mock('../platform/web/useBeatThisModels', async () => {
+  const { ref } = await import('vue')
+  const status = ref({
+    small: { phase: 'ready', progress: 1, error: null },
+    standard: { phase: 'ready', progress: 1, error: null },
+  })
+  return {
+    useBeatThisModels: () => ({
+      initialize: async () => {},
+      status,
+    }),
+  }
+})
 enableAutoUnmount(afterEach)
 
 interface BuildRequest {
@@ -18,25 +37,36 @@ interface BuildRequest {
   signal: AbortSignal
   onStatus: (status: BeatBuildStatus) => void
   onPartial?: (timeline: BeatTimeline) => void
+  onPreview?: (timeline: BeatTimeline) => void
+  reject: (reason: Error) => void
   resolve: (timeline: BeatTimeline) => void
 }
 
 let buildRequests: BuildRequest[] = []
 let sourceId = 0
+const modelStates = useBeatThisModels().status as Ref<
+  Record<'small' | 'standard', BeatThisModelStatus>
+>
 
 beforeEach(() => {
   buildRequests = []
+  modelStates.value = {
+    small: { phase: 'ready', progress: 1, error: null },
+    standard: { phase: 'ready', progress: 1, error: null },
+  }
   vi.mocked(buildBeatTimeline)
     .mockReset()
     .mockImplementation(
       (source, signal, onStatus, dependencies) =>
-        new Promise<BeatTimeline>((resolve) => {
+        new Promise<BeatTimeline>((resolve, reject) => {
           buildRequests.push({
             source,
             signal,
             onStatus,
             resolve,
+            reject,
             onPartial: dependencies?.onPartial,
+            onPreview: dependencies?.onPreview,
           })
         }),
     )
@@ -113,6 +143,8 @@ class AudioContextMock {
   readonly sampleRate = 48000
   baseLatency = 0
   outputLatency = 0
+  currentTime = NaN
+  getOutputTimestamp: (() => AudioTimestamp) | undefined
   destination = new AudioNodeMock() as unknown as AudioDestinationNode
   sources: unknown[] = []
   lastAnalyser: AnalyserNodeMock | null = null
@@ -301,7 +333,7 @@ describe('useBeatAnalyser completed timeline playback', () => {
     buildRequests[0]!.onPartial!({ ...timeline })
     runFrames(1)
     expect(h.analyser.beatLevel.value).toBeGreaterThan(0)
-    expect(h.analyser.beatLevel.value).toBeLessThan(0.2)
+    expect(h.analyser.beatLevel.value).toBe(1)
   })
 
   it('forwards seek and normal playback positions to the existing background build', async () => {
@@ -397,6 +429,10 @@ describe('useBeatAnalyser completed timeline playback', () => {
       beatVisualDelay?: number
       adjacent?: Ref<readonly BeatPreloadTarget[]>
       preloadEnabled?: Ref<boolean>
+      debugEnabled?: Ref<boolean>
+      debugSampleIntervalMs?: Ref<number>
+      mode?: Ref<BeatAnalysisMode>
+      onBeat?: (level: number, sustain: number) => void
     } = {},
   ): Promise<BeatHarness> {
     stubMatchMedia()
@@ -427,6 +463,10 @@ describe('useBeatAnalyser completed timeline playback', () => {
         isPlaying: ref(true),
         source,
         enabled,
+        debugEnabled: options.debugEnabled,
+        debugSampleIntervalMs: options.debugSampleIntervalMs,
+        mode: options.mode,
+        onBeat: options.onBeat,
         adjacent: options.adjacent,
         preloadEnabled: options.preloadEnabled,
         onSpectrum: createBeatVisualRenderer({
@@ -445,6 +485,8 @@ describe('useBeatAnalyser completed timeline playback', () => {
     if (context) {
       context.baseLatency = 0
       context.outputLatency = 0
+      context.currentTime = NaN
+      context.getOutputTimestamp = undefined
     }
     const analyserNode = context?.lastAnalyser
     if (!analyserNode) throw new Error('analyser mock not created')
@@ -484,7 +526,380 @@ describe('useBeatAnalyser completed timeline playback', () => {
     }
   })
 
-  it('samples a completed timeline at the current media position and fades it in', async () => {
+  it('uses provisional coverage immediately without calling it verified model progress', async () => {
+    const h = await mountBeatHarness({ mode: ref('beat-this-small'), debugEnabled: ref(true) })
+    h.activeAudio.currentTime = 1.1
+    buildRequests[0]!.onPreview!({ ...timelineWithPulse(), builtUntilSeconds: 2 })
+    runFrames(1, 110)
+    expect(h.analyser.beatLevel.value).toBe(1)
+    expect(h.analyser.preanalysis.timeline.value).toBeNull()
+    expect(h.analyser.preanalysis.status.value.progress).toBe(0)
+    expect(h.analyser.debugSnapshot.value?.current.timing?.timelineSource).toBe('provisional')
+    h.activeAudio.currentTime = 3
+    runFrames(1, 110)
+    expect(h.analyser.beatLevel.value).toBe(0)
+    expect(h.analyser.debugSnapshot.value?.current.reason).toBe('range-unbuilt')
+  })
+
+  it('does not reflash a shifted model pulse or its long tail during handoff', async () => {
+    const h = await mountBeatHarness({ mode: ref('beat-this-small'), debugEnabled: ref(true) })
+    const preview = timelineWithPulse()
+    buildRequests[0]!.onPreview!(preview)
+    h.activeAudio.currentTime = 1
+    runFrames(1)
+    expect(h.analyser.beatLevel.value).toBe(1)
+    const values = Float32Array.from({ length: 401 }, (_, index) => {
+      const time = index / 100
+      if (time < 1.05) return 0
+      if (time < 1.55) return 1 - (time - 1.05) * 1.2
+      if (time < 1.65) return 0
+      if (time < 1.8) return 0.9
+      return 0
+    })
+    const formal: BeatTimeline = {
+      durationSeconds: 4,
+      stepSeconds: 0.01,
+      levels: [values.slice(), values.slice(), values.slice(), values.slice()],
+      sustain: Float32Array.from(values, (value) => value * 0.25),
+    }
+    await finishBuild(0, formal)
+    h.activeAudio.currentTime = 1.02
+    runFrames(1)
+    expect(h.analyser.beatLevel.value).toBe(0)
+    for (let index = 0; index < 32; index += 1) {
+      h.activeAudio.currentTime += 0.016
+      runFrames(1)
+      expect(h.analyser.beatLevel.value).toBe(0)
+    }
+    expect(h.analyser.debugSnapshot.value?.current.timing?.timelineSource).toBe('model')
+    h.activeAudio.currentTime = 1.6
+    runFrames(1)
+    h.activeAudio.currentTime = 1.7
+    runFrames(1)
+    expect(h.analyser.beatLevel.value).toBeCloseTo(0.9)
+  })
+
+  it('does not treat a late first model sample as a new attack during an existing tail', async () => {
+    const h = await mountBeatHarness({ mode: ref('beat-this-small') })
+    const preview = timelineWithPulse()
+    preview.levels.forEach((values) => {
+      values[11] = 0.2
+      values[12] = 0.1
+    })
+    buildRequests[0]!.onPreview!(preview)
+    h.activeAudio.currentTime = 1
+    runFrames(1)
+    h.activeAudio.currentTime = 1.1
+    runFrames(1, 100)
+    expect(h.analyser.beatLevel.value).toBeCloseTo(0.2)
+    const model = timelineWithPulse()
+    model.levels.forEach((values) => values.fill(0.5))
+    await finishBuild(0, model)
+    h.activeAudio.currentTime = 1.116
+    runFrames(1)
+    expect(h.analyser.beatLevel.value).toBeCloseTo(0.2)
+    runFrames(20)
+    expect(h.analyser.beatLevel.value).toBeCloseTo(0.2)
+  })
+
+  it('preserves provisional light on model failure but clears it on source/mode changes', async () => {
+    const mode = ref<BeatAnalysisMode>('beat-this-small')
+    const h = await mountBeatHarness({ mode, debugEnabled: ref(true) })
+    h.activeAudio.currentTime = 1.1
+    buildRequests[0]!.onPreview!(timelineWithPulse())
+    runFrames(1, 110)
+    buildRequests[0]!.reject(new Error('模型推理失败'))
+    for (let tick = 0; tick < 5; tick += 1) await Promise.resolve()
+    runFrames(1, 110)
+    expect(h.analyser.beatLevel.value).toBe(1)
+    expect(h.analyser.debugSnapshot.value?.current.timing?.timelineSource).toBe('provisional')
+    mode.value = 'beat-this-standard'
+    expect(h.analyser.preanalysis.provisionalTimeline.value).toBeNull()
+    expect(h.analyser.beatLevel.value).toBe(0)
+    await h.analyser.startBeatAnalysis()
+    await nextTick()
+    buildRequests[1]!.onPreview!(timelineWithPulse())
+    runFrames(1)
+    expect(h.analyser.beatLevel.value).toBe(1)
+    h.source.value = `/preview-replaced-${++sourceId}.mp3`
+    expect(h.analyser.preanalysis.provisionalTimeline.value).toBeNull()
+    expect(h.analyser.beatLevel.value).toBe(0)
+  })
+
+  it('does not fall back to an older preview inside an interval already adopted from the model', async () => {
+    const h = await mountBeatHarness({ mode: ref('beat-this-small'), debugEnabled: ref(true) })
+    h.activeAudio.currentTime = 1.1
+    buildRequests[0]!.onPreview!(timelineWithPulse())
+    const model = timelineWithPulse()
+    model.levels.forEach((values) => values.fill(0.2))
+    buildRequests[0]!.onPartial!({
+      ...model,
+      completedRanges: [{ startSeconds: 1, endSeconds: 2 }],
+    })
+    runFrames(1, 110)
+    expect(h.analyser.beatLevel.value).toBeCloseTo(0.2)
+    // A later partial must not resurrect the older, much stronger approximation.
+    buildRequests[0]!.onPartial!({
+      ...model,
+      completedRanges: [{ startSeconds: 2, endSeconds: 3 }],
+    })
+    runFrames(1, 110)
+    expect(h.analyser.beatLevel.value).toBe(0)
+    expect(h.analyser.debugSnapshot.value!.current.timing?.timelineSource).toBe('none')
+  })
+
+  it('allows the next fast subdivision through even when the previous model tail has no low valley', async () => {
+    const h = await mountBeatHarness({ mode: ref('beat-this-small') })
+    h.activeAudio.currentTime = 1
+    buildRequests[0]!.onPreview!(timelineWithPulse())
+    runFrames(1)
+    const values = Float32Array.from({ length: 801 }, (_, index) => {
+      const time = index / 200
+      if (time < 1.05) return 0.21
+      const phase = (time - 1.05 + 1e-8) % 0.125
+      return Math.max(0.21, 1 - phase / 0.08)
+    })
+    await finishBuild(0, {
+      durationSeconds: 4,
+      stepSeconds: 0.005,
+      levels: [values.slice(), values.slice(), values.slice(), values.slice()],
+      sustain: new Float32Array(801),
+    })
+    h.activeAudio.currentTime = 1.02
+    runFrames(1)
+    h.activeAudio.currentTime = 1.05
+    runFrames(1, 30)
+    expect(h.analyser.beatLevel.value).toBeCloseTo(0.21)
+    h.activeAudio.currentTime = 1.15
+    runFrames(1, 100)
+    h.activeAudio.currentTime = 1.175
+    runFrames(1, 25)
+    expect(h.analyser.beatLevel.value).toBeCloseTo(1)
+  })
+
+  it('keeps finished preview coverage after an asset-read error and clears it when removed', async () => {
+    const h = await mountBeatHarness({ mode: ref('beat-this-small'), debugEnabled: ref(true) })
+    h.activeAudio.currentTime = 1.1
+    buildRequests[0]!.onPreview!(timelineWithPulse())
+    runFrames(1, 110)
+    modelStates.value = {
+      ...modelStates.value,
+      small: { phase: 'error', progress: 0, error: '模型读取失败' },
+    }
+    runFrames(1, 110)
+    expect(h.analyser.beatLevel.value).toBe(1)
+    expect(h.analyser.debugSnapshot.value?.current.reason).toBe('ready')
+    modelStates.value = {
+      ...modelStates.value,
+      small: { phase: 'missing', progress: 0, error: null },
+    }
+    runFrames(1, 110)
+    expect(h.analyser.preanalysis.provisionalTimeline.value).toBeNull()
+    expect(h.analyser.beatLevel.value).toBe(0)
+  })
+
+  it('resumes an already built position immediately after native seeked while scheduling settles', async () => {
+    const h = await mountBeatHarness()
+    await finishBuild()
+    h.activeAudio.currentTime = 1.1
+    Object.defineProperty(h.activeAudio, 'seeking', {
+      configurable: true,
+      writable: true,
+      value: true,
+    })
+    h.activeAudio.dispatchEvent(new Event('seeking'))
+    runFrames(1)
+    expect(h.analyser.beatLevel.value).toBe(0)
+    Object.defineProperty(h.activeAudio, 'seeking', { configurable: true, value: false })
+    h.activeAudio.dispatchEvent(new Event('seeked'))
+    runFrames(1)
+    expect(h.analyser.beatLevel.value).toBe(1)
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+  })
+
+  it('uses output timestamps without duplicate latency and debug opening does not resample them', async () => {
+    const debugEnabled = ref(false)
+    const h = await mountBeatHarness({ debugEnabled, beatVisualDelay: 50 })
+    await finishBuild()
+    const context = AudioContextMock.instances.at(-1)!
+    context.currentTime = 10
+    context.baseLatency = 0.05
+    context.outputLatency = 0.1
+    context.getOutputTimestamp = vi.fn(() => ({
+      contextTime: 9.9,
+      performanceTime: performance.now(),
+    }))
+    h.activeAudio.currentTime = 1.3
+    runFrames(1, 110)
+    expect(h.analyser.beatLevel.value).toBe(1)
+    const reads = vi.mocked(context.getOutputTimestamp).mock.calls.length
+    debugEnabled.value = true
+    debugEnabled.value = false
+    debugEnabled.value = true
+    expect(context.getOutputTimestamp).toHaveBeenCalledTimes(reads)
+    const sample = h.analyser.debugSnapshot.value!.current
+    expect(sample.sampleSeconds).toBeCloseTo(1.15)
+    expect(sample.delayMs).toBeCloseTo(150)
+    expect(sample.timing?.clockSource).toBe('output-timestamp')
+    context.getOutputTimestamp = () => {
+      throw new Error('device changed')
+    }
+    runFrames(1, 110)
+    expect(h.analyser.debugSnapshot.value!.current.timing?.clockSource).toBe('latency-fallback')
+    expect(h.analyser.debugSnapshot.value!.current.sampleSeconds).toBeCloseTo(1.1)
+  })
+
+  it('turns off immediately on waiting even before readyState catches up and reanchors on playing', async () => {
+    const h = await mountBeatHarness({ debugEnabled: ref(true) })
+    await finishBuild()
+    h.activeAudio.currentTime = 1.1
+    runFrames(1, 110)
+    h.activeAudio.dispatchEvent(new Event('waiting'))
+    expect(h.analyser.beatLevel.value).toBe(0)
+    runFrames(1, 110)
+    expect(h.analyser.debugSnapshot.value!.current.reason).toBe('buffering')
+    h.activeAudio.dispatchEvent(new Event('playing'))
+    runFrames(1, 110)
+    expect(h.analyser.beatLevel.value).toBe(1)
+    expect(h.analyser.debugSnapshot.value!.current.timing?.firstAvailableMs).toBe(110)
+  })
+
+  it('collects no debug samples or extra frame loops until opened and clears them when closed', async () => {
+    const debugEnabled = ref(false)
+    const h = await mountBeatHarness({ debugEnabled })
+    await finishBuild()
+    h.activeAudio.currentTime = 1.1
+    runFrames(20)
+    expect(h.analyser.debugSnapshot.value).toBeNull()
+    const framesBefore = rafCallbacks.length
+    const timersBefore = vi.getTimerCount()
+    debugEnabled.value = true
+    expect(h.analyser.debugSnapshot.value?.history).toHaveLength(1)
+    expect(rafCallbacks).toHaveLength(framesBefore)
+    expect(vi.getTimerCount()).toBe(timersBefore)
+    runFrames(60)
+    expect(h.analyser.debugSnapshot.value!.history.length).toBeGreaterThan(5)
+    expect(h.analyser.debugSnapshot.value!.history.length).toBeLessThanOrEqual(11)
+    debugEnabled.value = false
+    runFrames(60)
+    expect(h.analyser.debugSnapshot.value).toBeNull()
+    expect(h.analyser.preanalysis.debugSnapshot.value).toBeNull()
+    debugEnabled.value = true
+    expect(h.analyser.debugSnapshot.value?.history).toHaveLength(1)
+  })
+
+  it('reports actual output, raw timeline values, ready mix and compensated sample time', async () => {
+    const onBeat = vi.fn()
+    const h = await mountBeatHarness({ debugEnabled: ref(true), beatVisualDelay: 100, onBeat })
+    await finishBuild()
+    h.activeAudio.currentTime = 1.3
+    runFrames(1, 120)
+    const sample = h.analyser.debugSnapshot.value!.current
+    expect(sample).toMatchObject({
+      rawLevel: 1,
+      rawSustain: 0.25,
+      playbackSeconds: 1.3,
+      sampleSeconds: 1.2,
+      reason: 'ready',
+      canHighlight: true,
+    })
+    expect(sample.level).toBeCloseTo(sample.rawLevel * sample.readyMix)
+    expect(sample.delayMs).toBeCloseTo(100)
+    expect(sample.sustain).toBeGreaterThan(0)
+    expect(sample.sustain).toBeLessThan(sample.rawSustain)
+    expect(onBeat).toHaveBeenLastCalledWith(sample.level, sample.sustain)
+    expect(sample.readyMix).toBe(1)
+    expect(sample.timing).toMatchObject({
+      clockSource: 'latency-fallback',
+      timelineSource: 'basic',
+      firstAvailableMs: 120,
+      lastWriteAtMs: 120,
+      handoffPending: false,
+    })
+  })
+
+  it('raises comparison sampling cadence without an extra render loop and restores normal cadence', async () => {
+    const debugSampleIntervalMs = ref(1000 / 30)
+    const onBeat = vi.fn()
+    const h = await mountBeatHarness({
+      debugEnabled: ref(true),
+      debugSampleIntervalMs,
+      onBeat,
+    })
+    await finishBuild()
+    h.activeAudio.currentTime = 1.1
+    const framesBefore = rafCallbacks.length
+    const timersBefore = vi.getTimerCount()
+    runFrames(30, 34)
+    const snapshot = h.analyser.debugSnapshot.value!
+    expect(snapshot.history.length).toBeGreaterThanOrEqual(30)
+    expect(onBeat).toHaveBeenLastCalledWith(snapshot.current.level, snapshot.current.sustain)
+    expect(rafCallbacks).toHaveLength(framesBefore)
+    expect(vi.getTimerCount()).toBe(timersBefore)
+    debugSampleIntervalMs.value = 100
+    runFrames(30, 34)
+    expect(h.analyser.debugSnapshot.value!.history.length - snapshot.history.length).toBe(10)
+    debugSampleIntervalMs.value = 0
+    runFrames(1000, 34)
+    const history = h.analyser.debugSnapshot.value!.history
+    expect(history.length).toBeLessThanOrEqual(601)
+    expect(history.at(-1)!.sampledAtMs - history[0]!.sampledAtMs).toBeLessThanOrEqual(20_000)
+  })
+
+  it('bounds history to twenty seconds and breaks it at a seek and a source change', async () => {
+    const h = await mountBeatHarness({ debugEnabled: ref(true) })
+    await finishBuild()
+    h.activeAudio.currentTime = 1.1
+    runFrames(260, 100)
+    const history = h.analyser.debugSnapshot.value!.history
+    expect(history.length).toBeLessThanOrEqual(201)
+    expect(history.at(-1)!.sampledAtMs - history[0]!.sampledAtMs).toBeLessThanOrEqual(20_000)
+    Object.defineProperty(h.activeAudio, 'seeking', { configurable: true, value: true })
+    h.activeAudio.currentTime = 2.2
+    h.activeAudio.dispatchEvent(new Event('seeking'))
+    expect(h.analyser.debugSnapshot.value?.history).toHaveLength(1)
+    expect(h.analyser.debugSnapshot.value?.current).toMatchObject({
+      reason: 'seeking',
+      canHighlight: false,
+      level: 0,
+      playbackSeconds: 2.2,
+    })
+    h.source.value = '/debug-new-song.mp3'
+    expect(h.analyser.debugSnapshot.value?.source).toBe('/debug-new-song.mp3')
+    expect(h.analyser.debugSnapshot.value?.history).toHaveLength(1)
+    expect(h.analyser.debugSnapshot.value?.current.rawLevel).toBe(0)
+  })
+
+  it('explains missing coverage, buffering, pause and disabled output without inventing values', async () => {
+    const h = await mountBeatHarness({ debugEnabled: ref(true) })
+    runFrames(1, 110)
+    expect(h.analyser.debugSnapshot.value?.current.reason).toBe('timeline-missing')
+    const partial = {
+      ...timelineWithPulse(),
+      completedRanges: [{ startSeconds: 1, endSeconds: 2 }],
+    }
+    buildRequests[0]!.onPartial!(partial)
+    h.activeAudio.currentTime = 3
+    runFrames(1, 110)
+    expect(h.analyser.debugSnapshot.value?.current).toMatchObject({
+      reason: 'range-unbuilt',
+      rawLevel: 0,
+      level: 0,
+    })
+    Object.defineProperty(h.activeAudio, 'readyState', {
+      configurable: true,
+      value: HTMLMediaElement.HAVE_CURRENT_DATA,
+    })
+    runFrames(1, 110)
+    expect(h.analyser.debugSnapshot.value?.current.reason).toBe('buffering')
+    Object.defineProperty(h.activeAudio, 'paused', { configurable: true, value: true })
+    h.activeAudio.dispatchEvent(new Event('pause'))
+    expect(h.analyser.debugSnapshot.value?.current.reason).toBe('paused')
+    h.enabled.value = false
+    expect(h.analyser.debugSnapshot.value?.current.reason).toBe('disabled')
+  })
+
+  it('passes the first available pulse through immediately and smooths only its sustain', async () => {
     const { analyser, activeAudio } = await mountBeatHarness()
     activeAudio.currentTime = 1.1
     runFrames(20)
@@ -492,7 +907,7 @@ describe('useBeatAnalyser completed timeline playback', () => {
     await finishBuild()
     runFrames(1)
     expect(analyser.beatLevel.value).toBeGreaterThan(0)
-    expect(analyser.beatLevel.value).toBeLessThan(0.2)
+    expect(analyser.beatLevel.value).toBe(1)
     runFrames(60)
     expect(analyser.beatLevel.value).toBeGreaterThan(0.99)
     activeAudio.currentTime = 2

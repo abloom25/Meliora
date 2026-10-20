@@ -40,10 +40,12 @@ function deferred() {
 function fakeStore(bytes: number) {
   const state = {
     cached: false,
+    saved: 0,
     downloadGate: null as ReturnType<typeof deferred> | null,
     clearGate: null as ReturnType<typeof deferred> | null,
   }
   const has = vi.fn(async () => state.cached)
+  const savedBytes = vi.fn(async () => (state.cached ? bytes : state.saved))
   const read = vi.fn(async (signal?: AbortSignal) => {
     signal?.throwIfAborted()
     return state.cached ? new ArrayBuffer(bytes) : null
@@ -69,8 +71,9 @@ function fakeStore(bytes: number) {
   const clear = vi.fn(async () => {
     if (state.clearGate) await state.clearGate.promise
     state.cached = false
+    state.saved = 0
   })
-  return { state, has, read, download, clear }
+  return { state, has, savedBytes, read, download, clear }
 }
 
 let small: ReturnType<typeof fakeStore>
@@ -103,6 +106,32 @@ async function manager() {
 }
 
 describe('optional Beat This model manager', () => {
+  it('restores partial progress after reopening without implicit network requests', async () => {
+    small.state.saved = 3
+    runtime.state.saved = 1
+    const models = await manager()
+    await models.initialize()
+    expect(models.status.value.small).toEqual({ phase: 'missing', progress: 4 / 9, error: null })
+    expect(models.status.value.standard.progress).toBe(0)
+    expect(small.download).not.toHaveBeenCalled()
+    expect(fetch).not.toHaveBeenCalled()
+    await models.remove('small')
+    expect(small.state.saved).toBe(0)
+    expect(runtime.state.saved).toBe(0)
+    expect(models.status.value.small.progress).toBe(0)
+  })
+  it('keeps saved runtime parts in resumed progress while downloading the model', async () => {
+    small.state.saved = 3
+    runtime.state.saved = 1
+    small.state.downloadGate = deferred()
+    const models = await manager()
+    await models.initialize()
+    const pending = models.download('small')
+    await vi.waitFor(() => expect(small.download).toHaveBeenCalledOnce())
+    expect(models.status.value.small.progress).toBeCloseTo(4 / 9)
+    small.state.downloadGate.resolve()
+    expect(await pending).toBe(true)
+  })
   it('shares initialization and reports missing models without any download or fetch', async () => {
     const models = await manager()
     const otherView = models.module.useBeatThisModels()
@@ -167,56 +196,57 @@ describe('optional Beat This model manager', () => {
     expect(small.download).toHaveBeenCalledOnce()
   })
 
-  it('cancels a download, clears partial assets and permits an explicit retry', async () => {
+  it('cancels a download, preserves saved progress and permits an explicit retry', async () => {
     small.state.downloadGate = deferred()
     const models = await manager()
     const downloading = models.download('small')
     await vi.waitFor(() => expect(small.download).toHaveBeenCalledOnce())
     models.cancel('small')
     expect(await downloading).toBe(false)
-    expect(models.status.value.small).toEqual({ phase: 'missing', progress: 0, error: null })
+    expect(models.status.value.small).toEqual({ phase: 'missing', progress: 3 / 9, error: null })
     expect(small.state.cached).toBe(false)
-    expect(small.clear).toHaveBeenCalledOnce()
+    expect(small.clear).not.toHaveBeenCalled()
     expect(runtime.download).not.toHaveBeenCalled()
     small.state.downloadGate = null
     expect(await models.download('small')).toBe(true)
     expect(small.download).toHaveBeenCalledTimes(2)
   })
 
-  it('waits for a cancelled download to finish cleaning before retrying', async () => {
-    small.state.downloadGate = deferred()
-    small.state.clearGate = deferred()
-    const models = await manager()
-    const oldDownload = models.download('small')
-    await vi.waitFor(() => expect(small.download).toHaveBeenCalledOnce())
-    models.cancel('small')
-    const retry = models.download('small')
-    await vi.waitFor(() => expect(small.clear).toHaveBeenCalledOnce())
-    expect(small.download).toHaveBeenCalledOnce()
-    small.state.downloadGate = null
-    small.state.clearGate.resolve()
-    expect(await oldDownload).toBe(false)
-    expect(await retry).toBe(true)
-    expect(models.status.value.small.phase).toBe('ready')
-  })
-
-  it('coalesces simultaneous retries waiting on the same cancelled download', async () => {
-    small.state.downloadGate = deferred()
-    small.state.clearGate = deferred()
+  it('waits for cancelled in-flight writes before retrying and coalesces retry clicks', async () => {
+    const gate = deferred()
+    small.download.mockImplementationOnce(async (signal, report) => {
+      report(3)
+      await gate.promise
+      signal.throwIfAborted()
+    })
     const models = await manager()
     const oldDownload = models.download('small')
     await vi.waitFor(() => expect(small.download).toHaveBeenCalledOnce())
     models.cancel('small')
     const firstRetry = models.download('small')
     const secondRetry = models.download('small')
-    await vi.waitFor(() => expect(small.clear).toHaveBeenCalledOnce())
-    small.state.downloadGate = null
-    small.state.clearGate.resolve()
+    await flushPromises()
+    expect(small.download).toHaveBeenCalledOnce()
+    gate.resolve()
     expect(await oldDownload).toBe(false)
     expect(await firstRetry).toBe(true)
     expect(await secondRetry).toBe(true)
     expect(small.download).toHaveBeenCalledTimes(2)
+    expect(small.clear).not.toHaveBeenCalled()
     expect(runtime.download).toHaveBeenCalledOnce()
+  })
+
+  it('preserves a completed model when runtime download fails and retries without clearing either cache', async () => {
+    runtime.download.mockRejectedValueOnce(new Error('网络中断'))
+    const models = await manager()
+    expect(await models.download('small')).toBe(false)
+    expect(models.status.value.small.phase).toBe('error')
+    expect(models.status.value.small.progress).toBeCloseTo(6 / 9)
+    expect(small.state.cached).toBe(true)
+    expect(small.clear).not.toHaveBeenCalled()
+    expect(runtime.clear).not.toHaveBeenCalled()
+    expect(await models.download('small')).toBe(true)
+    expect(models.status.value.small.phase).toBe('ready')
   })
 
   it('removes only the selected model and retains shared runtime until no model uses it', async () => {

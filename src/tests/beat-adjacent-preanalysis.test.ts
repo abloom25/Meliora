@@ -87,7 +87,11 @@ function harness(
   const source = ref('/current.mp3')
   const adjacent = ref<readonly BeatPreloadTarget[]>(neighbors)
   const enabled = ref(true)
+  const modelAvailable = ref(true)
+  const preservePreviewOnUnavailable = ref(false)
+  const unavailableReason = ref<string | null>(null)
   const preloadEnabled = ref(true)
+  const debugEnabled = ref(false)
   const durationSeconds = ref(120)
   const mode = ref<BeatAnalysisMode>('basic')
   const playback = ref<BeatPlaybackState>({
@@ -147,7 +151,11 @@ function harness(
             source,
             adjacent,
             enabled,
+            modelAvailable,
+            preservePreviewOnUnavailable,
+            unavailableReason,
             preloadEnabled,
+            debugEnabled,
             durationSeconds,
             mode,
             getPlaybackState: () => playback.value,
@@ -179,7 +187,11 @@ function harness(
     source,
     adjacent,
     enabled,
+    modelAvailable,
+    preservePreviewOnUnavailable,
+    unavailableReason,
     preloadEnabled,
+    debugEnabled,
     durationSeconds,
     mode,
     playback,
@@ -203,7 +215,466 @@ afterEach(async () => {
   for (const dispose of cleanup.splice(0)) await dispose()
 })
 
+describe('manual beat comparison resource lease', () => {
+  it('lets foreground refill reach its high watermark before granting a low-priority lease', async () => {
+    const h = harness([])
+    const current = await h.startCurrent()
+    const yieldWorker = vi.fn()
+    current.dependencies.subscribeYield?.(yieldWorker)
+    const granted = vi.fn()
+    const pending = h.controller
+      .acquirePause(new AbortController().signal, { foregroundFirst: true })
+      .then((release) => {
+        granted()
+        return release
+      })
+    await flushPromises()
+    expect(yieldWorker).not.toHaveBeenCalled()
+    expect(current.signal.aborted).toBe(false)
+    current.complete(timeline(120, 50))
+    await flushPromises()
+    expect(granted).not.toHaveBeenCalled()
+    expect(h.jobs).toHaveLength(2)
+    h.jobs[1]!.complete(timeline(120, 100))
+    const release = await pending
+    expect(granted).toHaveBeenCalledTimes(1)
+    expect(h.inFlight).toBe(0)
+    expect(h.maximumInFlight).toBe(1)
+    release()
+  })
+
+  it('does not starve a new foreground refill when comparison releases and immediately reacquires', async () => {
+    const h = harness([])
+    const current = await h.startCurrent()
+    current.complete(timeline(120, 100))
+    await flushPromises()
+    const first = await h.controller.acquirePause(new AbortController().signal, {
+      foregroundFirst: true,
+    })
+    h.playback.value = { ...h.playback.value, timeSeconds: 85 }
+    h.controller.prioritize(85)
+    first()
+    const pending = h.controller.acquirePause(new AbortController().signal, {
+      foregroundFirst: true,
+    })
+    await flushPromises()
+    expect(h.jobs).toHaveLength(2)
+    const refill = h.jobs[1]!
+    const yieldWorker = vi.fn()
+    refill.dependencies.subscribeYield?.(yieldWorker)
+    h.controller.prioritize(85)
+    expect(refill.signal.aborted).toBe(false)
+    expect(yieldWorker).not.toHaveBeenCalled()
+    refill.complete(timeline(120))
+    const release = await pending
+    expect(h.maximumInFlight).toBe(1)
+    release()
+  })
+
+  it('fills to the high watermark even when ordinary playback is between refill thresholds', async () => {
+    const h = harness([])
+    const current = await h.startCurrent()
+    current.complete(timeline(120, 100))
+    await flushPromises()
+    h.playback.value = { ...h.playback.value, timeSeconds: 60 }
+    h.controller.prioritize(60)
+    await flushPromises()
+    expect(h.jobs).toHaveLength(1)
+    const pending = h.controller.acquirePause(new AbortController().signal, {
+      foregroundFirst: true,
+    })
+    await flushPromises()
+    expect(h.jobs).toHaveLength(2)
+    expect(h.jobs[1]!.signal.aborted).toBe(false)
+    h.jobs[1]!.complete(timeline(120))
+    const release = await pending
+    release()
+  })
+
+  it.each(['paused', 'disabled', 'error', 'not-started', 'model-unavailable'] as const)(
+    'does not wait forever for foreground buffer when live analysis is %s',
+    async (condition) => {
+      const h = harness([])
+      if (condition !== 'not-started') {
+        const current = await h.startCurrent()
+        if (condition === 'paused') {
+          h.playback.value = { ...h.playback.value, playing: false }
+          h.controller.prioritize(h.playback.value.timeSeconds)
+        } else if (condition === 'disabled') h.enabled.value = false
+        else if (condition === 'model-unavailable') h.modelAvailable.value = false
+        else current.fail(new Error('正式分析失败'))
+        await flushPromises()
+      }
+      const release = await h.controller.acquirePause(new AbortController().signal, {
+        foregroundFirst: true,
+      })
+      expect(h.inFlight).toBe(0)
+      release()
+      await flushPromises()
+      expect(h.inFlight).toBe(0)
+    },
+  )
+
+  it('cancels a queued low-priority lease without aborting its foreground refill', async () => {
+    const h = harness([])
+    const current = await h.startCurrent()
+    const controller = new AbortController()
+    const pending = h.controller.acquirePause(controller.signal, { foregroundFirst: true })
+    const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    controller.abort()
+    await rejected
+    expect(current.signal.aborted).toBe(false)
+    expect(h.inFlight).toBe(1)
+    current.complete()
+    await flushPromises()
+    expect(h.jobs).toHaveLength(1)
+  })
+
+  it('yields the running worker and waits for its cleanup while preserving highlights and checkpoints', async () => {
+    const h = harness([])
+    h.mode.value = 'beat-this-small'
+    const current = await h.startCurrent()
+    const partial = timeline(120, 45)
+    const saved = checkpoint(partial, [0])
+    const preview = timeline(120, 60)
+    current.dependencies.onCheckpoint?.(saved)
+    current.partial(partial)
+    current.dependencies.onPreview?.(preview)
+    const yieldWorker = vi.fn()
+    current.dependencies.subscribeYield?.(yieldWorker)
+    current.holdCleanup()
+    const signal = new AbortController()
+    const granted = vi.fn()
+    const pending = h.controller.acquirePause(signal.signal).then((release) => {
+      granted()
+      return release
+    })
+    h.controller.prioritize(40)
+    expect(yieldWorker).toHaveBeenCalledTimes(1)
+    expect(current.signal.aborted).toBe(false)
+    expect(h.controller.timeline.value).toBe(partial)
+    expect(h.controller.provisionalTimeline.value?.builtUntilSeconds).toBe(60)
+    current.complete(partial)
+    await flushPromises()
+    expect(granted).not.toHaveBeenCalled()
+    expect(h.inFlight).toBe(1)
+    current.releaseCleanup()
+    const release = await pending
+    expect(h.inFlight).toBe(0)
+    h.controller.start()
+    h.controller.prioritize(40)
+    await flushPromises()
+    expect(h.build).toHaveBeenCalledTimes(1)
+    expect(h.controller.timeline.value).toBe(partial)
+    expect(h.controller.provisionalTimeline.value?.builtUntilSeconds).toBe(60)
+    release()
+    release()
+    await flushPromises()
+    expect(h.build).toHaveBeenCalledTimes(2)
+    expect(h.jobs[1]!.dependencies.checkpoint?.completedWindows).toEqual([0])
+    expect(h.maximumInFlight).toBe(1)
+  })
+
+  it('retains a published preview when yielding before worker subscription cancels preparation', async () => {
+    const h = harness([])
+    h.mode.value = 'beat-this-small'
+    const current = await h.startCurrent()
+    current.dependencies.onPreview?.(timeline(120, 60))
+    const release = await h.controller.acquirePause(new AbortController().signal)
+    expect(current.signal.aborted).toBe(true)
+    expect(h.controller.provisionalTimeline.value?.builtUntilSeconds).toBe(60)
+    expect(h.inFlight).toBe(0)
+    release()
+    await flushPromises()
+    expect(h.build).toHaveBeenCalledTimes(2)
+    expect(h.controller.provisionalTimeline.value?.builtUntilSeconds).toBe(60)
+  })
+
+  it('cancels a waiting lease without unlocking the still-retiring live worker', async () => {
+    const h = harness([])
+    const current = await h.startCurrent()
+    current.holdCleanup()
+    const abort = new AbortController()
+    const pending = h.controller.acquirePause(abort.signal)
+    const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    abort.abort()
+    await rejected
+    h.controller.start()
+    await flushPromises()
+    expect(h.build).toHaveBeenCalledTimes(1)
+    expect(h.inFlight).toBe(1)
+    current.releaseCleanup()
+    await flushPromises()
+    expect(h.build).toHaveBeenCalledTimes(2)
+    expect(h.maximumInFlight).toBe(1)
+  })
+
+  it('keeps a granted lease until its owner finishes cleanup even after cancellation', async () => {
+    const h = harness([])
+    const abort = new AbortController()
+    const release = await h.controller.acquirePause(abort.signal)
+    h.controller.start()
+    abort.abort()
+    await flushPromises()
+    expect(h.build).not.toHaveBeenCalled()
+    release()
+    await flushPromises()
+    expect(h.build).toHaveBeenCalledTimes(1)
+  })
+
+  it('grants simultaneous requests serially without allowing live work between them', async () => {
+    const h = harness([])
+    const releaseFirst = await h.controller.acquirePause(new AbortController().signal)
+    const secondGranted = vi.fn()
+    const second = h.controller.acquirePause(new AbortController().signal).then((release) => {
+      secondGranted()
+      return release
+    })
+    h.controller.start()
+    await flushPromises()
+    expect(secondGranted).not.toHaveBeenCalled()
+    releaseFirst()
+    const releaseSecond = await second
+    expect(h.build).not.toHaveBeenCalled()
+    releaseSecond()
+    await flushPromises()
+    expect(h.build).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects all pending leases on source changes and waits for old resource cleanup', async () => {
+    const h = harness([])
+    const current = await h.startCurrent()
+    current.holdCleanup()
+    const first = h.controller.acquirePause(new AbortController().signal)
+    const second = h.controller.acquirePause(new AbortController().signal)
+    const rejected = Promise.all([
+      expect(first).rejects.toMatchObject({ name: 'AbortError' }),
+      expect(second).rejects.toMatchObject({ name: 'AbortError' }),
+    ])
+    h.source.value = '/replacement.mp3'
+    h.controller.start()
+    await rejected
+    await flushPromises()
+    expect(h.build).toHaveBeenCalledTimes(1)
+    current.releaseCleanup()
+    await flushPromises()
+    expect(h.jobs[1]?.source).toBe('/replacement.mp3')
+    expect(h.maximumInFlight).toBe(1)
+  })
+
+  it('rejects pending and future requests after disposal without restarting work', async () => {
+    const h = harness([])
+    const current = await h.startCurrent()
+    current.holdCleanup()
+    const waiting = h.controller.acquirePause(new AbortController().signal)
+    const rejected = expect(waiting).rejects.toMatchObject({ name: 'AbortError' })
+    h.wrapper.unmount()
+    await rejected
+    current.releaseCleanup()
+    await flushPromises()
+    await expect(h.controller.acquirePause(new AbortController().signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    })
+    expect(h.build).toHaveBeenCalledTimes(1)
+    expect(h.inFlight).toBe(0)
+  })
+})
+
 describe('adjacent beat preanalysis scheduling and promotion', () => {
+  it('retains known output on an asset read error while user disable and model removal still clear it', async () => {
+    const h = harness([])
+    h.mode.value = 'beat-this-small'
+    const current = await h.startCurrent()
+    current.dependencies.onPreview?.(timeline(120, 30))
+    // Set the asset-error retention policy before publishing its reason, matching
+    // computed values that derive from the same model status object.
+    h.preservePreviewOnUnavailable.value = true
+    h.unavailableReason.value = '模型缓存无法读取'
+    h.modelAvailable.value = false
+    expect(h.controller.provisionalTimeline.value?.builtUntilSeconds).toBe(30)
+    expect(h.controller.status.value.phase).toBe('error')
+    await flushPromises()
+    const count = h.jobs.length
+    h.controller.prioritize(10)
+    await flushPromises()
+    expect(h.jobs).toHaveLength(count)
+    h.enabled.value = false
+    expect(h.controller.provisionalTimeline.value).toBeNull()
+    expect(h.controller.timeline.value).toBeNull()
+    h.enabled.value = true
+    h.preservePreviewOnUnavailable.value = false
+    h.unavailableReason.value = '请下载模型'
+    expect(h.controller.provisionalTimeline.value).toBeNull()
+  })
+
+  it('keeps provisional basic coverage separate from model watermarks and caches until verified results arrive', async () => {
+    const h = harness([])
+    h.mode.value = 'beat-this-small'
+    const current = await h.startCurrent()
+    const preview = timeline(120, 60)
+    preview.levels[0][60] = 0.7
+    current.dependencies.onPreview?.(preview)
+    expect(h.controller.provisionalTimeline.value?.levels[0][60]).toBeCloseTo(0.7)
+    expect(h.controller.timeline.value).toBeNull()
+    expect(h.controller.status.value.phase).toBe('fetching')
+    expect(h.cache.size).toBe(0)
+    expect(current.dependencies.getBufferSeconds?.()).toBe(60)
+    expect(h.jobs).toHaveLength(1)
+    const verified = timeline(120, 24)
+    current.dependencies.onCheckpoint?.(checkpoint(verified, [0]))
+    current.partial(verified)
+    expect(h.controller.timeline.value).toBe(verified)
+    expect(h.controller.provisionalTimeline.value?.completedRanges).toEqual(preview.completedRanges)
+    expect(h.controller.status.value.availableSeconds).toBe(24)
+    expect(h.cache.size).toBe(1)
+  })
+
+  it('preserves usable previews after a model failure but clears them on source, mode, retry and cancellation', async () => {
+    const h = harness([])
+    h.mode.value = 'beat-this-small'
+    const current = await h.startCurrent()
+    current.dependencies.onPreview?.(timeline(120, 30))
+    current.fail(new Error('模型推理失败'))
+    await flushPromises()
+    expect(h.controller.status.value.phase).toBe('error')
+    expect(h.controller.provisionalTimeline.value?.builtUntilSeconds).toBe(30)
+    expect(h.controller.timeline.value).toBeNull()
+    expect(h.cache.size).toBe(0)
+    expect(h.jobs).toHaveLength(1)
+    h.controller.retry()
+    expect(h.controller.provisionalTimeline.value).toBeNull()
+    await flushPromises()
+    const retried = h.jobs.at(-1)!
+    retried.dependencies.onPreview?.(timeline(120, 35))
+    h.source.value = '/another.mp3'
+    expect(h.controller.provisionalTimeline.value).toBeNull()
+    retried.dependencies.onPreview?.(timeline(120, 60))
+    expect(h.controller.provisionalTimeline.value).toBeNull()
+    await flushPromises()
+    const next = await h.startCurrent()
+    next.dependencies.onPreview?.(timeline(120, 25))
+    h.mode.value = 'basic'
+    expect(h.controller.provisionalTimeline.value).toBeNull()
+    next.dependencies.onPreview?.(timeline(120, 60))
+    expect(h.controller.provisionalTimeline.value).toBeNull()
+  })
+
+  it('keeps background previews invisible until the exact in-flight neighbor is promoted', async () => {
+    const h = harness()
+    h.mode.value = 'beat-this-small'
+    await h.finishCurrent()
+    const neighbor = h.jobs.at(-1)!
+    expect(neighbor.source).toBe('/next.mp3')
+    neighbor.dependencies.onPreview?.(timeline(60, 25))
+    expect(h.controller.provisionalTimeline.value).toBeNull()
+    h.source.value = neighbor.source
+    expect(h.controller.provisionalTimeline.value).toBeNull()
+    h.controller.start()
+    expect(h.controller.provisionalTimeline.value?.durationSeconds).toBe(60)
+    expect(h.controller.provisionalTimeline.value?.builtUntilSeconds).toBe(25)
+    expect(h.controller.timeline.value).toBeNull()
+    h.controller.reset()
+    expect(h.controller.provisionalTimeline.value).toBeNull()
+    neighbor.dependencies.onPreview?.(timeline(60, 50))
+    expect(h.controller.provisionalTimeline.value).toBeNull()
+  })
+
+  it('observes live scheduling and checkpoint watermarks without changing LRU or starting work', async () => {
+    const h = harness()
+    h.playback.value.timeSeconds = 0
+    const first = await h.startCurrent()
+    expect(h.controller.debugSnapshot.value).toBeNull()
+    const buffer = timeline(120, 60)
+    const saved = checkpoint(buffer, [0, 1, 2, 3, 4, 5], 8000)
+    first.dependencies.onCheckpoint!(saved)
+    first.partial(buffer)
+    const read = vi.spyOn(h.cache, 'get')
+    const writes = vi.spyOn(h.cache, 'set')
+    const buildCount = h.build.mock.calls.length
+    h.debugEnabled.value = true
+    const snapshot = h.controller.debugSnapshot.value!
+    expect(snapshot.activeTask).toMatchObject({
+      source: '/current.mp3',
+      role: 'current',
+      phase: 'analysing',
+    })
+    expect(snapshot).toMatchObject({
+      continuousCoverageSeconds: 60,
+      lowWatermarkSeconds: 20,
+      highWatermarkSeconds: 60,
+    })
+    expect(snapshot.queue[0]).toMatchObject({
+      cached: true,
+      resumable: true,
+      completedWindows: 6,
+      estimatedWorkMs: 8000,
+      order: 0,
+    })
+    expect(snapshot.queue.map((entry) => [entry.role, entry.order])).toEqual([
+      ['current', 0],
+      ['next', 1],
+      ['previous', 2],
+    ])
+    for (let index = 0; index < 20; index++) void h.controller.debugSnapshot.value
+    expect(read).not.toHaveBeenCalled()
+    expect(writes).not.toHaveBeenCalled()
+    expect(h.build).toHaveBeenCalledTimes(buildCount)
+    h.debugEnabled.value = false
+    expect(h.controller.debugSnapshot.value).toBeNull()
+    first.complete(buffer)
+    await flushPromises()
+    expect(h.jobs[1]!.source).toBe('/next.mp3')
+    expect(h.controller.debugSnapshot.value).toBeNull()
+    h.debugEnabled.value = true
+    expect(h.controller.debugSnapshot.value!.activeTask?.role).toBe('next')
+  })
+
+  it('reports real metadata and failed-neighbor exclusions while preserving the execution order', async () => {
+    const h = harness([target('next', '/next.mp3'), target('previous', '/previous.mp3', 90)])
+    h.debugEnabled.value = true
+    await h.finishCurrent()
+    expect(h.jobs[1]!.source).toBe('/previous.mp3')
+    let snapshot = h.controller.debugSnapshot.value!
+    expect(snapshot.queue.find((entry) => entry.role === 'next')).toMatchObject({
+      order: null,
+      reason: '等待歌曲时长',
+    })
+    expect(snapshot.activeTask?.role).toBe('previous')
+    h.jobs[1]!.fail(new Error('邻曲分析失败'))
+    await flushPromises()
+    snapshot = h.controller.debugSnapshot.value!
+    expect(snapshot.queue.find((entry) => entry.role === 'previous')).toMatchObject({
+      order: null,
+      phase: 'error',
+      reason: '邻曲分析失败',
+    })
+    expect(snapshot.activeTask).toBeNull()
+    expect(h.build).toHaveBeenCalledTimes(2)
+  })
+
+  it('records pause and seek holds, clearing stale task identity on source changes', async () => {
+    const h = harness([])
+    h.debugEnabled.value = true
+    const first = await h.startCurrent()
+    const yielded = vi.fn()
+    first.dependencies.subscribeYield!(yielded)
+    h.playback.value = { ...h.playback.value, playing: false }
+    h.controller.prioritize(37, h.playback.value)
+    expect(yielded).toHaveBeenCalledTimes(1)
+    expect(h.controller.debugSnapshot.value?.decision).toContain('播放已暂停')
+    expect(h.controller.debugSnapshot.value?.activeTask?.yielding).toBe(true)
+    h.playback.value = { ...h.playback.value, playing: true, seeking: true, timeSeconds: 80 }
+    h.controller.prioritize(80, h.playback.value)
+    expect(h.controller.debugSnapshot.value?.decision).toContain('等待拖动稳定')
+    expect(h.controller.debugSnapshot.value?.playback.timeSeconds).toBe(80)
+    h.source.value = '/changed-debug.mp3'
+    expect(h.controller.debugSnapshot.value?.source).toBe('/changed-debug.mp3')
+    expect(h.controller.debugSnapshot.value?.activeTask?.role).toBe('retiring')
+    expect(h.controller.debugSnapshot.value?.continuousCoverageSeconds).toBe(0)
+    await flushPromises()
+    expect(h.build).toHaveBeenCalledTimes(1)
+  })
+
   it('fills a bounded current buffer, prepares only neighbor intros, and wakes below the low watermark', async () => {
     const h = harness()
     h.playback.value.timeSeconds = 0
@@ -802,36 +1273,39 @@ describe('adjacent beat preanalysis scheduling and promotion', () => {
     expect(h.controller.status.value.phase).not.toBe('error')
   })
 
-  it('reuses completed adjacent results but isolates the selected model and bounds the cache', async () => {
-    const h = harness([target('next', '/next.mp3', 60)])
-    h.mode.value = 'beat-this-small'
-    await h.finishCurrent()
-    const nextSmall = timeline(60)
-    h.jobs[1]!.complete(nextSmall)
-    await flushPromises()
-    h.source.value = '/next.mp3'
-    h.controller.start()
-    await flushPromises()
-    expect(h.controller.timeline.value).toBe(nextSmall)
-    expect(h.jobs).toHaveLength(2)
-    h.mode.value = 'beat-this-standard'
-    await flushPromises()
-    expect(h.jobs[2]!.dependencies.modelId).toBe('standard')
-    expect(h.controller.timeline.value).toBeNull()
-    h.jobs[2]!.complete(timeline(60))
-    await flushPromises()
-    h.mode.value = 'beat-this-small'
-    await flushPromises()
-    expect(h.controller.timeline.value).toBe(nextSmall)
-    expect(h.jobs).toHaveLength(3)
-    h.mode.value = 'basic'
-    await flushPromises()
-    expect(h.jobs[3]!.dependencies.modelId).toBeUndefined()
-    h.jobs[3]!.complete(timeline(60))
-    await flushPromises()
-    expect(h.cache.size).toBe(3)
-    expect(h.maximumInFlight).toBe(1)
-  })
+  it.each(['beat-this-small'] as const)(
+    'reuses %s adjacent results but isolates the selected model and bounds the cache',
+    async (initialMode) => {
+      const h = harness([target('next', '/next.mp3', 60)])
+      h.mode.value = initialMode
+      await h.finishCurrent()
+      const nextSmall = timeline(60)
+      h.jobs[1]!.complete(nextSmall)
+      await flushPromises()
+      h.source.value = '/next.mp3'
+      h.controller.start()
+      await flushPromises()
+      expect(h.controller.timeline.value).toBe(nextSmall)
+      expect(h.jobs).toHaveLength(2)
+      h.mode.value = 'beat-this-standard'
+      await flushPromises()
+      expect(h.jobs[2]!.dependencies.modelId).toBe('standard')
+      expect(h.controller.timeline.value).toBeNull()
+      h.jobs[2]!.complete(timeline(60))
+      await flushPromises()
+      h.mode.value = initialMode
+      await flushPromises()
+      expect(h.controller.timeline.value).toBe(nextSmall)
+      expect(h.jobs).toHaveLength(3)
+      h.mode.value = 'basic'
+      await flushPromises()
+      expect(h.jobs[3]!.dependencies.modelId).toBeUndefined()
+      h.jobs[3]!.complete(timeline(60))
+      await flushPromises()
+      expect(h.cache.size).toBe(3)
+      expect(h.maximumInFlight).toBe(1)
+    },
+  )
 
   it('aborts an active neighbor on unmount and ignores all late background callbacks', async () => {
     const h = harness()

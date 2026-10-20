@@ -6,6 +6,8 @@ import type {
 } from '../core/analysis/beat-this-protocol'
 import type { BeatThisFeaturesBuilder } from '../core/analysis/beat-this-features'
 import type { BeatPlaybackState } from '../core/analysis/beat-scheduling'
+import { createBeatCheckpoint } from '../core/analysis/beat-checkpoint'
+import { createBeatTimelineBuffer } from '../core/analysis/beat-timeline'
 
 const runtime = vi.hoisted(() => ({
   badGpu: false,
@@ -25,6 +27,7 @@ const runtime = vi.hoisted(() => ({
   featureMs: 0,
   workDurations: [] as number[],
   fast: false,
+  realFeatures: false,
   cancel: null as (() => void) | null,
   sessions: [] as Array<{
     backend: string
@@ -52,7 +55,12 @@ vi.mock('../core/analysis/beat-timeline', async (importOriginal) => {
     createBeatTimelineBuilder: (...args: Parameters<typeof actual.createBeatTimelineBuilder>) => {
       if (!runtime.fast) return actual.createBeatTimelineBuilder(...args)
       const duration = args[0][0]!.length / args[1]
-      const snapshot = () => actual.createBeatTimelineBuffer(duration)
+      const snapshot = () => ({
+        ...actual.createBeatTimelineBuffer(duration),
+        completedRanges: [
+          { startSeconds: args[2]?.startSeconds ?? 0, endSeconds: args[2]?.endSeconds ?? duration },
+        ],
+      })
       return { process: () => 1, snapshot, finish: snapshot }
     },
   }
@@ -86,7 +94,8 @@ vi.mock('../core/analysis/beat-this-features', async (importOriginal) => {
       // Window scheduling needs cached-frame accounting, not repeated FFT work.
       // The original parity/integration tests keep the real frontend enabled.
       const builder: BeatThisFeaturesBuilder = (() => {
-        if (!runtime.fast) return actual.createBeatThisFeaturesBuilder(...args)
+        if (!runtime.fast || runtime.realFeatures)
+          return actual.createBeatThisFeaturesBuilder(...args)
         if (!args[0][0]?.length) throw new Error('音频声道数据无效')
         const frames = Math.floor((args[0][0].length / args[1]) * 50) + 1
         const ready = new Uint8Array(frames)
@@ -108,24 +117,17 @@ vi.mock('../core/analysis/beat-this-features', async (importOriginal) => {
         }
         return {
           frames,
+          reusedFrames: 0,
+          residentBytes: 0,
+          peakResidentBytes: 0,
           get processedFrames() {
             return processed
           },
-          process: (maxFrames) => processRange(0, frames, maxFrames),
           processRange,
+          rangeProgress: (start, end) => processRange(start, end, 0),
           chunk: (_start, count) => new Float32Array(count * 128),
-          view: () => ({ frames, data: new Float32Array(0) }),
-          finish: () => {
-            if (processed !== frames) throw new Error('Unfinished feature frames')
-            return { frames, data: new Float32Array(0) }
-          },
         }
       })()
-      const process = builder.process
-      builder.process = (frames) => {
-        runtime.featureBatches.push(frames)
-        return process(frames)
-      }
       const processRange = builder.processRange
       builder.processRange = (start, end, frames) => {
         runtime.featureBatches.push(frames)
@@ -261,7 +263,14 @@ async function loadWorker() {
     playback?: BeatPlaybackState,
     options: Pick<
       Partial<BeatThisBuildRequest>,
-      'bufferSeconds' | 'maxWindows' | 'checkpoint'
+      | 'bufferSeconds'
+      | 'maxWindows'
+      | 'checkpoint'
+      | 'retainSession'
+      | 'audioIdentity'
+      | 'model'
+      | 'filterbank'
+      | 'wasmBinary'
     > = {},
   ) => {
     const request: BeatThisRequest = {
@@ -292,7 +301,9 @@ async function loadWorker() {
   }
   const yieldBuild = () =>
     scope.onmessage?.({ data: { type: 'yield' } } as MessageEvent<BeatThisRequest>)
-  return { responses, transfers, computedFrames, send, prioritize, onResponse, yieldBuild }
+  const dispose = () =>
+    scope.onmessage?.({ data: { type: 'dispose' } } as MessageEvent<BeatThisRequest>)
+  return { responses, transfers, computedFrames, send, prioritize, onResponse, yieldBuild, dispose }
 }
 
 async function flush() {
@@ -321,6 +332,7 @@ beforeEach(() => {
   runtime.featureMs = 0
   runtime.workDurations.length = 0
   runtime.fast = false
+  runtime.realFeatures = false
   runtime.cancel = null
   vi.spyOn(performance, 'now').mockImplementation(() => runtime.clock)
   runtime.sessions.length = 0
@@ -340,6 +352,199 @@ afterEach(async () => {
 })
 
 describe('Beat This! worker lifecycle and inference validation', () => {
+  it('reuses bounded spectral data only for the exact audio identity in a retained session', async () => {
+    const worker = await loadWorker()
+    worker.send(1, 0, undefined, { retainSession: true, audioIdentity: 'pcm-a' })
+    await flush()
+    expect(worker.responses.at(-1)).toMatchObject({
+      type: 'complete',
+      metrics: {
+        featureFrames: 51,
+        reusedFeatureFrames: 0,
+        featureResidentBytes: 64 * 513,
+        featurePeakResidentBytes: 64 * 513,
+        featureInputBytes: 1500 * 128 * 4,
+      },
+    })
+    worker.send(1, 0, undefined, { retainSession: true, audioIdentity: 'pcm-a' })
+    await flush()
+    expect(worker.responses.at(-1)).toMatchObject({
+      type: 'complete',
+      metrics: { featureFrames: 51, reusedFeatureFrames: 51 },
+    })
+    worker.send(1, 0, undefined, { retainSession: true, audioIdentity: 'pcm-b' })
+    await flush()
+    expect(worker.responses.at(-1)).toMatchObject({
+      type: 'complete',
+      metrics: { reusedFeatureFrames: 0 },
+    })
+    worker.dispose()
+    await flush()
+    worker.send(1, 0, undefined, { retainSession: true, audioIdentity: 'pcm-a' })
+    await flush()
+    expect(worker.responses.at(-1)).toMatchObject({
+      type: 'complete',
+      metrics: { reusedFeatureFrames: 0 },
+    })
+  })
+
+  it('reuses a validated session and skips the probe on warm batches, then disposes it explicitly', async () => {
+    runtime.fast = true
+    runtime.createMs = 2000
+    runtime.probeMs = 1000
+    runtime.songMs = 3000
+    const worker = await loadWorker()
+    worker.send(100, 0, undefined, { bufferSeconds: 20, maxWindows: 1, retainSession: true })
+    await flush()
+    const first = worker.responses.at(-1)!
+    if (first.type !== 'buffered') throw new Error('Missing checkpoint')
+    expect(first.metrics).toMatchObject({
+      initializationMs: 3000,
+      inferenceMs: 3000,
+      sessionReused: false,
+      backend: 'webgpu',
+    })
+    expect(runtime.sessions[0]!.release).not.toHaveBeenCalled()
+    worker.send(100, 24, undefined, {
+      bufferSeconds: 20,
+      maxWindows: 1,
+      checkpoint: first.checkpoint,
+      retainSession: true,
+      model: undefined,
+      filterbank: undefined,
+      wasmBinary: undefined,
+    })
+    await flush()
+    expect(runtime.sessions).toHaveLength(1)
+    expect(runtime.sessions[0]!.run).toHaveBeenCalledTimes(3)
+    expect(worker.responses.at(-1)).toMatchObject({
+      type: 'buffered',
+      metrics: { initializationMs: 0, inferenceMs: 3000, sessionReused: true, backend: 'webgpu' },
+    })
+    expect(runtime.workDurations).toEqual([6000, first.checkpoint.estimatedWorkMs, 3000])
+    worker.dispose()
+    await flush()
+    expect(runtime.sessions[0]!.release).toHaveBeenCalledOnce()
+    expect(worker.responses.at(-1)).toEqual({ type: 'disposed' })
+  })
+
+  it('keeps the validated WASM fallback for warm batches instead of retrying the failed GPU', async () => {
+    runtime.fast = true
+    runtime.badGpu = true
+    const worker = await loadWorker()
+    worker.send(100, 0, undefined, { bufferSeconds: 20, maxWindows: 1, retainSession: true })
+    await flush()
+    const first = worker.responses.at(-1)!
+    if (first.type !== 'buffered') throw new Error('Missing checkpoint')
+    worker.send(100, 24, undefined, {
+      bufferSeconds: 20,
+      checkpoint: first.checkpoint,
+      retainSession: true,
+      model: undefined,
+      filterbank: undefined,
+      wasmBinary: undefined,
+    })
+    await flush()
+    expect(runtime.sessions.map((session) => session.backend)).toEqual(['webgpu', 'wasm'])
+    expect(runtime.sessions[1]!.run).toHaveBeenCalledTimes(3)
+    expect(worker.responses.at(-1)).toMatchObject({
+      metrics: { sessionReused: true, backend: 'wasm' },
+    })
+  })
+
+  it('previews the current gap independently of a resumed model estimate far ahead of playback', async () => {
+    runtime.fast = true
+    const worker = await loadWorker()
+    const checkpoint = createBeatCheckpoint(
+      { sampleRate: 22050, sampleCount: 22050 * 100, channels: 1, modelId: 'small' },
+      createBeatTimelineBuffer(100),
+      new Set(),
+      45_000,
+    )
+    worker.onResponse((message) => {
+      if (message.type === 'preview') worker.yieldBuild()
+    })
+    worker.send(
+      100,
+      10,
+      { timeSeconds: 10, playing: true, playbackRate: 1, seeking: false },
+      { checkpoint, bufferSeconds: 60 },
+    )
+    await flush()
+    expect(worker.responses.find((message) => message.type === 'preview')).toMatchObject({
+      timeline: { completedRanges: [{ startSeconds: 0, endSeconds: 29.98 }] },
+    })
+    expect(worker.responses.at(-1)).toMatchObject({
+      type: 'buffered',
+      checkpoint: { completedWindows: [] },
+    })
+    expect(runtime.sessions).toHaveLength(0)
+  })
+
+  it('publishes usable basic coverage before model validation and keeps its buffers separate from model results', async () => {
+    let releaseProbe!: () => void
+    runtime.probeWait = new Promise<void>((resolve) => {
+      releaseProbe = resolve
+    })
+    const worker = await loadWorker()
+    worker.send(0.2)
+    await flush()
+    const previewIndex = worker.responses.findIndex((message) => message.type === 'preview')
+    expect(previewIndex).toBeGreaterThanOrEqual(0)
+    expect(worker.responses[previewIndex]).toMatchObject({
+      type: 'preview',
+      timeline: { durationSeconds: 0.2 },
+    })
+    expect(worker.computedFrames[previewIndex]).toBe(0)
+    expect(
+      worker.responses.some((message) => message.type === 'partial' || message.type === 'complete'),
+    ).toBe(false)
+    expect(runtime.sessions[0]!.run).toHaveBeenCalledOnce()
+    releaseProbe()
+    await flush()
+    const finalIndex = worker.responses.findIndex((message) => message.type === 'complete')
+    expect(finalIndex).toBeGreaterThan(previewIndex)
+    expect(
+      worker.transfers[previewIndex]!.every(
+        (buffer) => !worker.transfers[finalIndex]!.includes(buffer),
+      ),
+    ).toBe(true)
+  })
+
+  it('preserves a basic preview when both model backends fail validation without claiming a completed model window', async () => {
+    runtime.fast = true
+    runtime.badGpu = true
+    runtime.badWasm = true
+    const worker = await loadWorker()
+    worker.send(100, 50, undefined, { bufferSeconds: 60 })
+    await flush()
+    expect(worker.responses.find((message) => message.type === 'preview')).toMatchObject({
+      timeline: { completedRanges: [{ startSeconds: 45, endSeconds: 75.1 }] },
+    })
+    expect(worker.responses.at(-1)).toMatchObject({ type: 'error' })
+    expect(
+      worker.responses.some((message) =>
+        ['partial', 'buffered', 'complete'].includes(message.type),
+      ),
+    ).toBe(false)
+    expect(runtime.sessions.every((session) => session.release.mock.calls.length === 1)).toBe(true)
+  })
+
+  it('yields after a preview without initializing a model or checkpointing provisional coverage', async () => {
+    runtime.fast = true
+    const worker = await loadWorker()
+    worker.onResponse((message) => {
+      if (message.type === 'preview') worker.yieldBuild()
+    })
+    worker.send(100, 0, undefined, { bufferSeconds: 60 })
+    await flush()
+    expect(runtime.sessions).toHaveLength(0)
+    expect(worker.responses.at(-1)).toMatchObject({
+      type: 'buffered',
+      checkpoint: { completedWindows: [], timeline: { completedRanges: [] } },
+    })
+  })
+
   it('includes repeated model initialization and validation in bounded refill estimates', async () => {
     runtime.fast = true
     runtime.createMs = 2000
@@ -431,6 +636,33 @@ describe('Beat This! worker lifecycle and inference validation', () => {
     expect(runtime.sessions[1]!.run).toHaveBeenCalledTimes(2)
   })
 
+  it('skips startup preview work when the playhead already has verified model coverage', async () => {
+    runtime.fast = true
+    const worker = await loadWorker()
+    worker.send(100, 0, undefined, { bufferSeconds: 20, maxWindows: 1 })
+    await flush()
+    const first = worker.responses.at(-1)!
+    if (first.type !== 'buffered') throw new Error('Missing checkpoint')
+    const firstMessageCount = worker.responses.length
+    let releaseProbe!: () => void
+    runtime.probeWait = new Promise<void>((resolve) => {
+      releaseProbe = resolve
+    })
+    worker.send(100, 10, undefined, {
+      bufferSeconds: 60,
+      maxWindows: 1,
+      checkpoint: first.checkpoint,
+    })
+    await flush()
+    expect(runtime.sessions).toHaveLength(2)
+    expect(
+      worker.responses.slice(firstMessageCount).some((message) => message.type === 'preview'),
+    ).toBe(false)
+    releaseProbe()
+    await flush()
+    expect(worker.responses.at(-1)).toMatchObject({ type: 'buffered' })
+  })
+
   it('respects the per-batch window limit and publishes restartable checkpoints after each finished window', async () => {
     runtime.fast = true
     const worker = await loadWorker()
@@ -511,7 +743,7 @@ describe('Beat This! worker lifecycle and inference validation', () => {
       type: 'buffered',
       checkpoint: { completedWindows: [] },
     })
-    expect(runtime.sessions[1]!.run).toHaveBeenCalledOnce()
+    expect(runtime.sessions[0]!.run).toHaveBeenCalledOnce()
   })
 
   it('reports real completion only when the bounded request covers the entire short song', async () => {
@@ -574,6 +806,44 @@ describe('Beat This! worker lifecycle and inference validation', () => {
     expect(runtime.sessions[0]!.run).toHaveBeenCalledTimes(5)
     expect(runtime.featureBuilders[0]!.processedFrames).toBe(runtime.featureBuilders[0]!.frames)
     expect(worker.responses.at(-1)).toMatchObject({ type: 'complete' })
+  })
+
+  it('rebuilds a retained warmup after seeking away evicts its completed frequency pages', async () => {
+    runtime.fast = true
+    runtime.realFeatures = true
+    const worker = await loadWorker()
+    let phase = 0
+    let expected: Float32Array | undefined
+    worker.onResponse((message) => {
+      if (message.type !== 'progress') return
+      const features = runtime.featureBuilders[0]!
+      if (phase === 0 && features.rangeProgress(-6, 1494) === 1) {
+        expected = features.chunk(-6, 1500)
+        phase = 1
+        worker.prioritize(50)
+      } else if (phase === 1 && features.rangeProgress(2250, 3750) === 1) {
+        expect(features.rangeProgress(-6, 1494)).toBeLessThan(0.1)
+        phase = 2
+        worker.prioritize(0)
+      }
+    })
+    worker.send(90, 0, undefined, { bufferSeconds: 20, maxWindows: 1 })
+    await flush()
+    expect(phase).toBe(2)
+    expect(worker.responses.at(-1)).toMatchObject({
+      type: 'buffered',
+      checkpoint: { completedWindows: [0] },
+      metrics: {
+        featureFrames: 1494 + 1500,
+        reusedFeatureFrames: 0,
+        featureResidentBytes: 25 * 64 * 513,
+        featurePeakResidentBytes: 25 * 64 * 513,
+        featureInputBytes: 1500 * 128 * 4,
+      },
+    })
+    expect(runtime.inputs.at(-1)!.data).toEqual(expected)
+    expect(runtime.sessions[0]!.run).toHaveBeenCalledTimes(2)
+    expect(runtime.featureBatches.length).toBeGreaterThan(150)
   })
 
   it('keeps an expensive inference already in flight but starts no new window during dragging', async () => {
@@ -647,6 +917,7 @@ describe('Beat This! worker lifecycle and inference validation', () => {
   })
 
   it('publishes the first window before computing later audio features, with bounded preprocessing batches', async () => {
+    runtime.fast = true
     const worker = await loadWorker()
     worker.send(65)
     await flush()
@@ -696,6 +967,7 @@ describe('Beat This! worker lifecycle and inference validation', () => {
   })
 
   it('prioritizes a seek without reopening the model and eventually fills every region', async () => {
+    runtime.fast = true
     const worker = await loadWorker()
     let seekSent = false
     worker.onResponse((message) => {
@@ -720,6 +992,7 @@ describe('Beat This! worker lifecycle and inference validation', () => {
   it.each(['device-loss', 'nonfinite-output'])(
     'retains completed middle regions when a later GPU window has %s',
     async (failure) => {
+      runtime.fast = true // Exercise fallback ownership; frontend parity is tested separately.
       // The first song window succeeds; only the second encounters a driver failure.
       if (failure === 'device-loss') runtime.failGpuAfter = 2
       else runtime.nonfiniteGpuAfter = 2
@@ -761,7 +1034,7 @@ describe('Beat This! worker lifecycle and inference validation', () => {
     expect(runtime.env.wasm.numThreads).toBe(1)
     expect(runtime.env.wasm.proxy).toBe(false)
     expect(runtime.env.wasm.wasmPaths).toEqual(request.wasmPaths)
-    expect(runtime.env.wasm.wasmBinary).toEqual(new Uint8Array(request.wasmBinary))
+    expect(runtime.env.wasm.wasmBinary).toEqual(new Uint8Array(request.wasmBinary!))
     expect(runtime.inputs[0]!.dims).toEqual([1, 1500, 128])
     expect(runtime.inputs[0]!.data[129]).toBe(54 / 32)
     expect(runtime.inputs.every((input) => input.dispose.mock.calls.length === 1)).toBe(true)
@@ -831,7 +1104,7 @@ describe('Beat This! worker lifecycle and inference validation', () => {
     const worker = await loadWorker()
     worker.send(80, 50, { timeSeconds: 50, playing: false, playbackRate: 1, seeking: true })
     await flush()
-    expect(runtime.sessions[0]!.run).toHaveBeenCalledOnce()
+    expect(runtime.sessions).toHaveLength(0)
     expect(runtime.featureBatches).toHaveLength(0)
     expect(vi.getTimerCount()).toBe(0)
     worker.send(0.1)

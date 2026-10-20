@@ -107,8 +107,8 @@ describe('Beat This! timing with the original HPSS appearance', () => {
     const prediction = { beats: [0.5, 1, 1.5, 2], downbeats: [0.5] }
     const partial = createBeatThisPartialTimeline(basic, prediction, 2.5)!
     expect(partial.durationSeconds).toBe(4)
-    expect(partial.builtUntilSeconds).toBeCloseTo(2 - 1 / 60)
-    expect(partial.levels[0].length).toBe(120)
+    expect(partial.builtUntilSeconds).toBeCloseTo(2 - 0.05 - 1 / 60)
+    expect(partial.levels[0].length).toBe(117)
     expect(sampleBeatTimeline(partial, 1, 1).level).toBeGreaterThan(0)
     expect(sampleBeatTimeline(partial, 2.1, 1)).toEqual({ level: 0, sustain: 0 })
     const complete = blendBeatThisTimeline(basic, {
@@ -129,6 +129,21 @@ describe('Beat This! timing with the original HPSS appearance', () => {
     expect(createBeatThisPartialTimeline(baseline(), { beats: [0], downbeats: [] }, 0.1)).toBeNull()
   })
 
+  it('does not publish the last corrected beat before its future release is known', () => {
+    const basic = baseline()
+    basic.levels[3][117] = 0.8 // Last prediction at 2s corrects 50ms earlier.
+    const partial = createBeatThisPartialTimeline(basic, { beats: [1.5, 2], downbeats: [] }, 2.5)!
+    const complete = blendBeatThisTimeline(basic, {
+      beats: [1.5, 2, 2.8],
+      downbeats: [],
+    })
+    expect(partial.builtUntilSeconds).toBeLessThan(1.95)
+    partial.levels.forEach((values, index) =>
+      expect(values).toEqual(complete.levels[index]!.slice(0, values.length)),
+    )
+    expect(complete.levels[1][117]).toBeCloseTo(0.8)
+  })
+
   it('stays dark on silent audio even if the model hallucinates a regular beat grid', () => {
     const basic = baseline()
     const result = blendBeatThisTimeline(basic, { beats: [0, 0.5, 1, 1.5, 2], downbeats: [0] })
@@ -136,24 +151,148 @@ describe('Beat This! timing with the original HPSS appearance', () => {
     expect(result.sustain).toBe(basic.sustain)
   })
 
-  it('aligns flashes to model time, preserves relative DSP strengths and four densities', () => {
+  it('refines model time to sharp rises, preserving relative DSP strengths and four densities', () => {
     const basic = baseline()
-    // The legacy detector peaks 33ms after each model beat.
+    // Sharp envelope rises land 33ms after the model beat, within the correction limit.
     basic.levels[3][32] = 0.3
     basic.levels[3][62] = 0.8
     basic.levels[3][92] = 0.5
     basic.levels[3][47] = 0.45 // real offbeat near 0.75s
     const original = basic.levels[3].slice()
     const result = blendBeatThisTimeline(basic, { beats: [0.5, 1, 1.5], downbeats: [0.5] })
-    expect(result.levels[1][30]).toBeCloseTo(0.3 * 1.12)
-    expect(result.levels[1][60]).toBeCloseTo(0.8)
-    expect(result.levels[1][29]).toBe(0)
-    expect(result.levels[1][31]).toBeLessThan(result.levels[1][30]!)
+    expect(result.levels[1][32]).toBeCloseTo(0.3 * 1.12)
+    expect(result.levels[1][62]).toBeCloseTo(0.8)
+    expect(result.levels[1][31]).toBe(0)
+    expect(result.levels[1][33]).toBeLessThan(result.levels[1][32]!)
     expect(result.levels[0][60]).toBeLessThan(0.1) // second beat is skipped at 0.5×
-    expect(result.levels[2][45]).toBeCloseTo(0.45)
-    expect(result.levels[1][45]).toBeLessThan(result.levels[2][45]!)
+    expect(result.levels[2][47]).toBeCloseTo(0.45)
+    expect(result.levels[1][47]).toBeLessThan(result.levels[2][47]!)
     expect(new Set(result.levels.map((values) => values.buffer)).size).toBe(4)
     expect(basic.levels[3]).toEqual(original)
+  })
+
+  it.each([57, 63])('moves a model beat to the reliable nearby rise at frame %i', (frame) => {
+    const basic = baseline()
+    for (let index = frame; index < 100; index += 1)
+      basic.levels[3][index] = 0.8 * Math.exp(-(index - frame) / 10)
+    const result = blendBeatThisTimeline(basic, { beats: [1], downbeats: [1] })
+    expect(result.levels[1][frame - 1]).toBe(0)
+    expect(result.levels[1][frame]).toBeCloseTo(0.8 * 1.12)
+    expect(result.levels[1][frame + 1]).toBeLessThan(result.levels[1][frame]!)
+  })
+
+  it('keeps model timing without a reliable rise, including slow attacks and long decay tails', () => {
+    const steady = baseline()
+    steady.levels[3].fill(0.6)
+    const slowAttack = baseline()
+    for (let frame = 54; frame <= 70; frame += 1) slowAttack.levels[3][frame] = (frame - 54) * 0.05
+    const decay = baseline()
+    for (let frame = 40; frame < 100; frame += 1)
+      decay.levels[3][frame] = Math.exp(-(frame - 40) / 40)
+    for (const basic of [steady, slowAttack, decay]) {
+      const result = blendBeatThisTimeline(basic, { beats: [1], downbeats: [] })
+      expect(result.levels[1][59]).toBe(0)
+      expect(result.levels[1][60]).toBeGreaterThan(0)
+      expect(result.levels[1][61]).toBeLessThan(result.levels[1][60]!)
+    }
+  })
+
+  it('keeps sharp transients outside the correction radius from moving a model beat', () => {
+    const basic = baseline()
+    basic.levels[3].fill(0.2)
+    basic.levels[3][56] = 0.8 // 66.7ms early, outside the permitted window.
+    const result = blendBeatThisTimeline(basic, { beats: [1], downbeats: [] })
+    expect(result.levels[1][59]).toBe(0)
+    expect(result.levels[1][60]).toBeCloseTo(0.2)
+  })
+
+  it('does not choose arbitrarily between equally plausible transients but accepts a clear one', () => {
+    const basic = baseline()
+    basic.levels[3][58] = 0.7
+    basic.levels[3][62] = 0.7
+    const ambiguous = blendBeatThisTimeline(basic, { beats: [1], downbeats: [] })
+    expect(ambiguous.levels[1][59]).toBe(0)
+    expect(ambiguous.levels[1][60]).toBeCloseTo(0.7)
+    basic.levels[3][62] = 0.2
+    const clear = blendBeatThisTimeline(basic, { beats: [1], downbeats: [] })
+    expect(clear.levels[1][57]).toBe(0)
+    expect(clear.levels[1][58]).toBeCloseTo(0.7)
+  })
+
+  it('keeps onset ownership and downbeat parity when adjacent predictions are unusually close', () => {
+    const basic = baseline()
+    basic.levels[3][60] = 0.7
+    basic.levels[3][64] = 0.4
+    const result = blendBeatThisTimeline(basic, {
+      beats: [1.03, 0.97, 0.97, 1.5],
+      downbeats: [1.03],
+    })
+    // The midpoint transient belongs to neither beat; it must not collapse both
+    // predictions into a single onset. Sorting/deduplication retains downbeat identity.
+    expect(result.levels[1][58]).toBeGreaterThan(0)
+    expect(result.levels[1][64]).toBeGreaterThan(result.levels[1][63]!)
+    expect(result.levels[0][64]).toBeGreaterThan(result.levels[0][63]!)
+  })
+
+  it('never treats missing range context as an onset or carries pulses through unbuilt holes', () => {
+    const basic = baseline()
+    basic.completedRanges = [
+      { startSeconds: 1, endSeconds: 1.3 },
+      { startSeconds: 2, endSeconds: 2.5 },
+    ]
+    basic.levels[3].fill(0.9)
+    basic.levels[3][59] = 0 // Unavailable preceding sample cannot imply an onset at the boundary.
+    const result = blendBeatThisTimeline(basic, {
+      beats: [0.97, 1.03, 1.28, 1.98],
+      downbeats: [],
+    })
+    expect(result.levels[1][60]).toBe(0)
+    expect(result.levels[1][62]).toBeCloseTo(0.9)
+    expect(result.levels[1].slice(79, 120).every((value) => value === 0)).toBe(true)
+    expect(result.levels[1].slice(120).every((value) => value === 0)).toBe(true)
+  })
+
+  it('keeps corrected seam pulses identical across window completion and checkpoint order', () => {
+    const windows = beatThisWindows(3251, 65)
+    const createPart = (
+      startSeconds: number,
+      endSeconds: number,
+      modelBeat: number,
+    ): BeatTimeline => {
+      const basic = createBeatTimelineBuffer(65)
+      basic.completedRanges = [{ startSeconds, endSeconds }]
+      for (let frame = 1441; frame < 1480; frame += 1)
+        basic.levels[3][frame] = 0.8 * Math.exp(-(frame - 1441) / 10)
+      return blendBeatThisTimeline(basic, {
+        beats: [23.5, modelBeat, 24.5],
+        downbeats: [modelBeat],
+      })
+    }
+    // Both model windows resolve to the same observed sharp rise at 24.0167s.
+    const left = createPart(0, 30, 24)
+    const right = createPart(21, 51, 24.04)
+    const forward = createBeatThisTimelineAssembler(65, windows)
+    forward.add(windows[0]!, left)
+    expect(sampleBeatTimeline(forward.timeline, 24, 1).level).toBe(0)
+    const saved = createBeatCheckpoint(
+      { sampleRate: 22050, sampleCount: 22050 * 65, channels: 1, modelId: 'small' },
+      forward.timeline,
+      new Set([0]),
+      100,
+      forward.snapshotSeams(),
+    )
+    const resumed = createBeatThisTimelineAssembler(65, windows, saved)
+    forward.add(windows[1]!, right)
+    resumed.add(windows[1]!, right)
+    const reverse = createBeatThisTimelineAssembler(65, windows)
+    reverse.add(windows[1]!, right)
+    reverse.add(windows[0]!, left)
+    expect(forward.timeline).toEqual(resumed.timeline)
+    expect(forward.timeline).toEqual(reverse.timeline)
+    const values = forward.timeline.levels[1]
+    expect(values[1440]).toBe(0)
+    expect(values[1441]).toBeCloseTo(0.8 * 1.12)
+    expect(values[1442]).toBeLessThan(values[1441]!)
   })
 
   it('does not fabricate higher-density subdivisions from the decay of one drum hit', () => {

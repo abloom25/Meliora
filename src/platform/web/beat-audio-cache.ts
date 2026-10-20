@@ -1,9 +1,11 @@
 export interface BeatAudioData {
   channels: Float32Array<ArrayBuffer>[]
   sampleRate: number
+  identity?: string
 }
 
 export interface BeatAudioCache {
+  protectPcm(source: string | null): void
   /** Removes the entry: its buffers may now be transferred to a worker. */
   takePcm(source: string): BeatAudioData | undefined
   putPcm(source: string, audio: BeatAudioData): void
@@ -63,6 +65,7 @@ export function createBeatAudioCache(
   )
     throw new Error('音频缓存容量无效')
   const pcm = new Map<string, Entry<BeatAudioData>>()
+  let protectedSource: string | null = null
   const encoded = new Map<string, Entry<ArrayBuffer>>()
   const bytesIn = <T>(entries: Map<string, Entry<T>>): number =>
     [...entries.values()].reduce((total, entry) => total + entry.bytes, 0)
@@ -76,13 +79,17 @@ export function createBeatAudioCache(
     if (!source || !bytes || bytes > maximum || maximumEntries === 0) return
     entries.delete(source)
     while (entries.size >= maximumEntries || bytesIn(entries) + bytes > maximum) {
-      const oldest = entries.keys().next().value
+      const oldest = [...entries.keys()].find((key) => entries !== pcm || key !== protectedSource)
       if (oldest === undefined) break
       entries.delete(oldest)
     }
+    if (entries.size >= maximumEntries || bytesIn(entries) + bytes > maximum) return
     entries.set(source, { value, bytes })
   }
   return {
+    protectPcm(source): void {
+      protectedSource = source
+    },
     takePcm(source): BeatAudioData | undefined {
       const entry = pcm.get(source)
       pcm.delete(source)
@@ -93,7 +100,7 @@ export function createBeatAudioCache(
       insert(
         pcm,
         source,
-        { channels: [...audio.channels], sampleRate: audio.sampleRate },
+        { channels: [...audio.channels], sampleRate: audio.sampleRate, identity: audio.identity },
         pcmBytes(audio),
         maximumPcm,
       )

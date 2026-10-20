@@ -1,18 +1,31 @@
 import {
   beatRangesDuration,
   normalizeBeatRanges,
+  createBeatTimelineBuffer,
   type BeatBuildStatus,
   type BeatTimeline,
   type BeatTimeRange,
 } from '../../core/analysis/beat-timeline'
-import type { BeatPreanalysisResponse } from '../../core/analysis/beat-preanalysis-protocol'
-import type { BeatThisModelId } from '../../core/analysis/beat-this-models'
-import type { BeatThisBuildRequest } from '../../core/analysis/beat-this-protocol'
-import type { BeatPlaybackState } from '../../core/analysis/beat-scheduling'
-import type { BeatAnalysisCheckpoint } from '../../core/analysis/beat-checkpoint'
+import type {
+  BeatAnalysisMetrics,
+  BeatPreanalysisResponse,
+} from '../../core/analysis/beat-preanalysis-protocol'
+import { BEAT_THIS_MODELS, type BeatThisModelId } from '../../core/analysis/beat-this-models'
+import type { BeatThisModelAssets } from '../../core/analysis/beat-this-protocol'
+import { continuousBeatCoverage, type BeatPlaybackState } from '../../core/analysis/beat-scheduling'
+import {
+  createBeatCheckpoint,
+  validateBeatCheckpoint,
+  type BeatAnalysisCheckpoint,
+} from '../../core/analysis/beat-checkpoint'
+import { beatThisWindows } from '../../core/analysis/beat-this-prediction'
+import { BEAT_THIS_FPS } from '../../core/analysis/beat-this-features'
 import { httpFetch, type HttpFetcher } from '../../services/http'
 import { readBeatThisModel } from './useBeatThisModels'
 import { createBeatAudioCache, type BeatAudioCache, type BeatAudioData } from './beat-audio-cache'
+import { acquireBeatModelSession, type BeatWorkerLease } from './beat-worker-pool'
+import { beatResultCache, BEAT_RESULT_VERSION, type BeatResultStore } from './beat-result-cache'
+import { validPersistentCheckpoint } from '../../core/analysis/beat-result-cache'
 
 const FETCH_TIMEOUT_MS = 120_000
 const DECODE_TIMEOUT_MS = 45_000
@@ -25,6 +38,40 @@ const COPY_CHUNK_SAMPLES = 262144
 type AudioDecoder = (encoded: ArrayBuffer) => Promise<AudioBuffer>
 const decoderQueues = new WeakMap<AudioDecoder, Promise<void>>()
 const sharedAudioCache = createBeatAudioCache()
+let audioSequence = 0
+const audioNamespace = Math.random().toString(36).slice(2)
+const persistenceContexts = new Map<
+  string,
+  { key: string; trackKey: string; generation: number; store: BeatResultStore }
+>()
+
+/** Saves an already computed short song when its second listen qualifies after analysis finished. */
+export function persistKnownBeatCheckpoint(
+  source: string,
+  trackKey: string,
+  checkpoint: BeatAnalysisCheckpoint,
+): void {
+  const context = persistenceContexts.get(JSON.stringify([source, checkpoint.signature.modelId]))
+  if (context?.trackKey === trackKey && context.generation === context.store.generation)
+    void context.store.set(context.key, trackKey, checkpoint, context.generation).catch(() => {})
+}
+
+export function protectBeatAudioSource(source: string | null): void {
+  sharedAudioCache.protectPcm(source)
+}
+
+/** Resident buffers only; excludes the current worker, model and browser media buffers. */
+export function readBeatAudioCacheUsage(): Pick<
+  BeatAudioCache,
+  'pcmBytes' | 'encodedBytes' | 'pcmEntries' | 'encodedEntries'
+> {
+  return {
+    pcmBytes: sharedAudioCache.pcmBytes,
+    encodedBytes: sharedAudioCache.encodedBytes,
+    pcmEntries: sharedAudioCache.pcmEntries,
+    encodedEntries: sharedAudioCache.encodedEntries,
+  }
+}
 
 export type BeatTimelineBuilder = (
   source: string,
@@ -34,10 +81,17 @@ export type BeatTimelineBuilder = (
 ) => Promise<BeatTimeline>
 
 export interface BeatPreanalysisDependencies {
+  persistent?: { trackKey: string; eligible: () => boolean }
+  resultCache?: BeatResultStore
   /** Read from the active media element before requesting a full-file decode. */
   durationSeconds?: number
   modelId?: BeatThisModelId
+  onMetrics?: (metrics: BeatAnalysisMetrics) => void
+  /** Test/custom worker factories remain isolated unless explicitly opted in. */
+  reuseModelSession?: boolean
   onPartial?: (timeline: BeatTimeline) => void
+  /** Temporary basic output; must not enter model coverage, cache, or checkpoints. */
+  onPreview?: (timeline: BeatTimeline) => void
   checkpoint?: BeatAnalysisCheckpoint
   onCheckpoint?: (checkpoint: BeatAnalysisCheckpoint) => void
   getBufferSeconds?: () => number
@@ -49,10 +103,7 @@ export interface BeatPreanalysisDependencies {
   getPlaybackState?: () => BeatPlaybackState
   /** Retarget pending windows without reloading audio, the model, or completed results. */
   subscribePriority?: (listener: (playback: BeatPlaybackState) => void) => () => void
-  readModel?: (
-    id: BeatThisModelId,
-    signal: AbortSignal,
-  ) => Promise<Pick<BeatThisBuildRequest, 'model' | 'filterbank' | 'wasmBinary' | 'wasmPaths'>>
+  readModel?: (id: BeatThisModelId, signal: AbortSignal) => Promise<BeatThisModelAssets>
   fetcher?: HttpFetcher
   decode?: AudioDecoder
   createWorker?: () => Worker
@@ -64,6 +115,17 @@ export interface BeatPreanalysisDependencies {
 
 function abortError(): DOMException {
   return new DOMException('Aborted', 'AbortError')
+}
+
+async function fingerprint(encoded: ArrayBuffer): Promise<string | null> {
+  try {
+    const digest = await globalThis.crypto?.subtle?.digest('SHA-256', encoded)
+    return digest
+      ? `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`
+      : null
+  } catch {
+    return null
+  }
 }
 
 /** Native decoding cannot be interrupted, so detach its late result after cancellation. */
@@ -273,28 +335,40 @@ function analyse(
   signal: AbortSignal,
   onProgress: (progress: number, activeRange?: BeatTimeRange) => void,
   dependencies: BeatPreanalysisDependencies,
-  model?: Pick<BeatThisBuildRequest, 'model' | 'filterbank' | 'wasmBinary' | 'wasmPaths'>,
+  model?: BeatThisModelAssets,
   onAudioReturned?: (audio: BeatAudioData) => void,
+  lease?: BeatWorkerLease,
+  started = performance.now(),
+  audioIdentity?: string,
 ): Promise<BeatTimeline> {
   return new Promise<BeatTimeline>((resolve, reject) => {
+    const signature = {
+      sampleRate,
+      sampleCount: channels[0]!.length,
+      channels: channels.length,
+      modelId: dependencies.modelId ?? ('basic' as const),
+    }
     signal.throwIfAborted()
     if (!dependencies.createWorker && typeof Worker === 'undefined') {
       reject(new Error('此浏览器无法在后台构建高亮，播放不受影响'))
       return
     }
-    const worker = dependencies.createWorker
-      ? dependencies.createWorker()
-      : model
-        ? new Worker(new URL('../../workers/beat-this.worker.ts', import.meta.url), {
-            type: 'module',
-          })
-        : new Worker(new URL('../../workers/beat-preanalysis.worker.ts', import.meta.url), {
-            type: 'module',
-          })
+    const worker =
+      lease?.worker ??
+      (dependencies.createWorker
+        ? dependencies.createWorker()
+        : dependencies.modelId
+          ? new Worker(new URL('../../workers/beat-this.worker.ts', import.meta.url), {
+              type: 'module',
+            })
+          : new Worker(new URL('../../workers/beat-preanalysis.worker.ts', import.meta.url), {
+              type: 'module',
+            }))
+    lease?.attach(worker)
     let settled = false
     let unsubscribePriority: (() => void) | undefined
     let unsubscribeYield: (() => void) | undefined
-    const finish = (action: () => void): void => {
+    const finish = (action: () => void, keepSession = false): void => {
       if (settled) return
       settled = true
       window.clearTimeout(timer)
@@ -304,18 +378,22 @@ function analyse(
       worker.onmessage = null
       worker.onerror = null
       worker.onmessageerror = null
-      worker.terminate()
+      if (lease) lease.release(keepSession)
+      else worker.terminate()
       action()
     }
     const abort = (): void => finish(() => reject(abortError()))
     const timer = window.setTimeout(
       () => finish(() => reject(new Error('高亮构建超时，可稍后重试'))),
-      dependencies.analysisTimeoutMs ?? (model ? MODEL_ANALYSIS_TIMEOUT_MS : ANALYSIS_TIMEOUT_MS),
+      dependencies.analysisTimeoutMs ??
+        (dependencies.modelId ? MODEL_ANALYSIS_TIMEOUT_MS : ANALYSIS_TIMEOUT_MS),
     )
     signal.addEventListener('abort', abort, { once: true })
     const receive = (message: BeatPreanalysisResponse): void => {
       if (settled) return
-      if (message.type === 'progress') {
+      if (message.type === 'preview') {
+        dependencies.onPreview?.(message.timeline)
+      } else if (message.type === 'progress') {
         if (Number.isFinite(message.progress))
           onProgress(Math.max(0, Math.min(1, message.progress)), message.activeRange)
       } else if (message.type === 'partial') {
@@ -323,7 +401,7 @@ function analyse(
         dependencies.onPartial?.(message.timeline)
         onProgress(Math.max(0, Math.min(1, message.progress)), message.activeRange)
       } else if (message.type === 'buffered') {
-        onAudioReturned?.(message.audio as BeatAudioData)
+        onAudioReturned?.({ ...message.audio, identity: audioIdentity } as BeatAudioData)
         dependencies.onCheckpoint?.(message.checkpoint)
         dependencies.onPartial?.(message.checkpoint.timeline)
         const timeline = message.checkpoint.timeline
@@ -333,10 +411,36 @@ function analyse(
             beatRangesDuration(timeline.completedRanges ?? []) / timeline.durationSeconds,
           ),
         )
-        finish(() => resolve(timeline))
+        dependencies.onMetrics?.({
+          initializationMs: 0,
+          inferenceMs: 0,
+          sessionReused: false,
+          ...message.metrics,
+          totalMs: performance.now() - started,
+        })
+        finish(() => resolve(timeline), !!message.metrics?.backend)
       } else if (message.type === 'complete') {
-        if (message.audio) onAudioReturned?.(message.audio as BeatAudioData)
-        finish(() => resolve(message.timeline))
+        if (message.audio)
+          onAudioReturned?.({ ...message.audio, identity: audioIdentity } as BeatAudioData)
+        const duration = signature.sampleCount / signature.sampleRate
+        const count = dependencies.modelId
+          ? beatThisWindows(Math.floor(duration * BEAT_THIS_FPS) + 1, duration).length
+          : Math.ceil(duration / 10)
+        const checkpoint = createBeatCheckpoint(
+          signature,
+          message.timeline,
+          new Set(Array.from({ length: count }, (_, index) => index)),
+          dependencies.checkpoint?.estimatedWorkMs ?? 0,
+        )
+        dependencies.onCheckpoint?.(checkpoint)
+        dependencies.onMetrics?.({
+          initializationMs: 0,
+          inferenceMs: 0,
+          sessionReused: false,
+          ...message.metrics,
+          totalMs: performance.now() - started,
+        })
+        finish(() => resolve(message.timeline), !!message.metrics?.backend)
       } else if (message.type === 'error') {
         finish(() =>
           reject(
@@ -367,12 +471,15 @@ function analyse(
           type: 'build',
           channels,
           sampleRate,
+          audioIdentity,
           prioritySeconds: dependencies.getPrioritySeconds?.() ?? 0,
           playback: dependencies.getPlaybackState?.(),
           checkpoint: dependencies.checkpoint,
           bufferSeconds: dependencies.getBufferSeconds?.(),
           maxWindows: dependencies.maxWindows,
-          ...(model ? { ...model, modelId: dependencies.modelId } : {}),
+          ...(dependencies.modelId
+            ? { ...model, modelId: dependencies.modelId, retainSession: !!lease }
+            : {}),
         },
         transfer,
       )
@@ -414,7 +521,7 @@ async function decodeChannels(
   encoded: ArrayBuffer,
   signal: AbortSignal,
   dependencies: BeatPreanalysisDependencies,
-): Promise<{ channels: Float32Array<ArrayBuffer>[]; sampleRate: number }> {
+): Promise<BeatAudioData> {
   const decodeController = new AbortController()
   const abort = (): void => decodeController.abort()
   signal.addEventListener('abort', abort, { once: true })
@@ -439,7 +546,11 @@ async function decodeChannels(
   signal.throwIfAborted()
   const channels = await copyChannels(audio, signal)
   // The decoder's full multichannel buffer leaves scope before starting the worker job.
-  return { channels, sampleRate: audio.sampleRate }
+  return {
+    channels,
+    sampleRate: audio.sampleRate,
+    identity: `memory:${audioNamespace}:${++audioSequence}`,
+  }
 }
 
 export async function buildBeatTimeline(
@@ -448,6 +559,7 @@ export async function buildBeatTimeline(
   onStatus: (status: BeatBuildStatus) => void,
   dependencies: BeatPreanalysisDependencies = {},
 ): Promise<BeatTimeline> {
+  const started = performance.now()
   const savedTimeline = dependencies.checkpoint?.timeline
   let completedRanges: BeatTimeRange[] = savedTimeline
     ? normalizeBeatRanges(
@@ -486,79 +598,386 @@ export async function buildBeatTimeline(
   if (duration > MAX_DURATION_SECONDS || duration * 48000 * 2 > MAX_PCM_SAMPLES) {
     throw new Error('这首歌曲过长，已跳过高亮构建，播放不受影响')
   }
-  let model:
-    | Pick<BeatThisBuildRequest, 'model' | 'filterbank' | 'wasmBinary' | 'wasmPaths'>
-    | undefined
-  if (dependencies.modelId) {
-    update('loading-model')
-    const readModel = dependencies.readModel ?? readBeatThisModel
-    model = await readModel(dependencies.modelId, signal)
-    signal.throwIfAborted()
-  }
   const audioCache = dependencies.audioCache ?? sharedAudioCache
+  const resultCache = dependencies.resultCache ?? beatResultCache.store
+  const persistenceGeneration = resultCache.generation
+  const persistent = dependencies.persistent
+  const preparation = new AbortController()
+  const abortPreparation = (): void => preparation.abort()
+  signal.addEventListener('abort', abortPreparation, { once: true })
   let audio = audioCache.takePcm(source)
-  if (!audio) {
-    let encoded = audioCache.readEncoded(source)
-    if (encoded && encoded.byteLength > (dependencies.maxAudioBytes ?? MAX_AUDIO_BYTES)) {
-      audioCache.delete(source)
+  let encoded: ArrayBuffer | undefined
+  let identity = audio?.identity
+  let persistenceKey: string | null = null
+  let lease: BeatWorkerLease | undefined
+  let sourcePreparation: Promise<void> | undefined
+  let checkpoint = dependencies.checkpoint
+  let restoredFromDisk = false
+  const preparationMetrics: Pick<
+    BeatAnalysisMetrics,
+    | 'fetchMs'
+    | 'hashMs'
+    | 'cacheReadMs'
+    | 'decodeMs'
+    | 'modelPreparationMs'
+    | 'cacheReadyMs'
+    | 'cacheOrigin'
+    | 'cacheOnly'
+    | 'encodedBytes'
+    | 'pcmBytes'
+  > = {
+    fetchMs: 0,
+    hashMs: 0,
+    cacheReadMs: 0,
+    decodeMs: 0,
+    modelPreparationMs: 0,
+    cacheOrigin: 'none',
+    cacheOnly: false,
+    encodedBytes: 0,
+    pcmBytes: audio
+      ? [...new Set(audio.channels.map((channel) => channel.buffer))].reduce(
+          (sum, buffer) => sum + buffer.byteLength,
+          0,
+        )
+      : 0,
+  }
+  const publishPartial = (timeline: BeatTimeline): void => {
+    completedRanges = normalizeBeatRanges(
+      timeline.completedRanges ?? [
+        { startSeconds: 0, endSeconds: timeline.builtUntilSeconds ?? timeline.durationSeconds },
+      ],
+      timeline.durationSeconds,
+    )
+    availableSeconds = beatRangesDuration(completedRanges)
+    durationSeconds = timeline.durationSeconds
+    dependencies.onPartial?.(timeline)
+  }
+  const canRestore = (): boolean =>
+    persistenceGeneration === resultCache.generation && !!persistent?.eligible()
+  const registerPersistence = (): void => {
+    persistenceKey =
+      persistent && identity?.startsWith('sha256:')
+        ? JSON.stringify([
+            BEAT_RESULT_VERSION,
+            persistent.trackKey,
+            dependencies.modelId ? BEAT_THIS_MODELS[dependencies.modelId].version : 'basic',
+            identity,
+          ])
+        : null
+    if (!persistenceKey || !persistent) return
+    const contextKey = JSON.stringify([source, dependencies.modelId ?? 'basic'])
+    persistenceContexts.delete(contextKey)
+    persistenceContexts.set(contextKey, {
+      key: persistenceKey,
+      trackKey: persistent.trackKey,
+      generation: persistenceGeneration,
+      store: resultCache,
+    })
+    while (persistenceContexts.size > 6)
+      persistenceContexts.delete(persistenceContexts.keys().next().value!)
+  }
+  const hashEncoded = async (bytes: ArrayBuffer): Promise<void> => {
+    const hashStarted = performance.now()
+    try {
+      const hash = await cancellable(
+        () => fingerprint(bytes),
+        preparation.signal,
+        30_000,
+        '音频校验超时',
+      )
+      preparation.signal.throwIfAborted()
+      if (hash) identity = hash
+    } catch (error) {
+      if (preparation.signal.aborted) throw error
+      // Without a verifiable digest the normal in-memory build remains available.
+    } finally {
+      preparationMetrics.hashMs = performance.now() - hashStarted
+    }
+  }
+  const prepareSource = (): Promise<void> => {
+    sourcePreparation ??= (async () => {
+      preparation.signal.throwIfAborted()
+      if (audio) {
+        if (persistent && !identity?.startsWith('sha256:')) {
+          const cachedEncoded = audioCache.readEncoded(source)
+          if (cachedEncoded) {
+            preparationMetrics.encodedBytes = cachedEncoded.byteLength
+            await hashEncoded(cachedEncoded)
+            audio.identity = identity
+          }
+        }
+        registerPersistence()
+        return
+      }
+      encoded = audioCache.readEncoded(source)
+      if (encoded && encoded.byteLength > (dependencies.maxAudioBytes ?? MAX_AUDIO_BYTES)) {
+        audioCache.delete(source)
+        encoded = undefined
+      }
+      if (!encoded) {
+        update('fetching')
+        const fetchStarted = performance.now()
+        try {
+          encoded = await readAudio(
+            source,
+            preparation.signal,
+            (progress) => update('fetching', progress),
+            dependencies,
+          )
+        } finally {
+          preparationMetrics.fetchMs = performance.now() - fetchStarted
+        }
+        preparation.signal.throwIfAborted()
+        audioCache.putEncoded(source, encoded)
+      }
+      preparationMetrics.encodedBytes = encoded.byteLength
+      // decodeAudioData may detach its input. Verify the exact complete bytes first.
+      if (persistent) await hashEncoded(encoded)
+      registerPersistence()
+    })()
+    return sourcePreparation
+  }
+  const decodeSource = async (): Promise<void> => {
+    await prepareSource()
+    preparation.signal.throwIfAborted()
+    if (audio) return
+    update('decoding')
+    const decodeStarted = performance.now()
+    try {
+      audio = await decodeChannels(encoded!, preparation.signal, dependencies)
+      if (identity) audio.identity = identity
+      identity = audio.identity
+      preparationMetrics.pcmBytes = [
+        ...new Set(audio.channels.map((channel) => channel.buffer)),
+      ].reduce((sum, buffer) => sum + buffer.byteLength, 0)
+    } catch (error) {
+      // Cancelled siblings preserve compressed audio; malformed audio is retried fresh.
+      if (!preparation.signal.aborted) audioCache.delete(source)
+      throw error
+    } finally {
+      preparationMetrics.decodeMs = performance.now() - decodeStarted
       encoded = undefined
     }
-    if (!encoded) {
-      update('fetching')
-      encoded = await readAudio(
-        source,
-        signal,
-        (progress) => update('fetching', progress),
-        dependencies,
-      )
-      signal.throwIfAborted()
-      audioCache.putEncoded(source, encoded)
-    }
-    update('decoding')
+  }
+  const matchesAudio = (saved: BeatAnalysisCheckpoint): boolean => {
+    if (!audio) return true
     try {
-      audio = await decodeChannels(encoded, signal, dependencies)
-    } catch (error) {
-      // Interrupted native work can retry from the encoded copy. Invalid files
-      // should be fetched again on an explicit retry instead of poisoning cache.
-      if (!signal.aborted) audioCache.delete(source)
-      throw error
+      const decodedDuration = audio.channels[0]!.length / audio.sampleRate
+      validateBeatCheckpoint(
+        saved,
+        {
+          sampleRate: audio.sampleRate,
+          sampleCount: audio.channels[0]!.length,
+          channels: audio.channels.length,
+          modelId: dependencies.modelId ?? 'basic',
+        },
+        dependencies.modelId
+          ? beatThisWindows(Math.floor(decodedDuration * BEAT_THIS_FPS) + 1, decodedDuration).length
+          : Math.ceil(decodedDuration / 10),
+      )
+      return true
+    } catch {
+      return false
     }
   }
-  const { channels, sampleRate } = audio
+  const matchesCache = (saved: BeatAnalysisCheckpoint, checkMetadata = true): boolean =>
+    validPersistentCheckpoint(saved) &&
+    saved.signature.modelId === (dependencies.modelId ?? 'basic') &&
+    // Media metadata and decoder padding can differ slightly. Content hashes are
+    // authoritative, while this rejects a stale/malformed duration before decode.
+    (!checkMetadata || Math.abs(saved.timeline.durationSeconds - duration) <= 0.25) &&
+    matchesAudio(saved)
+  const enoughCoverage = (saved: BeatAnalysisCheckpoint): boolean => {
+    const target = dependencies.getBufferSeconds?.()
+    const savedDuration = saved.timeline.durationSeconds
+    const time =
+      target === undefined
+        ? 0
+        : (dependencies.getPlaybackState?.().timeSeconds ??
+          dependencies.getPrioritySeconds?.() ??
+          0)
+    if (
+      !Number.isFinite(time) ||
+      (target !== undefined && (!Number.isFinite(target) || target < 0))
+    )
+      return false
+    const playhead = Math.max(0, Math.min(savedDuration, time))
+    return (
+      continuousBeatCoverage(
+        saved.timeline.completedRanges ?? [
+          { startSeconds: 0, endSeconds: saved.timeline.builtUntilSeconds ?? savedDuration },
+        ],
+        playhead,
+        savedDuration,
+      ) +
+        0.01 >=
+      Math.min(target ?? savedDuration, savedDuration - playhead)
+    )
+  }
+  const publishCached = (saved: BeatAnalysisCheckpoint, origin: 'memory' | 'persistent'): void => {
+    preparation.signal.throwIfAborted()
+    preparationMetrics.cacheOrigin = origin
+    preparationMetrics.cacheReadyMs = performance.now() - started
+    dependencies.onCheckpoint?.(saved)
+    preparation.signal.throwIfAborted()
+    if (origin === 'persistent' && !canRestore()) return
+    publishPartial(saved.timeline)
+    preparation.signal.throwIfAborted()
+    update(
+      enoughCoverage(saved) ? 'buffered' : 'analysing',
+      availableSeconds / saved.timeline.durationSeconds,
+    )
+  }
+  const returnCached = (saved: BeatAnalysisCheckpoint): BeatTimeline => {
+    preparation.signal.throwIfAborted()
+    dependencies.onMetrics?.({
+      initializationMs: 0,
+      inferenceMs: 0,
+      sessionReused: false,
+      ...preparationMetrics,
+      cacheOnly: true,
+      totalMs: performance.now() - started,
+    })
+    preparation.signal.throwIfAborted()
+    return saved.timeline
+  }
   try {
-    signal.throwIfAborted()
+    // In-memory checkpoints are already scoped to this source/model by the caller.
+    // Validate before taking this fast path, and never acquire an inference lease.
+    if (checkpoint && matchesCache(checkpoint, false)) {
+      registerPersistence()
+      publishCached(checkpoint, 'memory')
+      if (enoughCoverage(checkpoint)) return returnCached(checkpoint)
+    } else checkpoint = undefined
+
+    if (!checkpoint && persistent && canRestore()) {
+      await prepareSource()
+      preparation.signal.throwIfAborted()
+      if (persistenceKey && canRestore()) {
+        const readStarted = performance.now()
+        let restored: BeatAnalysisCheckpoint | null = null
+        try {
+          restored = await cancellable(
+            () => resultCache.get(persistenceKey!),
+            preparation.signal,
+            2000,
+            '节拍缓存读取超时',
+          )
+        } catch (error) {
+          if (preparation.signal.aborted) throw error
+        } finally {
+          preparationMetrics.cacheReadMs = performance.now() - readStarted
+        }
+        preparation.signal.throwIfAborted()
+        if (restored && canRestore() && matchesCache(restored)) {
+          checkpoint = restored
+          restoredFromDisk = true
+          publishCached(restored, 'persistent')
+          if (canRestore() && enoughCoverage(restored)) return returnCached(restored)
+        }
+      }
+    }
+    preparation.signal.throwIfAborted()
+    let modelReady = !dependencies.modelId
+    const prepareModel = async (): Promise<BeatThisModelAssets | undefined> => {
+      preparation.signal.throwIfAborted()
+      if (!dependencies.modelId) return undefined
+      const modelStarted = performance.now()
+      try {
+        update('loading-model')
+        if (
+          dependencies.reuseModelSession ??
+          (!dependencies.createWorker && !dependencies.readModel)
+        ) {
+          lease = await acquireBeatModelSession(dependencies.modelId, preparation.signal)
+          lease.signal.addEventListener('abort', abortPreparation, { once: true })
+          if (lease.signal.aborted) preparation.abort()
+          preparation.signal.throwIfAborted()
+          if (lease.ready) {
+            modelReady = true
+            return undefined
+          }
+        }
+        const readModel = dependencies.readModel ?? readBeatThisModel
+        const model = await cancellable<BeatThisModelAssets>(
+          () => readModel(dependencies.modelId!, preparation.signal),
+          preparation.signal,
+          FETCH_TIMEOUT_MS,
+          '模型读取超时，请重新尝试',
+        )
+        modelReady = true
+        return model
+      } finally {
+        preparationMetrics.modelPreparationMs = performance.now() - modelStarted
+      }
+    }
+    // Ordinary builds still overlap model preparation and audio fetch/decode.
+    // A cache candidate is resolved first so it never waits on unavailable assets.
+    const [model] = await Promise.all([
+      prepareModel(),
+      decodeSource().then(() => {
+        if (!modelReady && !preparation.signal.aborted) update('loading-model')
+      }),
+    ]).catch((error: unknown) => {
+      preparation.abort()
+      throw error
+    })
+    preparation.signal.throwIfAborted()
+    const { channels, sampleRate } = audio!
     durationSeconds = channels[0]!.length / sampleRate
+    if (checkpoint && (!matchesAudio(checkpoint) || (restoredFromDisk && !canRestore()))) {
+      checkpoint = undefined
+      preparationMetrics.cacheOrigin = 'none'
+      delete preparationMetrics.cacheReadyMs
+      // Replace a previously published partial cache if the decoder or generation
+      // invalidates it; stale coverage must not become the next resume checkpoint.
+      const empty = createBeatCheckpoint(
+        {
+          sampleRate,
+          sampleCount: channels[0]!.length,
+          channels: channels.length,
+          modelId: dependencies.modelId ?? 'basic',
+        },
+        createBeatTimelineBuffer(durationSeconds),
+        new Set(),
+        0,
+      )
+      dependencies.onCheckpoint?.(empty)
+      publishPartial(empty.timeline)
+    }
     update('analysing')
     return await analyse(
       channels,
       sampleRate,
-      signal,
+      preparation.signal,
       (progress, nextRange) => {
         activeRange = nextRange
         update('analysing', progress)
       },
       {
         ...dependencies,
-        onPartial: (timeline) => {
-          completedRanges = normalizeBeatRanges(
-            timeline.completedRanges ?? [
-              {
-                startSeconds: 0,
-                endSeconds: timeline.builtUntilSeconds ?? timeline.durationSeconds,
-              },
-            ],
-            timeline.durationSeconds,
-          )
-          availableSeconds = beatRangesDuration(completedRanges)
-          dependencies.onPartial?.(timeline)
+        checkpoint,
+        onMetrics: (metrics) => dependencies.onMetrics?.({ ...metrics, ...preparationMetrics }),
+        onCheckpoint: (next) => {
+          dependencies.onCheckpoint?.(next)
+          if (persistenceKey && persistent && canRestore() && !preparation.signal.aborted)
+            void resultCache
+              .set(persistenceKey, persistent.trackKey, next, persistenceGeneration)
+              .catch(() => {})
         },
+        onPartial: publishPartial,
       },
       model,
       (returned) => audioCache.putPcm(source, returned),
+      lease,
+      started,
+      audio!.identity,
     )
   } finally {
-    // Before dispatch (or if postMessage failed), the main thread still owns the
-    // PCM. After a successful transfer these views are detached and rejected.
-    audioCache.putPcm(source, audio)
+    signal.removeEventListener('abort', abortPreparation)
+    lease?.signal.removeEventListener('abort', abortPreparation)
+    lease?.release(false)
+    preparation.abort()
+    if (audio) audioCache.putPcm(source, audio)
   }
 }

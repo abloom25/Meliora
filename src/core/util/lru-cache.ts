@@ -10,6 +10,11 @@ export class LruCache<K, V> {
     return this.map.has(key)
   }
 
+  /** Inspect an entry without changing eviction priority. */
+  peek(key: K): V | undefined {
+    return this.map.get(key)
+  }
+
   get(key: K): V | undefined {
     if (!this.map.has(key)) return undefined
     const value = this.map.get(key)!
