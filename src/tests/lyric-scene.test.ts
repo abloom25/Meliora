@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  createLyricTimeline,
   harmonyParentsOf,
   layoutLyricLines,
   lyricFocusOffset,
@@ -98,6 +99,120 @@ describe('resolveLyricScene', () => {
     expect(sameLyricScene(resolveLyricScene(duetLines, 5.5), resolveLyricScene(duetLines, 7))).toBe(
       false,
     )
+  })
+})
+
+describe('createLyricTimeline', () => {
+  it('changes scenes at exact starts and ends while retaining overlapping voices', () => {
+    const timeline = createLyricTimeline(duetLines)
+    expect(timeline.read(-0.001).active).toEqual([])
+    expect(timeline.read(0).active).toEqual([0, 1])
+    expect(timeline.read(3).active).toEqual([0, 1, 2])
+    expect(timeline.read(5).active).toEqual([0, 1])
+    expect(timeline.read(6)).toMatchObject({ active: [1], held: true, anchor: 1 })
+    expect(timeline.read(8)).toMatchObject({ active: [3], held: false, anchor: 3 })
+    expect(timeline.read(10)).toMatchObject({ active: [4], held: false, anchor: 4 })
+    expect(timeline.read(12)).toMatchObject({ active: [3], held: true, anchor: 3 })
+  })
+
+  it('matches the scene resolver across boundaries, reverse seeks and unordered input', () => {
+    const incomplete: LyricLine[] = [
+      { time: 6, text: 'later primary first in source order' },
+      { time: 7, text: 'open-ended harmony', background: true },
+      { time: 0, endTime: 2, text: 'earlier primary later in source order' },
+      { time: null, text: 'untimed note' },
+      { time: 6, text: 'simultaneous second voice', agent: 'secondary' },
+      { time: 9, endTime: 9, text: 'zero duration' },
+      { time: 12, endTime: 10, text: 'inverted interval' },
+    ]
+    // 密集的重叠、相同时间戳、乱序与缺少结束时间混在一起,
+    // 可防止把区间集合误简化成“最后开唱的一行”。
+    const dense: LyricLine[] = Array.from({ length: 120 }, (_, index) => {
+      const time = ((index * 37) % 30) / 2
+      return {
+        time: index % 13 === 0 ? null : time,
+        endTime: index % 7 === 0 ? undefined : time + (index % 5) / 2,
+        background: index % 3 === 0,
+        text: `Line ${index}`,
+      }
+    })
+    const fixtures: LyricLine[][] = [
+      [],
+      [{ time: null, text: 'unsynchronized lyric' }],
+      duetLines,
+      incomplete,
+      dense,
+    ]
+    for (const lines of fixtures) {
+      const timeline = createLyricTimeline(lines)
+      const boundaries = lines.flatMap((line) =>
+        [line.time, line.endTime].filter((time): time is number => typeof time === 'number'),
+      )
+      const samples = [
+        -100,
+        ...boundaries.flatMap((time) => [time - 0.000001, time, time + 0.000001]),
+        100,
+      ].sort((left, right) => left - right)
+      for (const time of [...samples, ...[...samples].reverse(), 12, -10, 3.5, 7, 0, 100]) {
+        expect(timeline.read(time)).toEqual(resolveLyricScene(lines, time))
+      }
+    }
+  })
+
+  it('keeps non-finite query and lyric timestamps equivalent without poisoning its cache', () => {
+    const lines: LyricLine[] = [
+      { time: Number.NEGATIVE_INFINITY, endTime: -2, text: 'negative infinity' },
+      { time: Number.NaN, endTime: 3, text: 'invalid start', background: true },
+      { time: 0, endTime: Number.NaN, text: 'invalid end' },
+      { time: 2, text: 'open-ended' },
+      { time: 4, endTime: Number.POSITIVE_INFINITY, text: 'infinite end' },
+      { time: Number.POSITIVE_INFINITY, text: 'infinite start' },
+    ]
+    const timeline = createLyricTimeline(lines)
+    const cached = timeline.read(0.5)
+    for (const time of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(timeline.read(time)).toEqual(resolveLyricScene(lines, time))
+      expect(timeline.read(0.5)).toBe(cached)
+    }
+    for (const time of [-100, -2, 0, 2, 3, 4, 100, -1, 3, 1]) {
+      expect(timeline.read(time)).toEqual(resolveLyricScene(lines, time))
+    }
+  })
+
+  it('does not scan lyric timings again for animation frames inside the current interval', () => {
+    let timingReads = 0
+    const lines: LyricLine[] = Array.from({ length: 1000 }, (_, index) => ({
+      get time() {
+        timingReads += 1
+        return index * 10
+      },
+      get endTime() {
+        timingReads += 1
+        return index * 10 + 8
+      },
+      text: `Line ${index}`,
+    }))
+    const timeline = createLyricTimeline(lines)
+    const scene = timeline.read(5000)
+    const readsAtBoundary = timingReads
+    for (let frame = 1; frame < 480; frame += 1) {
+      expect(timeline.read(5000 + frame / 60)).toBe(scene)
+    }
+    expect(timingReads).toBe(readsAtBoundary)
+    expect(timeline.read(5008)).toMatchObject({ active: [500], held: true })
+  })
+
+  it('keeps earlier snapshots stable and rebuilds boundaries for replacement lyrics', () => {
+    const timeline = createLyricTimeline(duetLines)
+    const earlier = timeline.read(1)
+    timeline.read(11)
+    expect(earlier).toEqual(resolveLyricScene(duetLines, 1))
+    const replacement: LyricLine[] = [
+      { time: 0, endTime: 0.5, text: 'replacement first' },
+      { time: 0.5, endTime: 2, text: 'replacement second' },
+    ]
+    expect(createLyricTimeline(replacement).read(1).active).toEqual([1])
+    expect(timeline.read(1)).toEqual(earlier)
   })
 })
 

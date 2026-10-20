@@ -3,11 +3,17 @@ import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import LyricsPanel from '../components/LyricsPanel.vue'
-import { hasCachedTrackLyrics, hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
+import {
+  getLyricsSource,
+  hasCachedTrackLyrics,
+  hasTrackLyricsSource,
+  loadTrackLyrics,
+} from '../services/lyrics'
 import { usePlayerStore } from '../stores/player'
 import type { LyricLine, LyricsSnapshot, Track } from '../core/types'
 
 vi.mock('../services/lyrics', () => ({
+  getLyricsSource: vi.fn(() => null),
   hasCachedTrackLyrics: vi.fn(() => false),
   hasTrackLyricsSource: vi.fn(() => true),
   loadTrackLyrics: vi.fn(),
@@ -15,6 +21,7 @@ vi.mock('../services/lyrics', () => ({
 }))
 
 const mockedLoadTrackLyrics = vi.mocked(loadTrackLyrics)
+const mockedGetLyricsSource = vi.mocked(getLyricsSource)
 const mockedHasCachedTrackLyrics = vi.mocked(hasCachedTrackLyrics)
 const mockedHasTrackLyricsSource = vi.mocked(hasTrackLyricsSource)
 
@@ -283,6 +290,8 @@ describe('LyricsPanel', () => {
     mockedHasTrackLyricsSource.mockReturnValue(true)
     mockedLoadTrackLyrics.mockReset()
     mockedLoadTrackLyrics.mockResolvedValue(lyricsLines)
+    mockedGetLyricsSource.mockReset()
+    mockedGetLyricsSource.mockReturnValue(null)
     rafCallbacks = []
     installAnimationFrameMock()
     MockResizeObserver.instances = []
@@ -299,6 +308,78 @@ describe('LyricsPanel', () => {
   })
 
   describe('loading', () => {
+    it('renders interim lyrics and upgrades them without waiting for the final source', async () => {
+      const pending = makeDeferred<LyricLine[]>()
+      let publish!: (lines: LyricLine[]) => void
+      mockedLoadTrackLyrics.mockImplementationOnce((_track, _signal, progress) => {
+        publish = progress!
+        return pending.promise
+      })
+      const { wrapper } = await mountLyricsPanel()
+      const plainLines: LyricLine[] = [{ time: 0, text: 'Plain first' }]
+      mockedGetLyricsSource.mockImplementation((lines) =>
+        lines === plainLines ? 'meting' : lines === karaokeLines ? 'netease' : null,
+      )
+      publish(plainLines)
+      await flushVueUpdates()
+      expect(wrapper.find('.lyric-line').text()).toContain('Plain first')
+      expect(wrapper.emitted('snapshot')?.at(-1)?.[0]).toMatchObject({ source: 'meting' })
+      publish(karaokeLines)
+      await flushVueUpdates()
+      expect(wrapper.findAll('.lyric-line')).toHaveLength(karaokeLines.length)
+      expect(wrapper.emitted('snapshot')?.at(-1)?.[0]).toMatchObject({ source: 'netease' })
+      const snapshotsBefore = wrapper.emitted('snapshot')?.length
+      pending.resolve(karaokeLines)
+      await flushVueUpdates()
+      expect(wrapper.emitted('snapshot')?.length).toBe(snapshotsBefore)
+    })
+    it('clears the previous lyrics source while the next track is loading', async () => {
+      mockedGetLyricsSource.mockImplementation((lines) => (lines === lyricsLines ? 'amll' : null))
+      const { wrapper, store } = await mountReadyPanel()
+      expect(wrapper.emitted('snapshot')?.at(-1)?.[0]).toMatchObject({ source: 'amll' })
+      const pending = makeDeferred<LyricLine[]>()
+      mockedLoadTrackLyrics.mockReturnValueOnce(pending.promise)
+      store.setTracks([track, secondTrack])
+      store.selectTrack(secondTrack, [track, secondTrack])
+      await flushVueUpdates()
+      expect(wrapper.emitted('snapshot')?.at(-1)?.[0]).toMatchObject({
+        status: 'loading',
+        source: undefined,
+        lines: [],
+      })
+      pending.resolve([])
+      await flushVueUpdates()
+    })
+    it('rebuilds its timeline when interim lyrics are replaced with new timestamps', async () => {
+      const pending = makeDeferred<LyricLine[]>()
+      let publish!: (lines: LyricLine[]) => void
+      mockedLoadTrackLyrics.mockImplementationOnce((_track, _signal, progress) => {
+        publish = progress!
+        return pending.promise
+      })
+      const { wrapper, store } = await mountLyricsPanel({ currentTime: 1 })
+      publish([
+        { time: 0, text: 'First' },
+        { time: 10, text: 'Second' },
+      ])
+      await flushVueUpdates()
+      expect(wrapper.find('.lyric-line.active').text()).toBe('First')
+
+      const replacement: LyricLine[] = [
+        { time: 0, text: 'First' },
+        { time: 0.5, text: 'Second' },
+      ]
+      publish(replacement)
+      await flushVueUpdates()
+      expect(wrapper.find('.lyric-line.active').text()).toBe('Second')
+      await moveTo(store, 0.25)
+      expect(wrapper.find('.lyric-line.active').text()).toBe('First')
+      await moveTo(store, 0.75)
+      expect(wrapper.find('.lyric-line.active').text()).toBe('Second')
+      pending.resolve(replacement)
+      await flushVueUpdates()
+    })
+
     it('selects and positions the current line as soon as lyrics finish loading', async () => {
       const deferred = makeDeferred<LyricLine[]>()
       mockedLoadTrackLyrics.mockReturnValueOnce(deferred.promise)
@@ -719,6 +800,7 @@ describe('LyricsPanel', () => {
     })
 
     it('hides lyric translations from the panel and snapshot when disabled', async () => {
+      mockedGetLyricsSource.mockImplementation((lines) => (lines === lyricsLines ? 'qq' : null))
       const { wrapper, store } = await mountReadyPanel()
       await moveTo(store, 10)
 
@@ -742,6 +824,7 @@ describe('LyricsPanel', () => {
       expect(
         snapshotWithoutTranslation?.lines.find((line) => line.text === 'Line two'),
       ).not.toHaveProperty('translation')
+      expect(snapshotWithoutTranslation?.source).toBe('qq')
     })
 
     it('hides lines far outside the viewport and reveals them as they approach', async () => {

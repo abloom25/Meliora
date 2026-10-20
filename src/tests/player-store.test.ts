@@ -83,6 +83,37 @@ describe('player store', () => {
     expect(store.currentTrackId).toBe('2')
   })
 
+  it('preserves optional metadata when a progressive snapshot reuses the active object', () => {
+    const store = usePlayerStore()
+    const song: Track = {
+      ...tracks[0]!,
+      cover: '/one.jpg',
+      album: 'Album',
+      titleVersions: ['Live'],
+      shareAliases: ['legacy'],
+    }
+    store.setTracks([song])
+    store.selectTrack(song)
+    store.setTracks([song, tracks[1]!], { complete: false })
+    expect(store.currentTrack).toMatchObject({
+      cover: '/one.jpg',
+      album: 'Album',
+      titleVersions: ['Live'],
+      shareAliases: ['legacy'],
+    })
+  })
+
+  it('keeps a pending restored track id until the complete library is known', () => {
+    const store = usePlayerStore()
+    store.currentTrackId = '2'
+    store.setTracks([tracks[0]!], { complete: false })
+    expect(store.currentTrackId).toBe('2')
+    store.setTracks(tracks)
+    expect(store.currentTrack?.id).toBe('2')
+    store.setTracks([tracks[0]!])
+    expect(store.currentTrackId).toBeNull()
+  })
+
   it('syncs the queue when refreshing the library, removes deleted tracks, and preserves the active object', () => {
     const store = usePlayerStore()
     store.setTracks(tracks)

@@ -32,11 +32,14 @@
 ### 歌词体验
 
 - 📜 **逐字歌词**:接入 Apple Music 规格的逐词歌词库,英文按词、中文按字随演唱推进点亮;
-  也支持增强型 LRC、网易云 YRC 与 QQ QRC 的字级时间轴,没有逐字数据时回落为整行高亮
+  网易云与 QQ 曲目还会按歌曲 ID 获取平台原生 YRC/QRC,保留翻译与罗马音。
+  三源并行、先到先显示,优先采用 AMLL,其次平台逐字歌词,没有逐字数据时回落为整行高亮;
+  也支持增强型 LRC
 - 🎭 **对唱与和声**:对唱双声部左右分栏同时高亮,背景和声在所属句子唱到时从下沿探出、唱完收回
 - 🌊 **弹簧牵引滚动**:每行一根弹簧、沿运动方向逐行错峰起步,换行与拖动进度条都不会顿挫;
   可调弹簧松紧、字号,支持译文与罗马音
 - 🔍 **进度条歌词预览**:悬停进度条即可看到该时刻的歌词,含对唱、和声与逐字进度快照(设置中开启)
+- ℹ️ **歌曲信息**:设置中显示歌曲、歌手、专辑、时长和实际歌词来源;异步加载使用占位与淡入过渡
 - 🪟 **歌词小窗**:Document Picture-in-Picture 独立浮窗,支持在外部应用时查看歌词
 
 ### 播放控制
@@ -61,6 +64,7 @@
 ### 曲库管理
 
 - 🌐 **远程歌单**:网易云 / QQ 音乐歌单,通过 Meting API 解析
+- ⏳ **渐进加载**:已就绪的来源先显示,较慢来源继续加载,保留正在播放的曲目
 - 💾 **本地音乐**:上传音频/封面/歌词,自动合并去重
 - ⚙️ **可视化管理**:完整的 Web 管理后台,无需编辑代码
 
@@ -86,6 +90,10 @@ pnpm dev:full     # 前端 + 后端模拟(5175 + 8788)
 - `pnpm dev:full`:同时启动 Vite + Wrangler Pages Functions 本地模拟,`/api/*` 请求代理到 8788 端口,可完整测试管理后台(含 `/setup` 初始化流程)。Wrangler 使用 `.wrangler/pages-dev-static` 临时静态目录启动本地 Functions,静态页面仍由 Vite 提供,不依赖 `dist` 是否存在或是否最新。
 
 本地后端可使用开发模式(`.dev.vars` 中 `DEVELOPMENT=true`),配置和密码不持久化,重启即重置。复制 [.dev.vars.example](.dev.vars.example) 为 `.dev.vars` 并填入真实 GitHub Token、关闭 `DEVELOPMENT` 后可测试完整流程。
+
+平台原生逐字歌词使用同源 `/api/lyrics` 接口,本地测试需启动 `pnpm dev:full`。
+该接口沿用现有 API 环境检查与 `ADMIN_DISABLED` 开关;纯静态部署或 API 被关闭时,播放器仍使用 AMLL 与普通歌词。
+浏览器会缓存命中结果 24 小时、明确未命中结果 15 分钟,网络故障不记为未命中。
 
 ---
 
@@ -258,17 +266,30 @@ pnpm build        # 生产构建
 
 ```
 src/
+├── app/             应用装配与平台、服务实现接线
 ├── components/      共享 UI 组件(ConfirmModal / ToggleSwitch / Toast 等)
-├── composables/     业务 hook(useAudioPlayer / useBeatAnalyser 等)
+├── composables/     业务 hook(useAudioPlayer / usePlayerLibrary 等)
+├── core/            平台无关的音频、歌词、分析、主题与纯函数工具
+├── platform/        平台实现、设置存储与浏览器能力
+│   └── web/         Web Audio、节拍分析、歌词小窗、全屏、PWA 等
 ├── stores/          Pinia 状态管理
 ├── services/        远程 IO 抽象(Meting API / 歌词)
-├── utils/           纯函数工具(无副作用、无 DOM 依赖)
-├── workers/         Web Worker(主题色提取)
+├── router/          播放器、管理后台与 404 路由
+├── config/          音乐与歌词运行时配置取用口
+├── generated/       构建期生成的公开配置、版本与后台环境状态
+├── views/           播放器与 404 页面
+├── workers/         Web Worker(主题色提取、封面背景渲染)
 ├── admin/           管理后台(独立子应用)
 │   ├── components/  后台 UI 组件
-│   ├── views/       后台页面(Setup / Login / Dashboard / About)
-│   └── services/    后台 API 服务
-└── styles/          全局样式
+│   ├── views/       后台页面(Setup / Login / Dashboard / About / 配置迁移)
+│   ├── composables/ 后台鉴权、暂存、更新状态与消息
+│   ├── services/    后台 API 服务
+│   └── utils/       CSRF 请求管理
+├── tests/           前端单元与交互测试
+└── styles/          全局样式与播放器页面的 scoped SCSS
+
+shared/              前后端共享的配置类型、校验与规则
+scripts/             构建期配置、版本与 Service Worker 生成脚本
 
 server/              Edge Functions 后端
 ├── core/            核心逻辑(路由 / 鉴权 / 配置 / 上传)

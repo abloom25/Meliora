@@ -22,6 +22,7 @@ export {
   joinWords,
   lineWeight,
   mergeLyricTranslations,
+  mergeLyricAnnotations,
   mergeSyllablesIntoWords,
   parseLyrics,
   resolveLyricTimings,
@@ -42,6 +43,7 @@ export { looksLikeWordTimedLyrics, parseWordTimedLyrics } from './yrc'
 export { createLyricClock, type LyricClock, type LyricClockOptions } from './clock'
 
 export {
+  createLyricTimeline,
   harmonyParentsOf,
   layoutLyricLines,
   lyricFocusOffset,
@@ -52,4 +54,12 @@ export {
   type LyricLayout,
   type LyricLayoutInput,
   type LyricScene,
+  type LyricTimeline,
 } from './scene'
+
+export {
+  normalizeLyricsMetadata,
+  selectWordLyricsCandidate,
+  type WordLyricsCandidate,
+  type WordLyricsMetadata,
+} from './word-source'

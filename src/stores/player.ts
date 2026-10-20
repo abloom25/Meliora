@@ -148,17 +148,19 @@ export const usePlayerStore = defineStore('player', () => {
     carryTrackSideData = handler
   }
 
-  function setTracks(nextTracks: Track[]) {
+  function setTracks(nextTracks: Track[], options: { complete?: boolean } = {}) {
     const activeTrack = currentTrack.value ?? undefined
     const mergedTracks = activeTrack
       ? nextTracks.map((track) => {
           if (track.id !== activeTrack.id) return track
           carryTrackSideData?.(track, activeTrack)
+          // 渐进加载会复用当前对象，先复制，避免删除可选字段时连来源一起删掉。
+          const nextMetadata = { ...track }
           delete activeTrack.titleVersions
           delete activeTrack.shareAliases
           delete activeTrack.album
           delete activeTrack.cover
-          Object.assign(activeTrack, track)
+          Object.assign(activeTrack, nextMetadata)
           bumpCurrentTrackVersion()
           return activeTrack
         })
@@ -178,7 +180,11 @@ export const usePlayerStore = defineStore('player', () => {
       queue.value = syncedQueue
       bumpQueueVersion()
     }
-    if (currentTrackId.value && !mergedTrackById.has(currentTrackId.value)) {
+    if (
+      options.complete !== false &&
+      currentTrackId.value &&
+      !mergedTrackById.has(currentTrackId.value)
+    ) {
       currentTrackId.value = null
     }
   }

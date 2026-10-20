@@ -12,10 +12,13 @@ export interface MetingTrack {
 export interface MusicProviderContext {
   apiEndpoint: string
   timeoutMs: number
+  signal?: AbortSignal
 }
 
 export interface MusicProviderAdapter<TSource> {
   id: string
+  /** 无远程 IO 的适配器可批量加载，不占用网络并发槽。 */
+  requiresNetwork?: boolean
   load(source: TSource, context: MusicProviderContext): Promise<Track[]>
 }
 

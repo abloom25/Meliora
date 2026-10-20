@@ -8,7 +8,7 @@
 export interface HttpRequestInit {
   signal?: AbortSignal
   /** 与 fetch 的 cache 同义。不支持的平台可以忽略 */
-  cache?: 'default' | 'force-cache' | 'no-store' | 'reload'
+  cache?: 'default' | 'force-cache' | 'no-cache' | 'no-store' | 'reload'
 }
 
 export type HttpFetcher = (url: string, init?: HttpRequestInit) => Promise<Response>

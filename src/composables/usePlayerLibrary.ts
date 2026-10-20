@@ -40,8 +40,10 @@ export function usePlayerLibrary(options: {
   }
 
   let loadTracksRequestId = 0
+  let loadController: AbortController | null = null
   onBeforeUnmount(() => {
     loadTracksRequestId += 1
+    loadController?.abort()
   })
 
   async function loadTracks() {
@@ -49,6 +51,10 @@ export function usePlayerLibrary(options: {
     // 用单调递增的请求序号保证只有最新一次的结果落地,
     // 避免后完成的旧响应覆盖 曲库/加载状态/错误提示 等新状态。
     const requestId = ++loadTracksRequestId
+    loadController?.abort()
+    const controller = new AbortController()
+    loadController = controller
+    const progressive = store.tracks.length === 0
     loading.value = true
     sourceWarning.value = ''
     loadFailed.value = false
@@ -58,19 +64,35 @@ export function usePlayerLibrary(options: {
       runtimeConfig.value = config
       applySiteBrand(config)
       applySiteIntegrations(config)
-      const result = await loadConfiguredTracks(config)
-      if (requestId !== loadTracksRequestId) return
-      store.setTracks(result.tracks)
       const url = new URL(window.location.href)
       const sharedTrackId = url.searchParams.get('share')
-      const sharedTrack = sharedTrackId
-        ? store.tracks.find((track) => trackMatchesShareId(track, sharedTrackId))
-        : null
-      if (sharedTrack) store.selectTrack(sharedTrack, store.tracks)
-      if (sharedTrackId) {
-        url.searchParams.delete('share')
-        window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}`)
+      let shareResolved = false
+      const resolveShare = (finished: boolean) => {
+        if (!sharedTrackId || shareResolved) return
+        const sharedTrack = store.tracks.find((track) => trackMatchesShareId(track, sharedTrackId))
+        if (sharedTrack) store.selectTrack(sharedTrack, store.tracks)
+        if (sharedTrack || finished) {
+          shareResolved = true
+          url.searchParams.delete('share')
+          window.history.replaceState(
+            window.history.state,
+            '',
+            `${url.pathname}${url.search}${url.hash}`,
+          )
+        }
       }
+      const result = await loadConfiguredTracks(config, {
+        signal: controller.signal,
+        onProgress: (partial) => {
+          if (requestId !== loadTracksRequestId || !progressive || !partial.tracks.length) return
+          store.setTracks(partial.tracks, { complete: false })
+          loading.value = false
+          resolveShare(false)
+        },
+      })
+      if (requestId !== loadTracksRequestId) return
+      store.setTracks(result.tracks)
+      resolveShare(true)
       loadFailed.value = !result.tracks.length && result.failedSources > 0
       if (result.failedSources) {
         sourceWarning.value = `${result.failedSources} 个音乐源暂时无法载入`

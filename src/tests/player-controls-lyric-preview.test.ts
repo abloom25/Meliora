@@ -202,6 +202,41 @@ describe('PlayerControls lyric preview', () => {
     wrapper.unmount()
   })
 
+  it('shares one fresh track measurement per hover frame after the track moves', async () => {
+    const store = usePlayerStore()
+    store.duration = 100
+    store.settings.progressLyricPreview = true
+    const wrapper = mountProgressControls()
+    const range = wrapper.get<HTMLElement>('.range')
+    mockProgressRect(range.element)
+    const measure = vi.mocked(range.element.getBoundingClientRect)
+
+    dispatchPointerEvent(range.element, 'pointermove', { clientX: 50, clientY: 120 })
+    await waitPreviewFrame()
+    expect(measure).toHaveBeenCalledTimes(1)
+    expect(document.body.querySelector('.lyric-preview-bubble')?.textContent).toContain('0:25')
+
+    measure.mockClear()
+    measure.mockReturnValue({
+      x: 100,
+      y: 200,
+      top: 200,
+      right: 500,
+      bottom: 228,
+      left: 100,
+      width: 400,
+      height: 28,
+      toJSON: () => ({}),
+    })
+    dispatchPointerEvent(range.element, 'pointermove', { clientX: 300, clientY: 214 })
+    await waitPreviewFrame()
+    const bubble = document.body.querySelector<HTMLElement>('.lyric-preview-bubble')
+    expect(measure).toHaveBeenCalledTimes(1)
+    expect(bubble?.textContent).toContain('0:50')
+    expect(bubble?.style.translate).toBe('300px 174px')
+    wrapper.unmount()
+  })
+
   it('changes lyric preview scroll direction with pointer movement direction', async () => {
     const store = usePlayerStore()
     store.duration = 100

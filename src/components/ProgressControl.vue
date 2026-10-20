@@ -3,7 +3,7 @@
   import { storeToRefs } from 'pinia'
   import { usePlayerStore } from '../stores/player'
   import { wordEdgeSoftness, wordFillProgress } from '../core/lyrics'
-  import { harmonyParentsOf, resolveLyricScene } from '../core/lyrics'
+  import { createLyricTimeline, harmonyParentsOf } from '../core/lyrics'
   import type { LyricsSnapshot } from '../core/types'
 
   /** 气泡里的一个音节。fill / edge 是预览时刻的静态扫光快照 */
@@ -60,13 +60,16 @@
   const progress = computed(() => (duration.value ? (displayTime.value / duration.value) * 100 : 0))
   const previewLines = computed(() => props.lyricPreview?.lines ?? [])
   const previewHarmonyParents = computed(() => harmonyParentsOf(previewLines.value))
+  const previewTimeline = computed(() =>
+    createLyricTimeline(previewLines.value, previewHarmonyParents.value),
+  )
   // 预览与面板共用同一套场景解析:对唱双声部同时亮、和声按自己的时间轴、
   // 间奏保留上一句。旧实现是"最后一个开始的行",和声会把主句挤掉,
   // 唱完的句子也会一直显示成正在唱
   const previewScene = computed(() => {
     if (previewTime.value === null || props.lyricPreview?.status !== 'ready') return null
     if (!previewLines.value.length) return null
-    return resolveLyricScene(previewLines.value, previewTime.value, previewHarmonyParents.value)
+    return previewTimeline.value.read(previewTime.value)
   })
   const previewRows = computed<PreviewRow[]>(() => {
     const scene = previewScene.value
@@ -105,8 +108,7 @@
   // 间奏:这一句其实已经唱完了,只是保留着高亮。整体压暗以示区别
   const previewHeld = computed(() => previewScene.value?.held ?? false)
   const previewStyle = computed(() => ({
-    left: `${previewX.value}px`,
-    top: `${previewY.value}px`,
+    translate: `${previewX.value}px ${previewY.value}px`,
     width: previewWidth.value === null ? undefined : `${previewWidth.value}px`,
     height: previewHeight.value === null ? undefined : `${previewHeight.value}px`,
   }))
@@ -148,11 +150,14 @@
     return `-${formatTime(Math.max(0, duration.value - displayTime.value))}`
   }
 
-  function getProgressTime(track: HTMLElement, clientX: number): number | null {
+  function getProgressTime(
+    track: HTMLElement,
+    clientX: number,
+    rect = track.getBoundingClientRect(),
+  ): number | null {
     const effectiveDuration =
       draftTime.value !== null && dragLockedDuration !== null ? dragLockedDuration : duration.value
     if (!Number.isFinite(effectiveDuration) || effectiveDuration <= 0) return null
-    const rect = track.getBoundingClientRect()
     if (rect.width <= 0) return null
     const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
     return ratio * effectiveDuration
@@ -317,8 +322,7 @@
     if (measuredHeight > 0) previewHeight.value = measuredHeight
   }
 
-  function updatePreviewPosition(clientX: number, clientY: number, track: HTMLElement) {
-    const rect = track.getBoundingClientRect()
+  function updatePreviewPosition(clientX: number, clientY: number, rect: DOMRect) {
     const margin = 12
     const gap = 26
     const maxVerticalFloat = 3
@@ -382,7 +386,10 @@
       hideLyricPreview()
       return
     }
-    const nextTime = getProgressTime(track, clientX)
+    // 同一帧的时间换算与气泡定位共用几何快照,避免写入样式后再次强制布局。
+    // 每次指针更新都重新读取,窗口缩放或轨道移动后不会沿用过期位置。
+    const rect = track.getBoundingClientRect()
+    const nextTime = getProgressTime(track, clientX, rect)
     if (nextTime === null) {
       hideLyricPreview()
       return
@@ -390,12 +397,12 @@
     updatePreviewScrollDirection(nextTime)
     previewTime.value = nextTime
     previewVisible.value = true
-    updatePreviewPosition(clientX, clientY, track)
+    updatePreviewPosition(clientX, clientY, rect)
     void nextTick(() => {
       // 尺寸只在未知(重新显示)时测量;内容变化的尺寸更新由 previewContentKey watcher 覆盖,
       // hover 每帧只做位置更新,避免每帧强制同步布局
       if (previewWidth.value === null) updatePreviewSize()
-      if (previewVisible.value) updatePreviewPosition(clientX, clientY, track)
+      if (previewVisible.value) updatePreviewPosition(clientX, clientY, rect)
     })
   }
 
@@ -425,16 +432,17 @@
     ) {
       return
     }
-    const nextTime = getProgressTime(hover.track, hover.clientX)
+    const rect = hover.track.getBoundingClientRect()
+    const nextTime = getProgressTime(hover.track, hover.clientX, rect)
     if (nextTime === null) return
     updatePreviewScrollDirection(nextTime)
     previewTime.value = nextTime
     if (!previewRows.value.length) return
     previewVisible.value = true
-    updatePreviewPosition(hover.clientX, hover.clientY, hover.track)
+    updatePreviewPosition(hover.clientX, hover.clientY, rect)
     void nextTick(() => {
       if (previewWidth.value === null) updatePreviewSize()
-      if (previewVisible.value) updatePreviewPosition(hover.clientX, hover.clientY, hover.track)
+      if (previewVisible.value) updatePreviewPosition(hover.clientX, hover.clientY, rect)
     })
   }
 
@@ -666,6 +674,8 @@
 
   .lyric-preview-bubble {
     position: fixed;
+    top: 0;
+    left: 0;
     z-index: 9999;
     width: max-content;
     max-width: min(320px, calc(100vw - 24px));
