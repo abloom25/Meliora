@@ -11,6 +11,7 @@ import { usePlayerStore } from '../stores/player'
 import type { PlayerSettings, Track } from '../core/types'
 import { createWebAudioBackend } from '../platform/web/audio-backend'
 import type { AudioChannel } from '../core/audio/backend'
+import { loadTrackLyrics, registerTrackLyrics } from '../services/lyrics'
 
 const tracks: Track[] = [
   { id: '1', title: 'One', artist: 'A', audioUrl: '/1.mp3', kind: 'local' },
@@ -39,6 +40,7 @@ const defaultSettings: PlayerSettings = {
   progressLyricPreview: false,
   skipOnError: true,
   autoHideChrome: true,
+  debugPanelEnabled: false,
   equalizer: { enabled: false, preset: 'flat', bands: [0, 0, 0, 0, 0] },
   settingsVersion: 1,
 }
@@ -139,6 +141,96 @@ describe('usePreloadPool', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  it('cancels obsolete neighbor lyrics after audio readiness without cancelling a foreground subscriber', async () => {
+    const { pool, backend, wrapper } = mountPool(ref({ ...defaultSettings }))
+    let signal: AbortSignal | undefined
+    let finish!: () => void
+    registerTrackLyrics(tracks[1]!, {
+      cacheKey: 'preload-ready-lyrics-cancel',
+      load: (requestSignal) =>
+        new Promise((resolve, reject) => {
+          signal = requestSignal
+          finish = () => resolve([{ time: 0, text: 'Kept for current song' }])
+          requestSignal?.addEventListener('abort', () => reject(requestSignal.reason), {
+            once: true,
+          })
+        }),
+    })
+    const ready = pool.loadSlot('next', tracks[1]!)
+    backend.elementOf(pool.preloadSlots.next.channel).dispatchEvent(new Event('canplay'))
+    await ready
+    const foreground = loadTrackLyrics(tracks[1]!)
+    pool.clearSlot(pool.preloadSlots.next)
+    expect(signal?.aborted).toBe(false)
+    finish()
+    await expect(foreground).resolves.toEqual([{ time: 0, text: 'Kept for current song' }])
+    wrapper.unmount()
+  })
+
+  it('aborts the only lyric subscriber when a neighbor changes or the pool unmounts', async () => {
+    const { pool, wrapper } = mountPool(ref({ ...defaultSettings }))
+    const signals: AbortSignal[] = []
+    for (const track of tracks.slice(1, 3))
+      registerTrackLyrics(track, {
+        cacheKey: `preload-orphan-${track.id}`,
+        load: (signal) =>
+          new Promise((_resolve, reject) => {
+            signals.push(signal!)
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+          }),
+      })
+    void pool.loadSlot('next', tracks[1]!)
+    void pool.loadSlot('next', tracks[2]!)
+    expect(signals[0]?.aborted).toBe(true)
+    expect(signals[1]?.aborted).toBe(false)
+    wrapper.unmount()
+    expect(signals[1]?.aborted).toBe(true)
+  })
+
+  it('transfers lyrics with rotated audio slots, cancels the obsolete reverse track and hands off the incoming request', async () => {
+    const { pool, wrapper } = mountPool(ref({ ...defaultSettings }))
+    const signals = new Map<string, AbortSignal>()
+    const loads = vi.fn()
+    for (const track of tracks.slice(0, 3))
+      registerTrackLyrics(track, {
+        cacheKey: `lyric-slot-rotation-${track.id}`,
+        load: (signal) =>
+          new Promise((_resolve, reject) => {
+            loads(track.id)
+            signals.set(track.id, signal!)
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+          }),
+      })
+    void pool.loadSlot('previous', tracks[0]!)
+    void pool.loadSlot('next', tracks[2]!)
+    const oldForeground = new AbortController()
+    const old = loadTrackLyrics(tracks[1]!, oldForeground.signal).catch(() => [])
+    const incomingSlot = pool.preloadSlots.next
+    const reverseSlot = pool.preloadSlots.previous
+    // Same ownership change as replaceActiveWithSlot: C becomes current and B becomes previous.
+    incomingSlot.track = null
+    reverseSlot.track = tracks[1]!
+    reverseSlot.ready = Promise.resolve(true)
+    const releaseIncoming = pool.transferLyricsForPromotion(incomingSlot, reverseSlot)
+    expect(signals.get('1')?.aborted).toBe(true)
+    expect(signals.get('2')?.aborted).toBe(false)
+    expect(signals.get('3')?.aborted).toBe(false)
+    pool.clearSlot(incomingSlot)
+    const foreground = new AbortController()
+    const current = loadTrackLyrics(tracks[2]!, foreground.signal).catch(() => [])
+    oldForeground.abort()
+    releaseIncoming()
+    expect(signals.get('2')?.aborted).toBe(false)
+    expect(signals.get('3')?.aborted).toBe(false)
+    expect(loads.mock.calls.filter(([id]) => id === '2')).toHaveLength(1)
+    expect(loads.mock.calls.filter(([id]) => id === '3')).toHaveLength(1)
+    foreground.abort()
+    await Promise.all([old, current])
+    expect(signals.get('3')?.aborted).toBe(true)
+    wrapper.unmount()
+    expect(signals.get('2')?.aborted).toBe(true)
   })
 
   it('publishes the actual loaded sources and refreshes their duration after readiness', async () => {

@@ -12,6 +12,7 @@ export function usePlayerPanels(options: {
   isPhoneLandscape: Readonly<Ref<boolean>>
   isMobileSheet: Readonly<Ref<boolean>>
   settingsAvailable: Readonly<Ref<boolean>>
+  debugAvailable?: Readonly<Ref<boolean>>
   autoHideChrome: () => boolean
   triggerHaptic: (style: HapticStyle) => void
 }) {
@@ -25,17 +26,23 @@ export function usePlayerPanels(options: {
   } = options
   const listOpen = ref(false)
   const settingsOpen = ref(false)
+  const debugOpen = ref(false)
+  const debugAvailable = computed(
+    () => settingsAvailable.value && options.debugAvailable?.value === true,
+  )
   const panelsSoftened = ref(false)
 
   const { chromeHidden, scheduleChromeHide, clearChromeTimer } = useChromeAutoHide({
     listOpen,
     settingsOpen,
+    extraOpen: debugOpen,
     autoHideChrome: options.autoHideChrome,
   })
 
   // 由调用页面同名的 template ref 绑定；焦点管理与拖拽共享这些节点。
   const libraryDrawerRef = useTemplateRef<HTMLElement>('libraryDrawerRef')
   const settingsDrawerRef = useTemplateRef<HTMLElement>('settingsDrawerRef')
+  const debugDrawerRef = useTemplateRef<HTMLElement>('debugDrawerRef')
   const libraryHandleRef = useTemplateRef<HTMLElement>('libraryHandleRef')
   const settingsHandleRef = useTemplateRef<HTMLElement>('settingsHandleRef')
 
@@ -44,6 +51,7 @@ export function usePlayerPanels(options: {
     autoFocus: () => !isMobileSheet.value,
   })
   useFocusTrap(settingsDrawerRef, settingsOpen, closePanelsAnimated)
+  useFocusTrap(debugDrawerRef, debugOpen, closePanelsAnimated)
 
   // Pull-to-dismiss gesture (mobile sheet only)
   const usesSheetDrawer = () => isMobileSheet.value
@@ -112,7 +120,7 @@ export function usePlayerPanels(options: {
   }
 
   function onTopbarClick(e: MouseEvent) {
-    if (!listOpen.value && !settingsOpen.value) return
+    if (!listOpen.value && !settingsOpen.value && !debugOpen.value) return
     if (isInteractiveElement(e.target)) return
     closePanelsAnimated()
   }
@@ -121,6 +129,7 @@ export function usePlayerPanels(options: {
     triggerHaptic('light')
     listOpen.value = false
     settingsOpen.value = false
+    closeDebugPanel()
   }
 
   function closeLibraryPanel() {
@@ -131,12 +140,31 @@ export function usePlayerPanels(options: {
     settingsOpen.value = false
   }
 
+  function closeDebugPanel() {
+    debugOpen.value = false
+  }
+
+  function toggleDebug() {
+    if (!debugAvailable.value) return
+    triggerHaptic('light')
+    if (debugOpen.value) {
+      closeDebugPanel()
+      return
+    }
+    // 调试始终使用侧边抽屉，立即交接焦点，不等待手机底部抽屉的退出动画。
+    listOpen.value = false
+    settingsOpen.value = false
+    resetDrawerPositions()
+    debugOpen.value = true
+  }
+
   function closePanelsAnimated() {
     if (!usesSheetDrawer()) {
       closePanels()
       return
     }
     triggerHaptic('light')
+    closeDebugPanel()
     if (listOpen.value) {
       libraryDismissAnimated()
     }
@@ -147,6 +175,7 @@ export function usePlayerPanels(options: {
 
   function toggleLibrary() {
     triggerHaptic('light')
+    closeDebugPanel()
     if (listOpen.value) {
       // Closing the currently-open library
       if (usesSheetDrawer()) {
@@ -169,6 +198,7 @@ export function usePlayerPanels(options: {
   function toggleSettings() {
     if (!settingsAvailable.value) return
     triggerHaptic('light')
+    closeDebugPanel()
     if (settingsOpen.value) {
       if (usesSheetDrawer()) {
         settingsDismissAnimated()
@@ -187,10 +217,10 @@ export function usePlayerPanels(options: {
     }
   }
 
-  watch([listOpen, settingsOpen], ([libraryVisible, settingsVisible]) => {
+  watch([listOpen, settingsOpen, debugOpen], ([libraryVisible, settingsVisible, debugVisible]) => {
     chromeHidden.value = false
     scheduleChromeHide()
-    if (libraryVisible || settingsVisible) {
+    if (libraryVisible || settingsVisible || debugVisible) {
       panelsSoftened.value = true
       return
     }
@@ -201,6 +231,9 @@ export function usePlayerPanels(options: {
     if (!available && settingsOpen.value) {
       settingsOpen.value = false
     }
+  })
+  watch(debugAvailable, (available) => {
+    if (!available) closeDebugPanel()
   })
 
   watch([compactViewport, phoneDevice, isPhoneLandscape], () => {
@@ -216,6 +249,7 @@ export function usePlayerPanels(options: {
   return {
     listOpen,
     settingsOpen,
+    debugOpen,
     panelsSoftened,
     chromeHidden,
     libraryDrawerStyle,
@@ -227,5 +261,7 @@ export function usePlayerPanels(options: {
     closePanelsAnimated,
     toggleLibrary,
     toggleSettings,
+    toggleDebug,
+    closeDebugPanel,
   }
 }

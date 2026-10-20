@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, h, nextTick } from 'vue'
+import { defineComponent, h, nextTick, watch } from 'vue'
 import { mount } from '@vue/test-utils'
 import { useAudioPlayer } from '../composables/useAudioPlayer'
 import { usePlayerStore } from '../stores/player'
 import { createWebAudioBackend } from '../platform/web/audio-backend'
 import { createAudioGain } from '../platform/web/audio-gain'
 import type { Track } from '../core/types'
+import { loadTrackLyrics, registerTrackLyrics } from '../services/lyrics'
 
 const startBeatAnalysisMock = vi.hoisted(() => vi.fn())
 
@@ -94,6 +95,49 @@ afterEach(() => {
 })
 
 describe('playback races', () => {
+  it('cancels obsolete reverse-slot lyrics while promoting the incoming prefetch without restarting it', async () => {
+    const starts = new Map<string, AbortSignal[]>()
+    for (const track of tracks)
+      registerTrackLyrics(track, {
+        cacheKey: `player-rotation-${track.id}`,
+        load: (signal) =>
+          new Promise((_resolve, reject) => {
+            starts.set(track.id, [...(starts.get(track.id) ?? []), signal!])
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+          }),
+      })
+    const { store, player } = setup()
+    store.settings.preloadNextTrack = true
+    let foreground: AbortController | undefined
+    // Reproduce LyricsPanel's normal post-update subscription, not a synchronous shortcut.
+    const stop = watch(
+      () => store.currentTrack,
+      (track) => {
+        foreground?.abort()
+        foreground = new AbortController()
+        if (track) void loadTrackLyrics(track, foreground.signal).catch(() => {})
+      },
+      { immediate: true, flush: 'post' },
+    )
+    try {
+      await player.selectAndPlay(tracks[1]!, tracks)
+      await vi.advanceTimersByTimeAsync(0)
+      const previousA = starts.get('a')!.at(-1)!
+      const incomingC = starts.get('c')!.at(-1)!
+      expect(previousA.aborted).toBe(false)
+      await player.next(true)
+      await nextTick()
+      expect(previousA.aborted).toBe(true)
+      expect(incomingC.aborted).toBe(false)
+      expect(starts.get('c')).toHaveLength(1)
+      expect(starts.get('b')).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(starts.get('b')![0]!.aborted).toBe(false)
+    } finally {
+      stop()
+      foreground?.abort()
+    }
+  })
   it('does not restore playing when a pending play resolves after pause', async () => {
     const { player, store } = setup()
     const pending = deferred()

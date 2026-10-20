@@ -1,8 +1,17 @@
 <script setup lang="ts">
-  import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+  import {
+    computed,
+    defineAsyncComponent,
+    onBeforeUnmount,
+    onMounted,
+    ref,
+    shallowRef,
+    watch,
+  } from 'vue'
   import { storeToRefs } from 'pinia'
   import {
     ArrowRight,
+    Bug,
     ListMusic,
     MessageSquareText,
     Music,
@@ -19,6 +28,8 @@
   import { usePlayerPanels } from '../composables/usePlayerPanels'
   import { useAudioPlayer } from '../composables/useAudioPlayer'
   import { useLyricsWindow } from '../platform/web/useLyricsWindow'
+  import { useRuntimeDebug } from '../platform/web/useRuntimeDebug'
+  import { readBeatAudioCacheUsage } from '../platform/web/beat-preanalysis'
   import { usePwaInstall } from '../platform/web/usePwaInstall'
   import { useSleepTimer } from '../composables/useSleepTimer'
   import { useFullscreen } from '../platform/web/useFullscreen'
@@ -33,6 +44,11 @@
   import TrackList from '../components/TrackList.vue'
   import Toast from '../components/Toast.vue'
   import type { LyricAvailability, LyricStatus, LyricsSnapshot, Track } from '../core/types'
+  import type { LyricsDebugSnapshot } from '../core/diagnostics/lyrics-debug'
+
+  const PlayerDebugPanel = import.meta.env.DEV
+    ? defineAsyncComponent(() => import('../components/PlayerDebugPanel.vue'))
+    : null
 
   const PLAY_MODE_META = {
     sequence: { text: '顺序播放', icon: ArrowRight },
@@ -65,6 +81,47 @@
   // 队列小频谱 meter 由 TrackList 暴露,--spectrum-level-N 同样走 RAF 直写
   const trackListRef = ref<InstanceType<typeof TrackList> | null>(null)
 
+  const settingsAvailable = computed(() => tracks.value.length > 0)
+  const debugAvailable = computed(
+    () => import.meta.env.DEV && settingsAvailable.value && settings.value.debugPanelEnabled,
+  )
+  const {
+    listOpen,
+    settingsOpen,
+    debugOpen,
+    panelsSoftened,
+    chromeHidden,
+    libraryDrawerStyle,
+    settingsDrawerStyle,
+    libraryDragging,
+    settingsDragging,
+    anyDrawerHalf,
+    onTopbarClick,
+    closePanelsAnimated,
+    toggleLibrary,
+    toggleSettings,
+    toggleDebug,
+    closeDebugPanel,
+  } = usePlayerPanels({
+    compactViewport,
+    phoneDevice,
+    isPhoneLandscape,
+    isMobileSheet,
+    settingsAvailable,
+    debugAvailable,
+    autoHideChrome: () => settings.value.autoHideChrome,
+    triggerHaptic,
+  })
+  const debugEnabled = computed(() => debugAvailable.value && debugOpen.value)
+  const beatComparisonVisible = ref(false)
+  const lyricsDebug = shallowRef<LyricsDebugSnapshot | null>(null)
+  const { snapshot: runtimeDebug } = useRuntimeDebug(debugEnabled, {
+    readAudioCacheUsage: readBeatAudioCacheUsage,
+  })
+  watch(debugEnabled, (enabled) => {
+    if (!enabled) lyricsDebug.value = null
+  })
+
   const {
     preloadMessage,
     spectrumAvailable,
@@ -76,7 +133,25 @@
     selectAndPlay,
     beatBuildStatus,
     retryBeatBuild,
+    beatDebug,
+    beatSchedulerDebug,
+    beatComparison,
+    canCompareBeats,
+    startBeatComparison,
+    stopBeatComparison,
+    beatComparisonRecording,
+    exportBeatComparison,
+    beatComparisonExporting,
+    beatComparisonExportError,
+    audioPreloadDebug,
+    listeningStats,
+    clearListeningHistory,
+    getPlaybackSeconds,
+    getLyricsPlaybackState,
+    subscribeLyricsPlayback,
   } = useAudioPlayer({
+    debugEnabled,
+    beatComparisonEnabled: beatComparisonVisible,
     getBeatTargets: () => [artworkBackgroundRef.value, backgroundOverlayRef.value],
     getSpectrumTargets: () => [trackListRef.value?.spectrumMeter],
   })
@@ -90,10 +165,15 @@
     isOpen: lyricsWindowOpen,
     setSnapshot: setLyricsWindowSnapshot,
     toggleLyricsWindow,
+    debugSnapshot: lyricsWindowDebug,
   } = useLyricsWindow({
+    getPlaybackSeconds,
+    getLyricsPlaybackState,
+    subscribeLyricsPlayback,
     currentTrack,
     isPlaying,
     currentTime,
+    debugEnabled,
     lyricAnimation: computed(() => settings.value.lyricAnimation),
   })
   const { canInstall, isInstalled, install, iosInstallAvailable } = usePwaInstall()
@@ -158,31 +238,6 @@
     handleMainCoverLoaded,
     handleMainCoverError,
   } = usePlayerArtwork(currentTrack, settings)
-  const settingsAvailable = computed(() => tracks.value.length > 0)
-  const {
-    listOpen,
-    settingsOpen,
-    panelsSoftened,
-    chromeHidden,
-    libraryDrawerStyle,
-    settingsDrawerStyle,
-    libraryDragging,
-    settingsDragging,
-    anyDrawerHalf,
-    onTopbarClick,
-    closePanelsAnimated,
-    toggleLibrary,
-    toggleSettings,
-  } = usePlayerPanels({
-    compactViewport,
-    phoneDevice,
-    isPhoneLandscape,
-    isMobileSheet,
-    settingsAvailable,
-    autoHideChrome: () => settings.value.autoHideChrome,
-    triggerHaptic,
-  })
-
   const currentDisplayTitle = computed(() => {
     const track = currentTrack.value
     if (!track) return null
@@ -365,6 +420,7 @@
       const nextTrackHasLyrics = hasTrackLyricsSource(currentTrack.value)
       setLyricAvailability(nextTrackHasLyrics ? 'loading' : 'unavailable')
       lyricsSnapshot.value = null
+      lyricsDebug.value = null
       if (!nextTrackHasLyrics && isMobileSheet.value) {
         mobileView.value = 'cover'
       }
@@ -389,7 +445,7 @@
       'background-disabled': !settings.dynamicBackground,
       'beat-disabled': !settings.beatFlash,
       'chrome-hidden': chromeHidden,
-      'drawer-open': listOpen || settingsOpen,
+      'drawer-open': listOpen || settingsOpen || debugOpen,
       'mobile-sheet': isMobileSheet,
       'phone-landscape': isPhoneLandscape,
       'beat-active': isPlaying,
@@ -424,6 +480,18 @@
       </div>
       <div class="top-actions">
         <span v-if="sourceWarning" class="source-warning">{{ sourceWarning }}</span>
+        <button
+          v-if="debugAvailable"
+          class="nav-button debug-button"
+          :class="{ active: debugOpen }"
+          :aria-label="debugOpen ? '关闭调试面板' : '打开调试面板'"
+          :aria-expanded="debugOpen"
+          aria-controls="player-debug-panel"
+          title="调试"
+          @click="toggleDebug"
+        >
+          <Bug :size="19" />
+        </button>
         <button
           class="nav-button share-button"
           aria-label="分享当前歌曲"
@@ -530,9 +598,13 @@
           class="lyrics-column"
           :class="{ 'mobile-hidden': mobileView !== 'lyrics', 'lyrics-disabled': !lyricsVisible }"
           :active="lyricsPanelActive"
+          :debug-enabled="debugEnabled"
+          :get-lyrics-playback-state="getLyricsPlaybackState"
+          :subscribe-lyrics-playback="subscribeLyricsPlayback"
           @seek="seek"
           @availability="handleLyricAvailability"
           @snapshot="handleLyricsSnapshot"
+          @debug="lyricsDebug = $event"
         />
       </Transition>
 
@@ -625,9 +697,9 @@
 
     <Transition name="backdrop">
       <div
-        v-if="listOpen || settingsOpen"
+        v-if="listOpen || settingsOpen || debugOpen"
         class="drawer-backdrop"
-        :class="{ 'is-half': anyDrawerHalf }"
+        :class="{ 'is-half': anyDrawerHalf && !debugOpen, 'debug-backdrop': debugOpen }"
         @click="closePanelsAnimated"
       />
     </Transition>
@@ -727,18 +799,64 @@
         </header>
         <SettingsPanel
           :play-mode-text="playModeText"
-          :beat-build="beatBuildStatus"
           :sleep-timer="settingsSleepTimer"
           :capabilities="settingsCapabilities"
           :song-info="settingsSongInfo"
+          :beat-build="beatBuildStatus"
+          :listening-stats="listeningStats"
+          :clear-listening-history="clearListeningHistory"
+          @beat-build-retry="retryBeatBuild"
           @cycle-play-mode="cyclePlayModeWithHaptic"
           @sleep-timer-input="handleSleepTimerInput"
           @sleep-timer-change="handleSleepTimerChange"
           @toggle-fullscreen-mode="toggleFullscreenMode"
           @open-lyrics-window="openLyricsWindow"
           @install-pwa="installPwa"
-          @beat-build-retry="retryBeatBuild"
           @show-ios-install-guide="showIosInstallGuide"
+        />
+      </aside>
+    </Transition>
+    <Transition name="debug-drawer">
+      <aside
+        v-if="debugEnabled"
+        id="player-debug-panel"
+        ref="debugDrawerRef"
+        class="side-drawer debug-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label="播放调试"
+        tabindex="-1"
+      >
+        <PlayerDebugPanel
+          :beat="beatDebug"
+          :scheduler="beatSchedulerDebug"
+          :comparison="beatComparison"
+          :can-compare="canCompareBeats"
+          :comparison-export-sample-count="beatComparisonRecording?.sampleCount ?? 0"
+          :comparison-export-truncated="beatComparisonRecording?.truncated ?? false"
+          :comparison-exporting="beatComparisonExporting ?? false"
+          :comparison-export-error="beatComparisonExportError ?? null"
+          :flash-rate="settings.beatFlashRate"
+          :build="beatBuildStatus"
+          :preload="audioPreloadDebug"
+          :queue="store.queue"
+          :current-track-id="currentTrackId"
+          :playback-seconds="currentTime"
+          :duration-seconds="duration"
+          :playing="isPlaying"
+          :brightness="settings.beatBrightness"
+          :play-mode-text="playModeText"
+          :lyrics="lyricsDebug"
+          :lyrics-window="lyricsWindowDebug"
+          :lyrics-window-supported="lyricsWindowSupported"
+          :has-current-track="Boolean(currentTrack)"
+          :runtime="runtimeDebug"
+          @close="closeDebugPanel"
+          @comparison-visible="beatComparisonVisible = $event"
+          @compare-start="startBeatComparison"
+          @compare-stop="stopBeatComparison"
+          @compare-export="exportBeatComparison"
+          @toggle-lyrics-window="openLyricsWindow"
         />
       </aside>
     </Transition>

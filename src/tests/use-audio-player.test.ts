@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, h, nextTick, watch } from 'vue'
+import { defineComponent, h, nextTick, ref, watch } from 'vue'
 import { mount } from '@vue/test-utils'
-import { useAudioPlayer } from '../composables/useAudioPlayer'
+import { useAudioPlayer, type UseAudioPlayerOptions } from '../composables/useAudioPlayer'
 import { usePlayerStore } from '../stores/player'
 import { shouldUseIOSBackgroundSafeAudio } from '../platform/web/browser'
 import type { Track } from '../core/types'
@@ -34,7 +34,6 @@ vi.mock('../platform/web/useBeatAnalyser', () => ({
     },
   })),
 }))
-
 const mockedShouldUseIOSBackgroundSafeAudio = vi.mocked(shouldUseIOSBackgroundSafeAudio)
 
 const tracks: Track[] = [
@@ -52,13 +51,13 @@ function stubAudioPlay() {
   }
 }
 
-function mountPlayer() {
+function mountPlayer(options: UseAudioPlayerOptions = {}) {
   const store = usePlayerStore()
   store.setTracks(tracks)
 
   const Harness = defineComponent({
     setup() {
-      const player = useAudioPlayer()
+      const player = useAudioPlayer(options)
       return { player }
     },
     render() {
@@ -73,12 +72,13 @@ function mountPlayer() {
 
 describe('useAudioPlayer', () => {
   beforeEach(() => {
+    vi.clearAllMocks()
     setActivePinia(createPinia())
     mockedShouldUseIOSBackgroundSafeAudio.mockReturnValue(false)
-    startBeatAnalysisMock.mockClear()
   })
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.unstubAllEnvs()
     document.body.innerHTML = ''
   })
 
@@ -95,6 +95,199 @@ describe('useAudioPlayer', () => {
       expect(typeof player.selectAndPlay).toBe('function')
     } finally {
       restore()
+    }
+  })
+
+  it('exposes the real lyric clock and notifies media state changes without treating stalled as waiting', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined)
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined)
+    const { player, wrapper, store } = mountPlayer()
+    try {
+      const analyser = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0]
+      const audio = analyser.getActiveAudio()
+      Object.defineProperties(audio, {
+        paused: { configurable: true, value: false },
+        ended: { configurable: true, value: false },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_FUTURE_DATA },
+        seeking: { configurable: true, value: false },
+      })
+      audio.currentTime = 12
+      audio.playbackRate = 1.5
+      store.isPlaying = true
+      await nextTick()
+      const listener = vi.fn()
+      const stop = player.subscribeLyricsPlayback(listener)
+      expect(player.getLyricsPlaybackState()).toEqual({
+        timeSeconds: 12,
+        playing: true,
+        playbackRate: 1.5,
+        seeking: false,
+      })
+      audio.dispatchEvent(new Event('stalled'))
+      expect(player.getLyricsPlaybackState().playing).toBe(true)
+      audio.dispatchEvent(new Event('waiting'))
+      expect(player.getLyricsPlaybackState().playing).toBe(false)
+      expect(listener).toHaveBeenCalledTimes(1)
+      audio.dispatchEvent(new Event('playing'))
+      expect(player.getLyricsPlaybackState().playing).toBe(true)
+      Object.defineProperty(audio, 'seeking', { configurable: true, value: true })
+      audio.dispatchEvent(new Event('seeking'))
+      expect(player.getLyricsPlaybackState().seeking).toBe(true)
+      stop()
+      const count = listener.mock.calls.length
+      audio.dispatchEvent(new Event('ratechange'))
+      expect(listener).toHaveBeenCalledTimes(count)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('follows the promoted channel and ignores lyric clock events from the outgoing channel', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined)
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined)
+    const { player, wrapper, store } = mountPlayer()
+    try {
+      store.settings.preloadNextTrack = false
+      store.settings.smoothTrackChange = false
+      store.selectTrack(tracks[0]!, tracks)
+      const analyser = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0]
+      const outgoing = analyser.getActiveAudio()
+      for (const audio of analyser.players) {
+        Object.defineProperties(audio, {
+          paused: { configurable: true, value: false },
+          ended: { configurable: true, value: false },
+          readyState: { configurable: true, value: HTMLMediaElement.HAVE_FUTURE_DATA },
+          duration: { configurable: true, value: 120 },
+        })
+      }
+      const listener = vi.fn()
+      player.subscribeLyricsPlayback(listener)
+      await player.selectAndPlay(tracks[1]!, tracks)
+      await nextTick()
+      const incoming = analyser.getActiveAudio()
+      expect(incoming).not.toBe(outgoing)
+      listener.mockClear()
+      outgoing.currentTime = 54
+      for (const event of ['timeupdate', 'waiting', 'playing', 'seeked', 'ratechange'])
+        outgoing.dispatchEvent(new Event(event))
+      expect(listener).not.toHaveBeenCalled()
+      expect(store.currentTime).toBe(0)
+
+      incoming.currentTime = 7
+      incoming.dispatchEvent(new Event('timeupdate'))
+      expect(listener).toHaveBeenCalledTimes(1)
+      expect(player.getLyricsPlaybackState()).toMatchObject({ timeSeconds: 7, playing: true })
+      expect(store.currentTime).toBe(7)
+      incoming.dispatchEvent(new Event('waiting'))
+      expect(player.getLyricsPlaybackState().playing).toBe(false)
+      outgoing.dispatchEvent(new Event('playing'))
+      expect(listener).toHaveBeenCalledTimes(2)
+      expect(player.getLyricsPlaybackState().playing).toBe(false)
+      incoming.dispatchEvent(new Event('canplay'))
+      expect(listener).toHaveBeenCalledTimes(3)
+      expect(player.getLyricsPlaybackState().playing).toBe(true)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('moves the lyric clock and subscriptions to a CORS replacement and releases them on unmount', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined)
+    vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined)
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { player, wrapper, store } = mountPlayer()
+    const listener = vi.fn()
+    let replacement: HTMLAudioElement | undefined
+    try {
+      store.settings.preloadNextTrack = false
+      store.selectTrack(tracks[0]!, tracks)
+      store.isPlaying = true
+      await nextTick()
+      const analyser = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0]
+      const previous = analyser.getActiveAudio()
+      Object.defineProperties(previous, {
+        paused: { configurable: true, value: false },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_FUTURE_DATA },
+      })
+      previous.currentTime = 18
+      player.subscribeLyricsPlayback(listener)
+      analyser.onTainted?.(previous)
+      replacement = analyser.getActiveAudio()
+      expect(replacement).not.toBe(previous)
+      expect(listener).toHaveBeenCalledTimes(1)
+      expect(player.getLyricsPlaybackState().playing).toBe(false)
+      listener.mockClear()
+      for (const event of ['timeupdate', 'waiting', 'playing', 'seeking', 'ratechange'])
+        previous.dispatchEvent(new Event(event))
+      expect(listener).not.toHaveBeenCalled()
+
+      Object.defineProperties(replacement, {
+        paused: { configurable: true, value: false },
+        ended: { configurable: true, value: false },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_FUTURE_DATA },
+        duration: { configurable: true, value: 120 },
+      })
+      replacement.dispatchEvent(new Event('loadedmetadata'))
+      expect(player.getLyricsPlaybackState()).toMatchObject({ timeSeconds: 18, playing: true })
+      replacement.currentTime = 19
+      replacement.dispatchEvent(new Event('timeupdate'))
+      expect(store.currentTime).toBe(19)
+      replacement.dispatchEvent(new Event('waiting'))
+      expect(player.getLyricsPlaybackState().playing).toBe(false)
+      previous.dispatchEvent(new Event('playing'))
+      expect(player.getLyricsPlaybackState().playing).toBe(false)
+      replacement.dispatchEvent(new Event('playing'))
+      expect(player.getLyricsPlaybackState().playing).toBe(true)
+    } finally {
+      wrapper.unmount()
+    }
+    const count = listener.mock.calls.length
+    replacement?.dispatchEvent(new Event('timeupdate'))
+    replacement?.dispatchEvent(new Event('playing'))
+    expect(listener).toHaveBeenCalledTimes(count)
+    expect(player.getLyricsPlaybackState().playing).toBe(false)
+  })
+
+  it('enables faster real-output diagnostics only on the visible comparison tab', () => {
+    const debugEnabled = ref(false)
+    const beatComparisonEnabled = ref(false)
+    const { wrapper, store } = mountPlayer({ debugEnabled, beatComparisonEnabled })
+    try {
+      const options = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0]
+      beatComparisonEnabled.value = true
+      expect(options.debugEnabled?.value).toBe(false)
+      expect(options.debugSampleIntervalMs?.value).toBe(100)
+      debugEnabled.value = true
+      expect(options.debugSampleIntervalMs?.value).toBeCloseTo(1000 / 30)
+      expect(store.settings.beatAnalysisMode).toBe('basic')
+      beatComparisonEnabled.value = false
+      expect(options.debugSampleIntervalMs?.value).toBe(100)
+      debugEnabled.value = false
+      expect(options.debugEnabled?.value).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('keeps diagnostics and comparison disabled in production even when callers request them', async () => {
+    vi.stubEnv('DEV', false)
+    const { wrapper, player } = mountPlayer({
+      debugEnabled: ref(true),
+      beatComparisonEnabled: ref(true),
+    })
+    try {
+      const options = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0]
+      expect(options.debugEnabled?.value).toBe(false)
+      expect(options.debugSampleIntervalMs?.value).toBe(100)
+      expect(player.canCompareBeats.value).toBe(false)
+      await player.startBeatComparison()
+      expect(player.beatComparison.value.phase).toBe('idle')
+      expect(player.beatComparisonRecording.value.sampleCount).toBe(0)
+    } finally {
+      wrapper.unmount()
     }
   })
 
@@ -258,15 +451,18 @@ describe('useAudioPlayer', () => {
     }
   })
 
-  it('migrates a runtime legacy BeatNet preference to basic preanalysis', () => {
-    const store = usePlayerStore()
-    Object.assign(store.settings, { beatAnalysisMode: 'beatnet' })
-    const { wrapper, player } = mountPlayer()
-    expect(store.settings.beatAnalysisMode).toBe('basic')
-    expect(player.beatBuildStatus.value.phase).toBe('idle')
-    expect(typeof player.retryBeatBuild).toBe('function')
-    wrapper.unmount()
-  })
+  it.each(['beatnet', 'madmom-onset'])(
+    'migrates the removed %s preference to basic preanalysis',
+    (legacy) => {
+      const store = usePlayerStore()
+      Object.assign(store.settings, { beatAnalysisMode: legacy })
+      const { wrapper, player } = mountPlayer()
+      expect(store.settings.beatAnalysisMode).toBe('basic')
+      expect(player.beatBuildStatus.value.phase).toBe('idle')
+      expect(typeof player.retryBeatBuild).toBe('function')
+      wrapper.unmount()
+    },
+  )
 
   it('waits for fulfilled play before starting preanalysis, not the earlier play event', async () => {
     let finishPlay!: () => void

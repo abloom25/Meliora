@@ -5,23 +5,25 @@ const CHROME_IDLE_DELAY = 30000
 export interface UseChromeAutoHideOptions {
   listOpen: Ref<boolean>
   settingsOpen: Ref<boolean>
+  extraOpen?: Readonly<Ref<boolean>>
   autoHideChrome: () => boolean
 }
 
 export function useChromeAutoHide(options: UseChromeAutoHideOptions) {
-  const { listOpen, settingsOpen, autoHideChrome } = options
+  const { listOpen, settingsOpen, extraOpen, autoHideChrome } = options
+  const anyPanelOpen = () => listOpen.value || settingsOpen.value || extraOpen?.value === true
 
   const chromeHidden = ref(false)
   let chromeIdleTimer = 0
 
   function scheduleChromeHide() {
     window.clearTimeout(chromeIdleTimer)
-    if (!autoHideChrome() || listOpen.value || settingsOpen.value) {
+    if (!autoHideChrome() || anyPanelOpen()) {
       chromeHidden.value = false
       return
     }
     chromeIdleTimer = window.setTimeout(() => {
-      if (autoHideChrome() && !listOpen.value && !settingsOpen.value) {
+      if (autoHideChrome() && !anyPanelOpen()) {
         chromeHidden.value = true
       }
     }, CHROME_IDLE_DELAY)
@@ -37,7 +39,7 @@ export function useChromeAutoHide(options: UseChromeAutoHideOptions) {
   }
 
   function handleActivity() {
-    if (autoHideChrome() && !listOpen.value && !settingsOpen.value) {
+    if (autoHideChrome() && !anyPanelOpen()) {
       revealChrome()
     }
   }

@@ -1,12 +1,12 @@
-import { mount } from '@vue/test-utils'
+import { mount, type DOMWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, ref } from 'vue'
 import SettingToggleRow from '../components/SettingToggleRow.vue'
 import SettingsPanel from '../components/SettingsPanel.vue'
+import type { BeatBuildStatus, BeatPreloadStatus } from '../core/analysis/beat-timeline'
 import type { Track } from '../core/types'
 import { usePlayerStore } from '../stores/player'
-import type { BeatBuildStatus, BeatPreloadStatus } from '../core/analysis/beat-timeline'
 
 const modelActions = vi.hoisted(() => ({
   initialize: vi.fn(async () => {}),
@@ -25,7 +25,6 @@ const modelStatus = ref<
 vi.mock('../platform/web/useBeatThisModels', () => ({
   useBeatThisModels: () => ({ status: modelStatus, runtimeBytes: 25_000_000, ...modelActions }),
 }))
-
 function mountPanel() {
   const store = usePlayerStore()
   const wrapper = mount(SettingsPanel, {
@@ -60,6 +59,14 @@ function sectionByTitle(wrapper: ReturnType<typeof mountPanel>['wrapper'], title
   return wrapper.findAll('.settings-section').find((section) => section.find('h3').text() === title)
 }
 
+function analysisModeButtons(analysis: Pick<DOMWrapper<Element>, 'get'>) {
+  return {
+    basic: analysis.get('button[data-mode="basic"]'),
+    small: analysis.get('button[data-mode="beat-this-small"]'),
+    standard: analysis.get('button[data-mode="beat-this-standard"]'),
+  }
+}
+
 function preloadStatus(overrides: Partial<BeatPreloadStatus> = {}): BeatPreloadStatus {
   return {
     direction: 'next',
@@ -79,6 +86,24 @@ describe('SettingsPanel', () => {
     modelStatus.value = {
       small: { phase: 'missing', progress: 0, error: null },
       standard: { phase: 'missing', progress: 0, error: null },
+    }
+  })
+
+  it('keeps the optional debug panel switch in its own section', async () => {
+    const { wrapper, store } = mountPanel()
+    try {
+      const debug = sectionByTitle(wrapper, '调试')!
+      const toggle = debug.get('input[aria-label="播放器调试面板"]')
+      expect((toggle.element as HTMLInputElement).checked).toBe(false)
+      expect(store.settings.debugPanelEnabled).toBe(false)
+      expect(sectionByTitle(wrapper, '播放')!.text()).not.toContain('调试')
+      expect(sectionByTitle(wrapper, '歌词')!.text()).not.toContain('调试')
+      await toggle.setValue(true)
+      expect(store.settings.debugPanelEnabled).toBe(true)
+      await toggle.setValue(false)
+      expect(store.settings.debugPanelEnabled).toBe(false)
+    } finally {
+      wrapper.unmount()
     }
   })
 
@@ -275,7 +300,7 @@ describe('SettingsPanel', () => {
   it('defaults to basic analysis and previews optional models without downloading or enabling them', async () => {
     const { wrapper, store } = mountPanel()
     const analysis = wrapper.get('.beat-analysis-settings')
-    const [basic, small, standard] = analysis.findAll('.beat-analysis-modes button')
+    const { basic, small, standard } = analysisModeButtons(analysis)
 
     expect(store.settings.beatAnalysisMode).toBe('basic')
     expect(basic!.attributes('aria-pressed')).toBe('true')
@@ -296,7 +321,7 @@ describe('SettingsPanel', () => {
   it('keeps completed downloads opt-in and never enables an abandoned selection', async () => {
     const { wrapper, store } = mountPanel()
     const analysis = wrapper.get('.beat-analysis-settings')
-    const [, small, standard] = analysis.findAll('.beat-analysis-modes button')
+    const { small, standard } = analysisModeButtons(analysis)
     await small!.trigger('click')
     await analysis.get('.beat-model-card .beat-analysis-action').trigger('click')
     expect(modelActions.download).toHaveBeenCalledWith('small')
@@ -318,7 +343,7 @@ describe('SettingsPanel', () => {
   it('requires explicit enable after a download and lets either cached model be selected', async () => {
     const { wrapper, store } = mountPanel()
     const analysis = wrapper.get('.beat-analysis-settings')
-    const [basic, small, standard] = analysis.findAll('.beat-analysis-modes button')
+    const { basic, small, standard } = analysisModeButtons(analysis)
     await small!.trigger('click')
     await analysis.get('.beat-model-card .beat-analysis-action').trigger('click')
     modelStatus.value.small = { phase: 'ready', progress: 1, error: null }
@@ -339,7 +364,7 @@ describe('SettingsPanel', () => {
   it('allows cancelling, retrying and deleting an optional model without silent downloads', async () => {
     const { wrapper, store } = mountPanel()
     const analysis = wrapper.get('.beat-analysis-settings')
-    const small = analysis.findAll('.beat-analysis-modes button')[1]!
+    const { small } = analysisModeButtons(analysis)
     modelStatus.value.small = { phase: 'downloading', progress: 0.2, error: null }
     await small.trigger('click')
     await analysis.get('.beat-model-card button').trigger('click')
@@ -966,16 +991,19 @@ describe('SettingsPanel', () => {
     expect(row.text()).not.toContain('已就绪')
   })
 
-  it('restores basic analysis with background defaults without triggering a rebuild', async () => {
-    const { wrapper, store } = mountPanel()
-    store.settings.beatAnalysisMode = 'beat-this-small'
-    const reset = sectionByTitle(wrapper, '背景')!.get('.section-reset')
-    await reset.trigger('click')
-    await reset.trigger('click')
+  it.each(['beat-this-small', 'beat-this-standard'] as const)(
+    'restores basic analysis from %s with background defaults without triggering a rebuild',
+    async (mode) => {
+      const { wrapper, store } = mountPanel()
+      store.settings.beatAnalysisMode = mode
+      const reset = sectionByTitle(wrapper, '背景')!.get('.section-reset')
+      await reset.trigger('click')
+      await reset.trigger('click')
 
-    expect(store.settings.beatAnalysisMode).toBe('basic')
-    expect(wrapper.emitted('beatBuildRetry')).toBeUndefined()
-  })
+      expect(store.settings.beatAnalysisMode).toBe('basic')
+      expect(wrapper.emitted('beatBuildRetry')).toBeUndefined()
+    },
+  )
 
   it('keeps the equalizer controls collapsed while the equalizer is off', async () => {
     const { wrapper, store } = mountPanel()

@@ -53,6 +53,18 @@ async function dispatchFetch(options: {
 }
 
 describe('service worker background work', () => {
+  it('leaves complete-song analysis fetches outside app-shell caching', async () => {
+    const event = await dispatchFetch({
+      url: 'https://example.com/recordings/song.mp3',
+      accept: 'audio/*',
+      destination: '',
+      network: Promise.resolve(new Response('audio')),
+    })
+    expect(event.response).toBeUndefined()
+    expect(event.work).toHaveLength(0)
+    expect(event.put).not.toHaveBeenCalled()
+  })
+
   it('keeps Range requests outside the shell cache regardless of destination', async () => {
     const event = await dispatchFetch({
       url: 'https://example.com/recordings/song.mp3',
@@ -65,6 +77,16 @@ describe('service worker background work', () => {
     expect(event.put).not.toHaveBeenCalled()
   })
 
+  it('leaves optional models to the explicit download cache without background refetching', async () => {
+    const event = await dispatchFetch({
+      url: 'https://example.com/models/beat-this/small0-v1-00.bin',
+      cached: new Response('model'),
+      network: Promise.resolve(new Response('fresh')),
+    })
+    expect(event.response).toBeUndefined()
+    expect(event.work).toHaveLength(0)
+    expect(event.put).not.toHaveBeenCalled()
+  })
   it('keeps a cache-hit network refresh alive until cache writing completes', async () => {
     let finish!: (response: Response) => void
     const network = new Promise<Response>((resolve) => {

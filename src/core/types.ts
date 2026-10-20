@@ -85,7 +85,7 @@ export interface PlayerSettings {
   dynamicBackground: boolean
   /** 背景随节奏闪光(与动态封面背景独立) */
   beatFlash: boolean
-  /** 默认基础模式；增强模型由用户手动下载并启用。 */
+  /** 默认基础模式；增强模型由用户手动下载并启用，均在播放后预构建。 */
   beatAnalysisMode: BeatAnalysisMode
   backgroundBlur: number
   backgroundSaturation: number
@@ -102,6 +102,8 @@ export interface PlayerSettings {
   progressLyricPreview: boolean
   skipOnError: boolean
   autoHideChrome: boolean
+  /** 手动开启后显示独立的播放器调试入口。 */
+  debugPanelEnabled: boolean
   equalizer: EqualizerSettings
   settingsVersion: number
 }

@@ -37,6 +37,7 @@
     Math.round(Math.max(0, Math.min(1, modelState.value?.progress ?? 0)) * 100),
   )
   const selectedIsActive = computed(() => selectedMode.value === store.settings.beatAnalysisMode)
+  const usesModel = computed(() => store.settings.beatAnalysisMode !== 'basic')
   const modelSize = computed(() =>
     selectedModel.value ? `${(selectedModel.value.downloadBytes / 1_000_000).toFixed(1)} MB` : '',
   )
@@ -59,7 +60,9 @@
       case 'error':
         return modelState.value.error ?? '模型下载失败，请重试'
       default:
-        return '尚未下载 · 点击下载后保存在本机'
+        return modelProgress.value > 0
+          ? `已保留下载 · ${modelProgress.value}% · 可继续`
+          : '尚未下载 · 点击下载后保存在本机'
     }
   })
   watch(
@@ -191,13 +194,13 @@
     if (continuousSeconds.value > 0) {
       const duration =
         continuousSeconds.value < 1 ? '不足 1 秒' : formatAnalysisTime(continuousSeconds.value)
-      return `当前位置已就绪 · 可连续高亮 ${duration}`
+      return `当前位置${usesModel.value ? '模型结果' : ''}已就绪 · 可连续高亮 ${duration}`
     }
     if (activeRange.value) {
       if (activeRange.value.startSeconds > playbackSeconds.value) return '正在提前准备后续区间'
       if (playbackSeconds.value < activeRange.value.endSeconds) return '正在优先准备当前位置'
     }
-    return '当前位置尚未就绪'
+    return usesModel.value ? '当前位置模型结果尚未就绪' : '当前位置尚未就绪'
   })
   function rangeStyle(range: BeatTimeRange): { left: string; width: string } {
     return {
@@ -219,7 +222,8 @@
     const active = activeRange.value
       ? `；正在分析 ${formatAnalysisTime(activeRange.value.startSeconds)} 至 ${formatAnalysisTime(activeRange.value.endSeconds)}`
       : ''
-    return `已完成 ${progress.value}%${completed ? `；可高亮区间 ${completed}` : '；尚无可高亮区间'}${active}；播放位置 ${formatAnalysisTime(playbackSeconds.value)}`
+    const coverage = usesModel.value ? '正式模型区间' : '可高亮区间'
+    return `已完成 ${progress.value}%${completed ? `；${coverage} ${completed}` : `；尚无${coverage}`}${active}；播放位置 ${formatAnalysisTime(playbackSeconds.value)}`
   })
   const statusLabel = computed(() => {
     switch (state.value.phase) {
@@ -250,7 +254,10 @@
     if (state.value.phase === 'ready') return '拖动进度或切换闪烁频率，无需重新分析'
     if (state.value.phase === 'buffered')
       return store.isPlaying ? '接近已准备区间末端时自动续建' : '已保留分析结果，继续播放后按需续建'
-    if (state.value.phase === 'analysing') return '根据播放位置与分析速度，优先准备即将播放的部分'
+    if (state.value.phase === 'analysing')
+      return usesModel.value
+        ? '已算好的基础结果会先用于高亮，模型完成后接管；进度仅统计模型结果'
+        : '根据播放位置与分析速度，优先准备即将播放的部分'
     if (busy.value) return '正在准备音频，当前位置就绪后开始高亮'
     return '播放后优先分析当前位置，分段就绪即开始高亮'
   })
@@ -309,6 +316,7 @@
         v-for="option in modeOptions"
         :key="option.value"
         type="button"
+        :data-mode="option.value"
         :aria-pressed="store.settings.beatAnalysisMode === option.value"
         :class="{ 'is-previewed': selectedMode === option.value }"
         @click="selectMode(option.value)"
@@ -361,7 +369,13 @@
             @click="downloadModel"
           >
             <Download :size="14" aria-hidden="true" />
-            {{ modelState.phase === 'error' ? '重新下载' : '下载模型' }}
+            {{
+              modelProgress > 0
+                ? '继续下载'
+                : modelState.phase === 'error'
+                  ? '重试下载'
+                  : '下载模型'
+            }}
           </button>
           <button
             v-if="modelState.phase === 'downloading'"
@@ -371,7 +385,13 @@
           >
             <X :size="14" aria-hidden="true" />取消下载
           </button>
-          <template v-if="modelState.phase === 'ready' || modelState.phase === 'error'">
+          <template
+            v-if="
+              modelState.phase === 'ready' ||
+              modelState.phase === 'error' ||
+              (modelState.phase === 'missing' && modelProgress > 0)
+            "
+          >
             <button
               v-if="modelState.phase === 'ready' && !selectedIsActive"
               class="beat-analysis-action"
