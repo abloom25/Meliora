@@ -1319,6 +1319,9 @@
        溢出的那一条同样没有背景可裁,表现为字被左右削掉一道 */
     --lyric-word-bleed: 0.12em;
 
+    // max-width 只约束文字内容；绘制留白由负 margin 抵消，不能再挤占文字宽度。
+    // 否则单词独占自适应宽度的歌词行时，末字会被 border-box 的 padding 挤到下一行。
+    box-sizing: content-box;
     display: inline-block;
     max-width: 100%;
     /* background-clip: text 只在元素自身的背景盒内绘制。行高 1.18 比字体的自然行盒紧,

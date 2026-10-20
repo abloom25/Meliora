@@ -1206,7 +1206,7 @@ describe('useLyricsWindow', () => {
     }
   })
 
-  it('retains the finished duet beside its singing lead while completed harmonies and future rows stay distinct', async () => {
+  it('dims a finished duet while its lead keeps singing and completed harmonies and future rows stay distinct', async () => {
     let mediaSeconds = 1.25
     const { api, popup, wrapper, currentTime } = mountLyricsWindowHarness(
       createPopupWindow(),
@@ -1229,16 +1229,101 @@ describe('useLyricsWindow', () => {
       await nextTick()
       expect(
         [...popup.document.querySelectorAll('.line.active')].map((node) => node.textContent),
-      ).toEqual(['Lead', 'Duet'])
+      ).toEqual(['Lead'])
       expect(popup.document.querySelector('.line.after')?.textContent).toBe('Future')
       expect(
         [...popup.document.querySelectorAll('.line.before')].map((node) => node.textContent),
-      ).toEqual(['Harmony'])
+      ).toEqual(['Duet', 'Harmony'])
       mediaSeconds = 1.25
       currentTime.value = mediaSeconds
       await nextTick()
       expect(popup.document.querySelectorAll('.line.before')).toHaveLength(0)
       expect(popup.document.querySelectorAll('.line.active')).toHaveLength(3)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('releases an ended native line from its own media clock despite a stale parent snapshot', async () => {
+    let mediaSeconds = 1.5
+    const { api, popup, wrapper, isPlaying, currentTime } = mountLyricsWindowHarness(
+      createPopupWindow(),
+      () => mediaSeconds,
+    )
+    try {
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        activeIndices: [0],
+        lines: [
+          {
+            time: 0,
+            endTime: 2.01,
+            text: 'First',
+            wordSource: 'native',
+            words: [{ time: 0, duration: 2.01, text: 'First' }],
+          },
+          {
+            time: 2,
+            endTime: 4,
+            text: 'Second',
+            wordSource: 'native',
+            words: [{ time: 2, duration: 2, text: 'Second' }],
+          },
+          {
+            time: 6,
+            endTime: 7,
+            text: 'Third',
+            wordSource: 'native',
+            words: [{ time: 6, duration: 1, text: 'Third' }],
+          },
+        ],
+      })
+      isPlaying.value = true
+      await nextTick()
+      const row = (index: number) =>
+        popup.document.querySelector<HTMLElement>(`.line[data-index="${index}"]`)!
+      const firstWord = row(0).querySelector<HTMLElement>('.word')!
+      const assertHandoff = () => {
+        expect(row(0).classList.contains('before')).toBe(true)
+        expect(row(0).classList.contains('active')).toBe(false)
+        expect(row(1).classList.contains('active')).toBe(true)
+        expect(row(1).classList.contains('focused')).toBe(true)
+        expect(popup.document.querySelectorAll('.line.active')).toHaveLength(1)
+        for (const property of ['--w', '--e', '--lyric-word-rise'])
+          expect(firstWord.style.getPropertyValue(property)).toBe('')
+        expect(row(1).querySelector<HTMLElement>('.word')?.style.getPropertyValue('--w')).not.toBe(
+          '',
+        )
+      }
+
+      mediaSeconds = 2
+      runPopupFrames(popup, 1)
+      expect(
+        [...popup.document.querySelectorAll('.line.active')].map((line) => line.textContent),
+      ).toEqual(['First', 'Second'])
+      expect(firstWord.style.getPropertyValue('--w')).not.toBe('')
+
+      mediaSeconds = 2.01
+      runPopupFrames(popup, 1)
+      assertHandoff()
+      mediaSeconds = 2.02
+      runPopupFrames(popup, 1)
+      assertHandoff()
+      expect(currentTime.value).toBe(0)
+
+      mediaSeconds = 1.5
+      currentTime.value = mediaSeconds
+      await nextTick()
+      expect(row(0).classList.contains('active')).toBe(true)
+      expect(row(0).classList.contains('before')).toBe(false)
+      expect(row(1).classList.contains('active')).toBe(false)
+      expect(firstWord.style.getPropertyValue('--w')).not.toBe('')
+      mediaSeconds = 2.02
+      runPopupFrames(popup, 1)
+      assertHandoff()
+      expect(currentTime.value).toBe(1.5)
     } finally {
       wrapper.unmount()
     }

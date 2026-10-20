@@ -207,7 +207,7 @@ describe('lyric highlight lifecycle', () => {
     }
   })
 
-  it('retains overlapping voices until a new phrase takes over and never scrolls past a singing lead', () => {
+  it('dims finished overlapping voices while keeping the earliest singing group in focus', () => {
     const lines: LyricLine[] = [
       { time: 0, endTime: 5, text: 'Long lead' },
       { time: 1, endTime: 2, text: 'Short response', agent: 'secondary' },
@@ -215,11 +215,54 @@ describe('lyric highlight lifecycle', () => {
       { time: 8, endTime: 9, text: 'Next phrase' },
     ]
     const timeline = createLyricTimeline(lines)
-    expect(timeline.read(3)).toMatchObject({ active: [0], highlighted: [0, 1], anchor: 0 })
+    expect(timeline.read(3)).toMatchObject({ active: [0], highlighted: [0], anchor: 0 })
     expect(timeline.read(4)).toMatchObject({ active: [0, 2], highlighted: [0, 2], anchor: 0 })
-    expect(timeline.read(5)).toMatchObject({ active: [2], highlighted: [0, 2], anchor: 0 })
-    expect(timeline.read(7)).toMatchObject({ highlighted: [0, 2], held: true, anchor: 0 })
+    expect(timeline.read(5)).toMatchObject({ active: [2], highlighted: [2], anchor: 2 })
+    expect(timeline.read(7)).toMatchObject({ highlighted: [2], held: true, anchor: 2 })
     expect(timeline.read(8)).toMatchObject({ highlighted: [3], anchor: 3 })
+  })
+
+  it('ends a slight native overlap at the exact group end, including forward and reverse seeks', () => {
+    const lines: LyricLine[] = [
+      { time: 0, endTime: 2.01, text: 'Previous' },
+      { time: 2, endTime: 4, text: 'Current' },
+      { time: 6, endTime: 7, text: 'Next' },
+    ]
+    const timeline = createLyricTimeline(lines)
+    const expected: Array<[number, number[], number]> = [
+      [1.5, [0], 0],
+      [2, [0, 1], 0],
+      [2.009, [0, 1], 0],
+      [2.01, [1], 1],
+      [2.02, [1], 1],
+      [4, [1], 1],
+      [5.5, [1], 1],
+      [6, [2], 2],
+      [7, [], 2],
+    ]
+    expect(timeline.nextBoundary(2)).toBe(2.01)
+    for (const [time, highlighted, anchor] of [...expected, ...[...expected].reverse()]) {
+      const direct = resolveLyricScene(lines, time)
+      expect(direct, `at ${time}s`).toMatchObject({ highlighted, anchor })
+      expect(timeline.read(time)).toEqual(direct)
+      expect(createLyricTimeline(lines).read(time)).toEqual(direct)
+    }
+  })
+
+  it('holds only the last finishing group through silence, even with duplicate and unordered starts', () => {
+    const lines: LyricLine[] = [
+      { time: 2, endTime: 3, text: 'Later short response', agent: 'secondary' },
+      { time: 0, endTime: 5, text: 'Long lead' },
+      { time: 0, endTime: 1, text: 'Simultaneous short voice', agent: 'secondary' },
+      { time: 7, endTime: 8, text: 'Next phrase' },
+    ]
+    const timeline = createLyricTimeline(lines)
+    expect(timeline.read(0).highlighted).toEqual([1, 2])
+    expect(timeline.read(1)).toMatchObject({ highlighted: [1], anchor: 1 })
+    expect(timeline.read(2).highlighted).toEqual([0, 1])
+    expect(timeline.read(3)).toMatchObject({ highlighted: [1], anchor: 1 })
+    expect(timeline.read(5)).toMatchObject({ highlighted: [1], anchor: 1, held: true })
+    expect(timeline.read(7).highlighted).toEqual([3])
   })
 
   it('uses a harmony group end for silence detection and keeps its primary as the anchor', () => {
@@ -252,8 +295,8 @@ describe('lyric highlight lifecycle', () => {
       [0, [0], 0],
       [2, [0, 1], 0],
       [4, [0, 1, 2], 0],
-      [5, [0, 1], 0],
-      [9, [0, 1], 0],
+      [5, [0], 0],
+      [9, [0], 0],
       [10, [], 1],
       [17, [], 1],
       [18, [3], 3],

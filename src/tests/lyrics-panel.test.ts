@@ -972,6 +972,80 @@ describe('LyricsPanel', () => {
   })
 
   describe('following playback', () => {
+    it('releases a finished native line after a brief overlap and restores the handoff after seeking back', async () => {
+      const lines: LyricLine[] = [
+        {
+          time: 0,
+          endTime: 2.01,
+          text: 'First',
+          wordSource: 'native',
+          words: [{ time: 0, duration: 2.01, text: 'First' }],
+        },
+        {
+          time: 2,
+          endTime: 4,
+          text: 'Second',
+          wordSource: 'native',
+          words: [{ time: 2, duration: 2, text: 'Second' }],
+        },
+        {
+          time: 6,
+          endTime: 7,
+          text: 'Third',
+          wordSource: 'native',
+          words: [{ time: 6, duration: 1, text: 'Third' }],
+        },
+      ]
+      mockedLoadTrackLyrics.mockResolvedValueOnce(lines)
+      const { wrapper, store } = await mountReadyPanel({ currentTime: 1.5 })
+      const row = (index: number) => wrapper.get(`[data-lyric-index="${index}"]`)
+      const firstWord = row(0).get<HTMLElement>('.lyric-word').element
+      const assertHandoff = () => {
+        expect(row(0).classes()).toContain('completed')
+        expect(row(0).classes()).not.toContain('active')
+        expect(row(1).classes()).toContain('active')
+        expect(row(1).classes()).not.toContain('completed')
+        expect(wrapper.findAll('.lyric-line.active')).toHaveLength(1)
+        expect(row(1).attributes('tabindex')).toBe('0')
+        expect(wrapper.emitted('snapshot')?.at(-1)?.[0]).toMatchObject({
+          activeIndex: 1,
+          activeIndices: [1],
+        })
+        for (const property of ['--lyric-word-fill', '--lyric-word-edge', '--lyric-word-rise'])
+          expect(firstWord.style.getPropertyValue(property)).toBe('')
+        for (const character of firstWord.querySelectorAll<HTMLElement>('.lyric-char'))
+          expect(character.style.getPropertyValue('--lyric-char-emphasis')).toBe('')
+        expect(
+          row(1)
+            .get<HTMLElement>('.lyric-word')
+            .element.style.getPropertyValue('--lyric-word-fill'),
+        ).not.toBe('')
+      }
+
+      await moveTo(store, 2)
+      expect(
+        wrapper.findAll('.lyric-line.active').map((line) => line.attributes('data-lyric-index')),
+      ).toEqual(['0', '1'])
+      expect(firstWord.style.getPropertyValue('--lyric-word-fill')).not.toBe('')
+
+      await moveTo(store, 2.01)
+      assertHandoff()
+      await moveTo(store, 2.02)
+      assertHandoff()
+
+      await moveTo(store, 1.5)
+      expect(row(0).classes()).toContain('active')
+      expect(row(0).classes()).not.toContain('completed')
+      expect(row(1).classes()).not.toContain('active')
+      expect(firstWord.style.getPropertyValue('--lyric-word-fill')).not.toBe('')
+      expect(wrapper.emitted('snapshot')?.at(-1)?.[0]).toMatchObject({
+        activeIndex: 0,
+        activeIndices: [0],
+      })
+      await moveTo(store, 2.02)
+      assertHandoff()
+    })
+
     it('distinguishes completed, singing and upcoming lines and restores them after seeking back', async () => {
       const { wrapper, store } = await mountReadyPanel({ currentTime: 11 })
       const classes = (index: number) => wrapper.get(`[data-lyric-index="${index}"]`).classes()

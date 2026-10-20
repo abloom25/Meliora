@@ -96,7 +96,8 @@ const popupStyles = `
      否则未写入的音节会让整条 background-image 失效、文字变透明 */
   /* padding 撑开背景绘制盒、负 margin 抵消排版影响:否则 background-clip: text 会把 g/y/p 的降部切掉;
      横向同理——letter-spacing: -.035em 让盒宽比末字字形窄,不留余量字会被左右削掉一道 */
-  .word { display: inline-block; max-width: 100%; padding: .08em .12em .16em; margin: -.08em -.12em -.16em; color: var(--lyric-fill); translate: 0 calc(var(--lyric-word-rise,0) * -.05em); }
+  /* max-width 约束文字内容，不能让绘制留白挤占文字宽度、提前触发词内换行。 */
+  .word { box-sizing: content-box; display: inline-block; max-width: 100%; padding: .08em .12em .16em; margin: -.08em -.12em -.16em; color: var(--lyric-fill); translate: 0 calc(var(--lyric-word-rise,0) * -.05em); }
   @supports (background-clip: text) or (-webkit-background-clip: text) {
     /* --e 是前沿柔化宽度的缩放,进度为 0 或 1 时收到 0;
        否则未唱词的左边缘会被画出一段亮色渐变 */

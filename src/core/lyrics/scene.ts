@@ -10,7 +10,7 @@ import { createLyricGroupTimings, LYRIC_INTERLUDE_GAP_SECONDS } from './group-ti
 export interface LyricScene {
   /** 正在唱的所有行；held 时仍兼容返回最近主句，不能把它当作正在发声。 */
   active: number[]
-  /** 视觉高亮，与发声分开；短句间保留主句高亮，和声只在自己的时间内高亮。 */
+  /** 视觉高亮，与发声分开；短暂静默时保留最后结束的主句组，和声只在自己的时间内高亮。 */
   highlighted: number[]
   /** true 表示没有实际发声的歌词，active 仅保留最近主句。 */
   held: boolean
@@ -53,28 +53,39 @@ function lowerBound(values: readonly number[], time: number): number {
 
 /**
  * 高亮生命周期以主句与所属和声为一组，不能被一句内部的和声起音截断。
+ * 只在所有组都唱完后的短暂静默里延续最后一组，重叠演唱中已结束的组及时退亮。
  * 预先把“唱完后等下一句”转换成区间，所以直接 seek 与顺播具有相同结果。
  * 长空隙按所有重叠组的最晚结束计算，避免短声部结束时误判整首歌进入间奏。
  */
 function createHighlightIndex(lines: readonly LyricLine[], parents: ReadonlyMap<number, number>) {
   const ordered = createLyricGroupTimings(lines, parents)
-  const starts = [...new Set(ordered.map((group) => group.start))]
+  const starts = ordered.map((group) => group.start)
+  const latestEnds: number[] = []
   const interludeStarts: number[] = []
   let songEnd = Number.NEGATIVE_INFINITY
   for (const group of ordered) {
     if (Number.isFinite(songEnd) && group.start - songEnd >= LYRIC_INTERLUDE_GAP_SECONDS)
       interludeStarts.push(songEnd)
     songEnd = Math.max(songEnd, group.end)
+    latestEnds.push(songEnd)
   }
-  const highlightedLines: LyricLine[] = ordered.map((group) => ({
-    time: group.start,
-    endTime: Math.min(
-      starts[lowerBound(starts, group.end)] ?? songEnd,
-      interludeStarts[lowerBound(interludeStarts, group.end)] ?? songEnd,
-      songEnd,
-    ),
-    text: '',
-  }))
+  const highlightedLines: LyricLine[] = ordered.map((group) => {
+    const nextStart = lowerBound(starts, group.end)
+    // 已开始的其他组若仍在唱，当前组不能把高亮延长到之后另一句的起点。
+    // 同起点的组也保留独立索引；只有共同结束时才一起保留短隙高亮。
+    const overlapping = (latestEnds[nextStart - 1] ?? group.end) > group.end
+    return {
+      time: group.start,
+      endTime: overlapping
+        ? group.end
+        : Math.min(
+            starts[nextStart] ?? songEnd,
+            interludeStarts[lowerBound(interludeStarts, group.end)] ?? songEnd,
+            songEnd,
+          ),
+      text: '',
+    }
+  })
   const index = createLyricTimeIndex(highlightedLines)
   return {
     nextBoundary: index.nextBoundary,
