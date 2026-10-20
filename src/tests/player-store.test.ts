@@ -366,9 +366,10 @@ describe('player store peekNext / peekPrevious', () => {
 })
 
 describe('player settings migration', () => {
-  it('defaultSettings has settingsVersion 1', () => {
+  it('defaults to responsive lyric scaling with settingsVersion 2', () => {
     const result = migrateSettings({})
-    expect(result.settingsVersion).toBe(1)
+    expect(result.settingsVersion).toBe(2)
+    expect(result.lyricScale).toBe(1)
     expect(result.volume).toBe(0.72)
     expect(result.playMode).toBe('loop')
     expect(result.smoothTrackChange).toBe(true)
@@ -379,28 +380,29 @@ describe('player settings migration', () => {
     expect(result.beatAnalysisMode).toBe('basic')
   })
 
-  it('migrates legacy settings without settingsVersion to version 1 while preserving user preferences', () => {
-    const legacy: Partial<PlayerSettings> = {
+  it('migrates legacy pixel sizes to proportional scaling while preserving preferences', () => {
+    const legacy = {
       volume: 0.3,
-      playMode: 'shuffle',
+      playMode: 'shuffle' as const,
       backgroundBlur: 50,
       lyricFontSize: 24,
     }
     const result = migrateSettings(legacy)
 
-    expect(result.settingsVersion).toBe(1)
+    expect(result.settingsVersion).toBe(2)
     expect(result.volume).toBe(0.3)
     expect(result.playMode).toBe('shuffle')
     expect(result.backgroundBlur).toBe(50)
-    expect(result.lyricFontSize).toBe(24)
+    expect(result.lyricScale).toBe(1.2)
+    expect(result).not.toHaveProperty('lyricFontSize')
     expect(result.smoothTrackChange).toBe(true)
     expect(result.autoHideChrome).toBe(true)
     expect(result.progressLyricPreview).toBe(false)
   })
 
   it('keeps settingsVersion when already at current version', () => {
-    const result = migrateSettings({ settingsVersion: 1, volume: 0.5 })
-    expect(result.settingsVersion).toBe(1)
+    const result = migrateSettings({ settingsVersion: 2, volume: 0.5 })
+    expect(result.settingsVersion).toBe(2)
     expect(result.volume).toBe(0.5)
   })
 
@@ -442,7 +444,7 @@ describe('player settings migration', () => {
     localStorage.setItem('meliora:settings', JSON.stringify({ volume: 0.4, playMode: 'single' }))
     const store = usePlayerStore()
 
-    expect(store.settings.settingsVersion).toBe(1)
+    expect(store.settings.settingsVersion).toBe(2)
     expect(store.settings.volume).toBe(0.4)
     expect(store.settings.playMode).toBe('single')
     expect(store.settings.autoHideChrome).toBe(true)
@@ -541,7 +543,7 @@ describe('player settings migration', () => {
     expect(result.beatBrightness).toBe(0)
     expect(result.beatFlashRate).toBe(4)
     expect(result.beatVisualDelay).toBe(300)
-    expect(result.lyricFontSize).toBe(22)
+    expect(result.lyricScale).toBe(1.1)
     expect(result.lyricAnimation).toBe(true)
     expect(result.lyricTranslation).toBe(true)
     expect(result.progressLyricPreview).toBe(true)
@@ -552,7 +554,56 @@ describe('player settings migration', () => {
       preset: 'flat',
       bands: [12, 0, -12, 0, 3],
     })
-    expect(result.settingsVersion).toBe(1)
+    expect(result.settingsVersion).toBe(2)
+  })
+
+  it.each([
+    [15, 0.75],
+    [20, 1],
+    [30, 1.5],
+    [5, 0.75],
+    [100, 1.5],
+    [null, 1],
+    ['', 1],
+    [Number.NaN, 1],
+  ])('migrates legacy lyric size %s to scale %s', (lyricFontSize, expected) => {
+    expect(migrateSettings({ lyricFontSize }).lyricScale).toBe(expected)
+  })
+
+  it.each([
+    [0.5, 0.75],
+    [2, 1.5],
+    [1.25, 1.25],
+    ['1.15', 1.15],
+    ['', 1],
+    [null, 1],
+    [true, 1],
+    [Number.NaN, 1],
+    [Number.POSITIVE_INFINITY, 1],
+  ])('sanitizes lyric scale %s and prioritizes it over the old size', (lyricScale, expected) => {
+    expect(
+      migrateSettings({ lyricScale: lyricScale as number, lyricFontSize: 30 }).lyricScale,
+    ).toBe(expected)
+  })
+
+  it('persists the migrated scale without retaining a legacy pixel preference', async () => {
+    vi.useFakeTimers()
+    localStorage.setItem(
+      'meliora:settings',
+      JSON.stringify({ settingsVersion: 1, lyricFontSize: 25 }),
+    )
+    const store = usePlayerStore()
+    expect(store.settings.lyricScale).toBe(1.25)
+    store.settings.volume = 0.5
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(200)
+
+    const saved = JSON.parse(localStorage.getItem('meliora:settings')!)
+    expect(saved.lyricScale).toBe(1.25)
+    expect(saved.settingsVersion).toBe(2)
+    expect(saved).not.toHaveProperty('lyricFontSize')
+    activateTestPinia()
+    expect(usePlayerStore().settings.lyricScale).toBe(1.25)
   })
 
   it('clamps the lyric spring coefficient into the supported range', () => {
@@ -563,12 +614,12 @@ describe('player settings migration', () => {
 
   it('resets only the requested settings and leaves the rest alone', () => {
     const store = usePlayerStore()
-    store.settings.lyricFontSize = 30
+    store.settings.lyricScale = 1.5
     store.settings.backgroundBlur = 130
 
-    store.resetSettings(['lyricFontSize'])
+    store.resetSettings(['lyricScale'])
 
-    expect(store.settings.lyricFontSize).toBe(20)
+    expect(store.settings.lyricScale).toBe(1)
     expect(store.settings.backgroundBlur).toBe(130)
   })
 

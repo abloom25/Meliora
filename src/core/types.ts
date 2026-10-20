@@ -94,7 +94,8 @@ export interface PlayerSettings {
   beatFlashRate: number
   /** 闪光延迟微调(ms),叠加在按输出延迟自动补偿之上;0 = 自动 */
   beatVisualDelay: number
-  lyricFontSize: number
+  /** 歌词在自适应字号基础上的缩放倍率(1 = 100%)。 */
+  lyricScale: number
   lyricAnimation: boolean
   /** 歌词牵引滚动的弹簧刚度系数(1 = 默认)。越大越紧绷、越快到位,越小越绵软 */
   lyricSpring: number

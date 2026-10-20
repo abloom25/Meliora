@@ -1,4 +1,4 @@
-import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch, type Ref } from 'vue'
 import type { Track, PlayerSettings } from '../core/types'
 import { extractThemeColor, type ThemeColor } from '../platform/web/theme'
 import { useThemeAccent } from './useThemeAccent'
@@ -10,8 +10,16 @@ export function usePlayerArtwork(
   settings: Readonly<Ref<PlayerSettings>>,
 ) {
   let disposed = false
+  let mainCoverImage: HTMLImageElement | null = null
+  let coverRevision = 0
+  const imageLoads = new WeakMap<
+    HTMLImageElement,
+    { trackId: string; coverUrl: string; revision: number; promise: Promise<void> }
+  >()
   onBeforeUnmount(() => {
     disposed = true
+    mainCoverImage = null
+    coverRevision += 1
   })
 
   // Theme accent composable
@@ -59,32 +67,51 @@ export function usePlayerArtwork(
       },
     ]
   })
-  async function handleMainCoverLoaded(trackId: string, event: Event) {
-    const image = event.currentTarget as HTMLImageElement
-    const coverUrl = image.getAttribute('src') ?? undefined
+  function isCurrentImage(
+    image: HTMLImageElement,
+    trackId: string,
+    coverUrl: string,
+    revision: number,
+  ): boolean {
+    return (
+      !disposed &&
+      image === mainCoverImage &&
+      coverRevision === revision &&
+      currentTrack.value?.id === trackId &&
+      currentTrack.value?.cover === coverUrl &&
+      image.getAttribute('src') === coverUrl
+    )
+  }
+
+  async function decodeMainCover(
+    image: HTMLImageElement,
+    trackId: string,
+    coverUrl: string,
+    revision: number,
+  ): Promise<void> {
     // 等图片完整解码完成后再标记 loaded：
     // 避免浏览器渲染半解码的图像（视觉上"从上往下"逐行加载的效果），
     // 让 fade-in transition 真正发生在一张完整图像上。
+    let decoded = true
     try {
       await image.decode?.()
     } catch {
       // 部分浏览器对跨域 / data URL 图片会拒绝 decode()，
-      // 图片可能未完整解码，此时提取的主题色不可靠，直接回退到默认色。
-      if (
-        !disposed &&
-        currentTrack.value?.id === trackId &&
-        currentTrack.value?.cover === coverUrl
-      ) {
-        markCoverLoaded(trackId, coverUrl)
-        markMainCoverReady(trackId)
-        resetTheme()
-      }
-      return
+      // 已有有效像素时仍可显示，主题色回退；损坏图片不能被标记为就绪。
+      decoded = false
     }
-    if (disposed || currentTrack.value?.id !== trackId || currentTrack.value?.cover !== coverUrl)
+    if (
+      !isCurrentImage(image, trackId, coverUrl, revision) ||
+      !image.complete ||
+      image.naturalWidth <= 0
+    )
       return
     markCoverLoaded(trackId, coverUrl)
     markMainCoverReady(trackId)
+    if (!decoded) {
+      resetTheme()
+      return
+    }
     // extractThemeColor 现在是 async（Worker 化）；直接 await 即可。
     // 如果 Worker 路径成功就返回新主题色；失败时内部已自动 fallback 到主线程 + null 兜底。
     let immediateTheme: ThemeColor | null
@@ -93,13 +120,49 @@ export function usePlayerArtwork(
     } catch {
       immediateTheme = null
     }
-    if (disposed || currentTrack.value?.id !== trackId || currentTrack.value?.cover !== coverUrl)
-      return
+    if (!isCurrentImage(image, trackId, coverUrl, revision)) return
     if (!immediateTheme) {
       resetTheme()
       return
     }
     applyTheme(immediateTheme)
+  }
+
+  function ensureMainCoverReady(image: HTMLImageElement, trackId: string): Promise<void> {
+    const coverUrl = image.getAttribute('src')
+    const revision = coverRevision
+    if (!coverUrl || !isCurrentImage(image, trackId, coverUrl, revision)) return Promise.resolve()
+    const previous = imageLoads.get(image)
+    if (
+      previous?.trackId === trackId &&
+      previous.coverUrl === coverUrl &&
+      previous.revision === revision
+    )
+      return previous.promise
+    const promise = decodeMainCover(image, trackId, coverUrl, revision)
+    imageLoads.set(image, { trackId, coverUrl, revision, promise })
+    return promise
+  }
+
+  function reconcileMainCover(): void {
+    const image = mainCoverImage
+    const trackId = currentTrack.value?.id
+    // 同 src 的节点可能被布局切换保留，或挂载时就已命中浏览器图片缓存。
+    // 就绪状态来自实际 DOM 图像，不依赖一次性的 load 事件，也不借用曲库缩略图缓存。
+    if (image && trackId && image.complete && image.naturalWidth > 0)
+      void ensureMainCoverReady(image, trackId)
+  }
+
+  function setMainCoverImage(element: unknown): void {
+    mainCoverImage = element instanceof HTMLImageElement ? element : null
+    reconcileMainCover()
+  }
+
+  function handleMainCoverLoaded(trackId: string, event: Event): Promise<void> {
+    const image = event.currentTarget
+    return image instanceof HTMLImageElement
+      ? ensureMainCoverReady(image, trackId)
+      : Promise.resolve()
   }
 
   function coverRetryKey(trackId: string, cover: string) {
@@ -118,7 +181,17 @@ export function usePlayerArtwork(
     coverCorsRetry.value = next
   }
 
-  function handleMainCoverError(trackId: string, corsKey: string) {
+  function handleMainCoverError(trackId: string, corsKey: string, event?: Event) {
+    if (
+      disposed ||
+      (event && event.currentTarget !== mainCoverImage) ||
+      !currentTrack.value?.cover ||
+      coverRetryKey(currentTrack.value.id, currentTrack.value.cover) !== corsKey ||
+      currentTrack.value.id !== trackId
+    )
+      return
+    coverRevision += 1
+    resetMainCover()
     // crossorigin="anonymous" 模式下,CDN 不返回 Access-Control-Allow-Origin 会触发 onerror。
     // 首次失败时回退:标记该 trackId 并通过 :key 变化重建 <img>(移除 crossorigin),
     // 保证封面显示;此时取色因 canvas 污染降级为默认色。
@@ -131,12 +204,16 @@ export function usePlayerArtwork(
   }
 
   watch(
-    () => [currentTrack.value?.id, currentTrack.value?.cover],
+    [() => currentTrack.value?.id, () => currentTrack.value?.cover],
     () => {
+      coverRevision += 1
       resetMainCover()
       if (!currentTrack.value?.cover) resetTheme()
+      void nextTick(reconcileMainCover)
     },
-    { flush: 'sync' },
+    // 曲库刷新会先删除旧 cover 再填回元信息；只观察这一批更新最终的身份，
+    // 否则同 URL 的 img 被保留且不再发 load，前景却被永久重置成透明。
+    { immediate: true },
   )
 
   return {
@@ -151,6 +228,7 @@ export function usePlayerArtwork(
     mainCoverReadyTrackId,
     backgroundImage,
     mainCoverItems,
+    setMainCoverImage,
     handleMainCoverLoaded,
     handleMainCoverError,
   }

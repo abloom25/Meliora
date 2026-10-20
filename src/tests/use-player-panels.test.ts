@@ -9,7 +9,13 @@ afterEach(() => {
 })
 
 function mountPanels(
-  options: { mobile?: boolean; debugEnabled?: boolean; autoHide?: boolean } = {},
+  options: {
+    mobile?: boolean
+    phoneLandscape?: boolean
+    compactLandscape?: boolean
+    debugEnabled?: boolean
+    autoHide?: boolean
+  } = {},
 ) {
   let panels!: ReturnType<typeof usePlayerPanels>
   const debugAvailable = ref(options.debugEnabled ?? false)
@@ -19,9 +25,11 @@ function mountPanels(
       setup() {
         panels = usePlayerPanels({
           compactViewport: ref(options.mobile ?? false),
-          phoneDevice: ref(options.mobile ?? false),
-          isPhoneLandscape: ref(false),
-          isMobileSheet: ref(options.mobile ?? false),
+          phoneDevice: ref(Boolean(options.mobile || options.phoneLandscape)),
+          isCompactLandscape: ref(Boolean(options.phoneLandscape || options.compactLandscape)),
+          isMobileSheet: ref(
+            Boolean(options.mobile && !options.phoneLandscape && !options.compactLandscape),
+          ),
           settingsAvailable,
           ...(options.debugEnabled === undefined ? {} : { debugAvailable }),
           autoHideChrome: () => options.autoHide ?? false,
@@ -30,9 +38,18 @@ function mountPanels(
         return () =>
           h('div', [
             h('button', { id: 'debug-trigger', onClick: panels.toggleDebug }, 'Debug'),
+            h('button', { id: 'library-trigger', onClick: panels.toggleLibrary }, 'Library'),
             panels.listOpen.value
               ? h('div', { ref: 'libraryDrawerRef' }, [
-                  h('button', { id: 'library-first', ref: 'libraryHandleRef' }, 'Library'),
+                  h('span', { ref: 'libraryHandleRef' }),
+                  options.phoneLandscape || options.compactLandscape
+                    ? h(
+                        'button',
+                        { id: 'library-close', onClick: panels.closePanelsAnimated },
+                        '关闭曲库',
+                      )
+                    : null,
+                  h('input', { id: 'library-first', type: 'search', 'aria-label': '搜索歌曲' }),
                   h('button', { id: 'library-last' }, 'Last'),
                 ])
               : null,
@@ -56,6 +73,82 @@ function mountPanels(
 }
 
 describe('player panels', () => {
+  it.each([
+    { mobile: true, phoneLandscape: false },
+    { mobile: false, phoneLandscape: true },
+  ])('does not autofocus the library search on a phone (%o)', async (options) => {
+    const { wrapper, panels } = mountPanels(options)
+    try {
+      const trigger = document.getElementById('library-trigger')!
+      trigger.focus()
+      trigger.click()
+      await nextTick()
+      await nextTick()
+      expect(panels.listOpen.value).toBe(true)
+      expect(document.activeElement).toBe(trigger)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it.each([false, true])(
+    'autofocuses desktop library search and restores its trigger on Escape (compactLandscape=%s)',
+    async (compactLandscape) => {
+      vi.useFakeTimers()
+      const { wrapper, panels } = mountPanels({ compactLandscape })
+      try {
+        const trigger = document.getElementById('library-trigger')!
+        trigger.focus()
+        trigger.click()
+        await nextTick()
+        await nextTick()
+        expect(document.activeElement?.id).toBe('library-first')
+        if (compactLandscape) {
+          document.getElementById('library-last')!.focus()
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', cancelable: true }))
+          expect(document.activeElement?.id).toBe('library-close')
+        }
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true }))
+        await nextTick()
+        expect(panels.listOpen.value).toBe(false)
+        await vi.advanceTimersByTimeAsync(0)
+        expect(document.activeElement).toBe(trigger)
+      } finally {
+        wrapper.unmount()
+      }
+    },
+  )
+
+  it('keeps keyboard entry, focus wrapping and Escape available on a landscape phone', async () => {
+    vi.useFakeTimers()
+    const { wrapper, panels } = mountPanels({ phoneLandscape: true })
+    try {
+      const trigger = document.getElementById('library-trigger')!
+      trigger.focus()
+      trigger.click()
+      await nextTick()
+      await nextTick()
+      const first = document.getElementById('library-close')!
+      const last = document.getElementById('library-last')!
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', cancelable: true }))
+      expect(document.activeElement).toBe(first)
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, cancelable: true }),
+      )
+      expect(document.activeElement).toBe(last)
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', cancelable: true }))
+      expect(document.activeElement).toBe(first)
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true }))
+      await nextTick()
+      expect(panels.listOpen.value).toBe(false)
+      expect(wrapper.find('[aria-label="搜索歌曲"]').exists()).toBe(false)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(document.activeElement).toBe(trigger)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it.each([false, true])(
     'hands off other drawers to debug immediately (mobile=%s)',
     async (mobile) => {

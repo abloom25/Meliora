@@ -227,6 +227,7 @@
         <h2>播放队列</h2>
         <p>{{ total }} 首歌曲</p>
       </div>
+      <slot name="header-actions" />
     </header>
 
     <div class="list-toolbar">

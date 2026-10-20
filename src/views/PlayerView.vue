@@ -20,6 +20,7 @@
     Settings,
     Share2,
     Shuffle,
+    X,
   } from '@lucide/vue'
   import { hasTrackLyricsSource } from '../services/lyrics'
   import { usePlayerStore } from '../stores/player'
@@ -37,9 +38,11 @@
   import { useKeyboardShortcuts } from '../composables/useKeyboardShortcuts'
   import { useHaptic } from '../platform/web/useHaptic'
   import { useDeviceDetection } from '../platform/web/useDeviceDetection'
+  import { usePlayerLayoutMotion } from '../platform/web/usePlayerLayoutMotion'
   import ArtworkBackground from '../components/ArtworkBackground.vue'
   import LyricsPanel from '../components/LyricsPanel.vue'
   import PlayerControls from '../components/PlayerControls.vue'
+  import MinimalPlayerControls from '../components/MinimalPlayerControls.vue'
   import SettingsPanel from '../components/SettingsPanel.vue'
   import TrackList from '../components/TrackList.vue'
   import Toast from '../components/Toast.vue'
@@ -64,13 +67,26 @@
     portableDevice,
     phoneDevice,
     lyricsWindowSupported,
+    viewportMode,
     isMobileSheet,
-    isPhoneLandscape,
+    isCompactLandscape,
+    isShortLandscape,
+    isMinimalPlayer,
+    minimalArtworkVisible,
+    minimalMetadataVisible,
+    minimalMetadataPlacement,
+    minimalArtworkWidth,
+    minimalCoverSize,
+    viewportWidth,
     viewportHeight,
+    viewportLeft,
     viewportTop,
+    landscapeStageHeight,
+    landscapeCoverSize,
   } = useDeviceDetection()
 
   const store = usePlayerStore()
+  const playerRoot = ref<HTMLElement | null>(null)
   const { currentTrack, currentTrackId, currentTime, duration, isPlaying, settings, tracks } =
     storeToRefs(store)
   // --beat-level 高频写入的目标节点：封面层(其 ::after 亮层只改 opacity)与叠加层(::before 光晕),
@@ -105,7 +121,7 @@
   } = usePlayerPanels({
     compactViewport,
     phoneDevice,
-    isPhoneLandscape,
+    isCompactLandscape,
     isMobileSheet,
     settingsAvailable,
     debugAvailable,
@@ -235,6 +251,7 @@
     mainCoverReadyTrackId,
     backgroundImage,
     mainCoverItems,
+    setMainCoverImage,
     handleMainCoverLoaded,
     handleMainCoverError,
   } = usePlayerArtwork(currentTrack, settings)
@@ -247,13 +264,56 @@
     }
   })
   const lyricsAvailable = computed(() => lyricAvailability.value !== 'unavailable')
-  const lyricsLayoutVisible = computed(() => lyricsEnabled.value && lyricsAvailable.value)
-  const lyricsVisible = computed(() => lyricsLayoutVisible.value && lyricsAvailable.value)
+  const lyricsLayoutVisible = computed(
+    () => isMinimalPlayer.value || (lyricsEnabled.value && lyricsAvailable.value),
+  )
+  const lyricsVisible = computed(
+    () => isMinimalPlayer.value || (lyricsLayoutVisible.value && lyricsAvailable.value),
+  )
   const lyricsPanelActive = computed(() =>
     isMobileSheet.value
       ? lyricsVisible.value && mobileView.value === 'lyrics'
       : lyricsVisible.value,
   )
+  usePlayerLayoutMotion({
+    layoutKey: () =>
+      `${viewportMode.value}:${minimalArtworkVisible.value}:${minimalMetadataPlacement.value}:${lyricsLayoutVisible.value}:${mobileView.value}`,
+    getTargets: () => [
+      {
+        key: 'cover',
+        element: playerRoot.value?.querySelector<HTMLElement>('.artwork-frame') ?? null,
+        scale: true,
+        reveal: true,
+      },
+      {
+        key: 'metadata',
+        element: playerRoot.value?.querySelector<HTMLElement>('.primary-meta') ?? null,
+        reveal: true,
+      },
+      {
+        key: 'lyrics',
+        element: playerRoot.value?.querySelector<HTMLElement>('.lyrics-column') ?? null,
+      },
+      {
+        key: 'dock',
+        element: playerRoot.value?.querySelector<HTMLElement>('.player-dock') ?? null,
+      },
+      {
+        key: 'mobile-controls',
+        element: playerRoot.value?.querySelector<HTMLElement>('.mobile-shared-controls') ?? null,
+      },
+    ],
+  })
+  usePlayerLayoutMotion({
+    layoutKey: () =>
+      `${viewportMode.value}:${isShortLandscape.value}:${listOpen.value}:${settingsOpen.value}:${debugOpen.value}`,
+    getTargets: () =>
+      ['library', 'settings', 'debug'].map((key) => ({
+        key,
+        element: playerRoot.value?.querySelector<HTMLElement>(`.${key}-drawer`) ?? null,
+        resize: true,
+      })),
+  })
   const playModeText = computed(() => PLAY_MODE_META[settings.value.playMode].text)
 
   // 设置面板的入参按语义收成两组:定时关闭的状态、以及由各 composable 决定的能力开关。
@@ -283,6 +343,14 @@
       lyricsSnapshot.value?.status ?? (lyricAvailability.value === 'loading' ? 'loading' : 'idle'),
   )
   const songLyricSource = computed(() => lyricsSnapshot.value?.source ?? null)
+  const minimalLyricMessage = computed(() => {
+    if (!currentTrack.value) return tracks.value.length ? '点击播放开始听歌' : '暂无歌曲'
+    if (songLyricStatus.value === 'error') return '歌词加载失败'
+    if (lyricAvailability.value === 'unavailable' || songLyricStatus.value === 'empty')
+      return '这首歌暂无歌词'
+    if (lyricAvailability.value === 'loading') return '正在加载歌词'
+    return ''
+  })
   const songHasWordTiming = computed(
     () => lyricsSnapshot.value?.lines.some((line) => Boolean(line.words?.length)) ?? false,
   )
@@ -297,8 +365,14 @@
   }))
   const playModeIcon = computed(() => PLAY_MODE_META[settings.value.playMode].icon)
   const beatStyle = computed(() => ({
+    '--player-viewport-width': viewportWidth.value ? `${viewportWidth.value}px` : '100vw',
     '--player-viewport-height': viewportHeight.value ? `${viewportHeight.value}px` : '100dvh',
+    '--player-viewport-left': `${viewportLeft.value}px`,
     '--player-viewport-top': `${viewportTop.value}px`,
+    '--landscape-stage-height': `${landscapeStageHeight.value}px`,
+    '--landscape-cover-size': `${landscapeCoverSize.value}px`,
+    '--minimal-artwork-width': `${minimalArtworkWidth.value}px`,
+    '--minimal-cover-size': `${minimalCoverSize.value}px`,
     // --beat-level 已移出本 computed：高频写入由节拍渲染适配器直接 setProperty 到目标节点，
     // 避免根元素 :style 改变触发整棵子树（233 个节点）样式重算。
     '--accent': accent.value,
@@ -341,6 +415,8 @@
   }
 
   function toggleLyrics() {
+    // 极简布局只显示歌词，不修改用户在完整布局中的显示偏好。
+    if (isMinimalPlayer.value) return
     if (!lyricsLayoutVisible.value && !lyricsAvailable.value) return
     triggerHaptic('selection')
 
@@ -440,6 +516,7 @@
 
 <template>
   <main
+    ref="playerRoot"
     class="app-shell"
     :class="{
       'background-disabled': !settings.dynamicBackground,
@@ -447,7 +524,12 @@
       'chrome-hidden': chromeHidden,
       'drawer-open': listOpen || settingsOpen || debugOpen,
       'mobile-sheet': isMobileSheet,
-      'phone-landscape': isPhoneLandscape,
+      'compact-landscape': isCompactLandscape,
+      'short-landscape': isShortLandscape,
+      'minimal-player': isMinimalPlayer,
+      'minimal-artwork-visible': minimalArtworkVisible,
+      'minimal-metadata-visible': minimalMetadataVisible,
+      'minimal-metadata-beside': minimalMetadataPlacement === 'beside',
       'beat-active': isPlaying,
       'css-theme-transition': cssTransitionSupported,
     }"
@@ -522,6 +604,7 @@
       class="now-playing-layout"
       :class="{
         'lyrics-hidden': !lyricsLayoutVisible,
+        'cover-centered': isMobileSheet || (!lyricsLayoutVisible && !isShortLandscape),
         loading: loading && !store.tracks.length,
         softened: panelsSoftened,
       }"
@@ -557,6 +640,7 @@
               draggable="false"
             />
             <img
+              :ref="setMainCoverImage"
               :src="cover.cover"
               :crossorigin="cover.corsRetried ? undefined : 'anonymous'"
               :alt="`${cover.title} 封面`"
@@ -564,7 +648,7 @@
               loading="eager"
               draggable="false"
               @load="handleMainCoverLoaded(cover.id, $event)"
-              @error="handleMainCoverError(cover.id, cover.corsKey)"
+              @error="handleMainCoverError(cover.id, cover.corsKey, $event)"
             />
           </template>
         </div>
@@ -608,6 +692,9 @@
         />
       </Transition>
 
+      <p v-if="isMinimalPlayer && minimalLyricMessage" class="minimal-lyric-message" role="status">
+        {{ minimalLyricMessage }}
+      </p>
       <div class="mobile-shared-controls" :class="{ 'lyrics-mode': mobileView === 'lyrics' }">
         <PlayerControls
           variant="page"
@@ -642,6 +729,20 @@
       </div>
     </section>
 
+    <div class="minimal-controls-overlay">
+      <Transition name="minimal-controls">
+        <MinimalPlayerControls
+          v-if="isMinimalPlayer"
+          :is-playing="isPlaying"
+          :current-time="currentTime"
+          :duration="duration"
+          :disabled="!tracks.length"
+          :on-toggle="toggleWithHaptic"
+          :on-next="nextWithHaptic"
+        />
+      </Transition>
+    </div>
+
     <footer class="player-dock">
       <div class="transport-float">
         <PlayerControls
@@ -666,7 +767,12 @@
         />
       </div>
       <div class="dock-actions">
-        <button :aria-label="playModeText" :title="playModeText" @click="cyclePlayModeWithHaptic">
+        <button
+          class="dock-play-mode"
+          :aria-label="playModeText"
+          :title="playModeText"
+          @click="cyclePlayModeWithHaptic"
+        >
           <component :is="playModeIcon" :size="19" />
         </button>
         <button
@@ -733,7 +839,17 @@
           @update:query="query = $event"
           @select="selectTrack"
           @reload="loadTracks"
-        />
+        >
+          <template v-if="isCompactLandscape" #header-actions>
+            <button
+              class="nav-button drawer-close"
+              aria-label="关闭曲库"
+              @click="closePanelsAnimated"
+            >
+              <X :size="20" />
+            </button>
+          </template>
+        </TrackList>
         <div v-if="currentTrack" class="drawer-mini-player">
           <span
             class="mini-artwork"
@@ -796,6 +912,14 @@
             <h2>播放设置</h2>
             <p>调整播放、歌词与显示</p>
           </div>
+          <button
+            v-if="isCompactLandscape"
+            class="nav-button drawer-close"
+            aria-label="关闭设置"
+            @click="closePanelsAnimated"
+          >
+            <X :size="20" />
+          </button>
         </header>
         <SettingsPanel
           :play-mode-text="playModeText"

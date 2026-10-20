@@ -223,7 +223,7 @@
   })
 
   const lyricPanelStyle = computed(() => ({
-    '--lyric-size': `${settings.value.lyricFontSize}px`,
+    '--lyric-scale': settings.value.lyricScale,
     '--lyric-tempo': lyricTempo.value,
   }))
 
@@ -790,7 +790,7 @@
     { immediate: true },
   )
   watch(
-    () => settings.value.lyricFontSize,
+    () => settings.value.lyricScale,
     () => void nextTick(relayout),
   )
   watch(
@@ -951,11 +951,15 @@
   }
 
   .lyrics-content {
-    --lyric-gap: clamp(22px, calc(var(--lyric-size) * 1.28), 42px);
+    --lyric-responsive-size: clamp(24px, min(3.2vw, 4.8dvh), 34px);
+    --lyric-responsive-gap: clamp(18px, min(2.5vw, 3.5dvh), 28px);
+    // 宿主只覆盖基准值，用户倍率最后乘入，避免紧凑布局的 clamp 吃掉缩放范围。
+    --lyric-gap: calc(var(--lyric-base-gap, var(--lyric-responsive-gap)) * var(--lyric-scale, 1));
     --lyric-harmony-gap: calc(var(--lyric-gap) * 0.3);
 
     position: absolute;
     inset: 0 7% 0 3%;
+    font-size: calc(var(--lyric-base-size, var(--lyric-responsive-size)) * var(--lyric-scale, 1));
     /* 只是把行距变量算成像素给引擎读(getComputedStyle 的 rowGap / columnGap),
        块级元素上的 gap 没有版面效果 */
     row-gap: var(--lyric-gap);
@@ -982,11 +986,12 @@
     opacity: calc(0.58 - var(--line-distance) * 0.065);
     filter: blur(calc(0.35px + var(--line-distance) * 0.78px));
     font-family: inherit;
-    font-size: clamp(24px, calc(var(--lyric-size) * 1.55), 42px);
+    font-size: inherit;
     font-weight: 690;
     line-height: 1.18;
     letter-spacing: -0.035em;
     text-align: left;
+    overflow-wrap: anywhere;
     cursor: default;
     transform-origin: left center;
     /* 每一帧都在改 translate,提前提升为合成层;视口外的行被引擎设为 visibility: hidden,
@@ -1061,7 +1066,7 @@
 
     /* 背景和声:更小更淡,附在主行下方 */
     &.background {
-      font-size: clamp(17px, calc(var(--lyric-size) * 1.02), 27px);
+      font-size: 0.67em;
       opacity: calc(0.4 - var(--line-distance) * 0.05);
 
       &.active {
@@ -1099,6 +1104,7 @@
     --lyric-word-bleed: 0.12em;
 
     display: inline-block;
+    max-width: 100%;
     /* background-clip: text 只在元素自身的背景盒内绘制。行高 1.18 比字体的自然行盒紧,
        g / y / p / q 的降部会伸出盒外,那一截没有背景可裁就被切掉。
        用 padding 撑开绘制盒、再用等量负 margin 抵消掉它对排版的影响。
@@ -1295,7 +1301,8 @@
 
   @media (max-width: 720px) {
     .lyrics-content {
-      --lyric-gap: clamp(22px, calc(var(--lyric-size) * 1.12), 34px);
+      --lyric-responsive-size: clamp(22px, 6.75vw, 30px);
+      --lyric-responsive-gap: clamp(18px, 5.5vw, 26px);
 
       inset: 0 7% 0 7%;
     }
@@ -1303,10 +1310,23 @@
     .lyric-line {
       width: 100%;
       max-width: none;
-      font-size: clamp(22px, calc(var(--lyric-size) * 1.35), 34px);
+    }
+  }
 
-      &.background {
-        font-size: clamp(15px, calc(var(--lyric-size) * 0.92), 23px);
+  @supports (container-type: size) {
+    .lyrics-viewport {
+      container-type: size;
+    }
+
+    .lyrics-content {
+      --lyric-responsive-size: clamp(24px, min(6cqw, 6cqh), 34px);
+      --lyric-responsive-gap: clamp(18px, min(5cqw, 5cqh), 28px);
+    }
+
+    @media (max-width: 720px) {
+      .lyrics-content {
+        --lyric-responsive-size: clamp(22px, min(6.75cqw, 8cqh), 30px);
+        --lyric-responsive-gap: clamp(18px, min(5.5cqw, 6cqh), 26px);
       }
     }
   }

@@ -9,7 +9,7 @@ import { useDrawerSheet } from './useDrawerSheet'
 export function usePlayerPanels(options: {
   compactViewport: Readonly<Ref<boolean>>
   phoneDevice: Readonly<Ref<boolean>>
-  isPhoneLandscape: Readonly<Ref<boolean>>
+  isCompactLandscape: Readonly<Ref<boolean>>
   isMobileSheet: Readonly<Ref<boolean>>
   settingsAvailable: Readonly<Ref<boolean>>
   debugAvailable?: Readonly<Ref<boolean>>
@@ -19,7 +19,7 @@ export function usePlayerPanels(options: {
   const {
     compactViewport,
     phoneDevice,
-    isPhoneLandscape,
+    isCompactLandscape,
     isMobileSheet,
     settingsAvailable,
     triggerHaptic,
@@ -48,7 +48,11 @@ export function usePlayerPanels(options: {
 
   // Focus trap for drawers
   useFocusTrap(libraryDrawerRef, listOpen, closePanelsAnimated, {
-    autoFocus: () => !isMobileSheet.value,
+    // 手机横屏也不要自动聚焦搜索框,避免打开曲库就弹出键盘挤占可视区域。
+    autoFocus: () => !phoneDevice.value && !isMobileSheet.value,
+    // 横屏标题栏的关闭按钮排在前面,桌面打开曲库仍优先进入搜索。
+    initialFocus: () =>
+      libraryDrawerRef.value?.querySelector<HTMLInputElement>('input[type="search"]') ?? null,
   })
   useFocusTrap(settingsDrawerRef, settingsOpen, closePanelsAnimated)
   useFocusTrap(debugDrawerRef, debugOpen, closePanelsAnimated)
@@ -236,7 +240,7 @@ export function usePlayerPanels(options: {
     if (!available) closeDebugPanel()
   })
 
-  watch([compactViewport, phoneDevice, isPhoneLandscape], () => {
+  watch([compactViewport, phoneDevice, isCompactLandscape], () => {
     resetDrawerPositions()
   })
 

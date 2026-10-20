@@ -1025,10 +1025,28 @@ describe('SettingsPanel', () => {
     const lyrics = sectionByTitle(wrapper, '歌词')!
     const display = sectionByTitle(wrapper, '显示')!
 
-    expect(lyrics.text()).toContain('歌词字号')
+    expect(lyrics.text()).toContain('歌词缩放')
     expect(lyrics.text()).toContain('歌词动画')
     expect(lyrics.text()).toContain('歌词小窗')
     expect(display.text()).not.toContain('歌词')
+  })
+
+  it('adjusts lyrics as a percentage of the responsive baseline in five-percent steps', async () => {
+    const { wrapper, store } = mountPanel()
+    const lyrics = sectionByTitle(wrapper, '歌词')!
+    const scale = lyrics.findAll('[role="slider"]')[0]!
+
+    expect(scale.attributes('aria-valuetext')).toBe('100%')
+    expect(scale.attributes('aria-valuemin')).toBe('0.75')
+    expect(scale.attributes('aria-valuemax')).toBe('1.5')
+    await scale.trigger('keydown', { key: 'ArrowRight' })
+    expect(store.settings.lyricScale).toBeCloseTo(1.05)
+    expect(scale.attributes('aria-valuetext')).toBe('105%')
+    await scale.trigger('keydown', { key: 'End' })
+    expect(store.settings.lyricScale).toBe(1.5)
+    expect(scale.attributes('aria-valuetext')).toBe('150%')
+    expect(lyrics.text()).not.toContain('px')
+    wrapper.unmount()
   })
 
   it('collapses the lyric spring slider together with the lyric animation toggle', async () => {
@@ -1048,7 +1066,7 @@ describe('SettingsPanel', () => {
 
   it('needs a second click on the reset button before it actually restores defaults', async () => {
     const { wrapper, store } = mountPanel()
-    store.settings.lyricFontSize = 29
+    store.settings.lyricScale = 1.45
     store.settings.lyricAnimation = false
     store.settings.backgroundBlur = 130
     await nextTick()
@@ -1058,13 +1076,13 @@ describe('SettingsPanel', () => {
 
     // 第一次点击只进入确认态,设置一个都不能变
     expect(reset.text()).toContain('再次点击')
-    expect(store.settings.lyricFontSize).toBe(29)
+    expect(store.settings.lyricScale).toBe(1.45)
     expect(store.settings.lyricAnimation).toBe(false)
 
     await reset.trigger('click')
 
     expect(reset.text()).toBe('恢复默认')
-    expect(store.settings.lyricFontSize).toBe(20)
+    expect(store.settings.lyricScale).toBe(1)
     expect(store.settings.lyricAnimation).toBe(true)
     // 其他分组不受影响
     expect(store.settings.backgroundBlur).toBe(130)
@@ -1074,7 +1092,7 @@ describe('SettingsPanel', () => {
     vi.useFakeTimers()
     try {
       const { wrapper, store } = mountPanel()
-      store.settings.lyricFontSize = 29
+      store.settings.lyricScale = 1.45
       const reset = sectionByTitle(wrapper, '歌词')!.get('.section-reset')
 
       await reset.trigger('click')
@@ -1084,7 +1102,7 @@ describe('SettingsPanel', () => {
       await nextTick()
 
       expect(reset.text()).toBe('恢复默认')
-      expect(store.settings.lyricFontSize).toBe(29)
+      expect(store.settings.lyricScale).toBe(1.45)
     } finally {
       vi.useRealTimers()
     }

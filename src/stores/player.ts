@@ -14,7 +14,7 @@ import { sanitizeBeatFlashRate } from '../core/analysis/beat-envelope'
 const SETTINGS_KEY = 'meliora:settings'
 const LAST_TRACK_KEY = 'meliora:last-track'
 
-const CURRENT_SETTINGS_VERSION = 1
+const CURRENT_SETTINGS_VERSION = 2
 
 const defaultSettings: PlayerSettings = {
   volume: 0.72,
@@ -29,7 +29,7 @@ const defaultSettings: PlayerSettings = {
   beatBrightness: 0.28,
   beatFlashRate: 1,
   beatVisualDelay: 0,
-  lyricFontSize: 20,
+  lyricScale: 1,
   lyricAnimation: true,
   lyricSpring: 1,
   lyricTranslation: true,
@@ -44,7 +44,9 @@ const defaultSettings: PlayerSettings = {
 /** 可被「恢复默认」重置的设置项。settingsVersion 是迁移用的内部字段,不参与重置 */
 export type ResettableSettingKey = Exclude<keyof PlayerSettings, 'settingsVersion'>
 
-export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings {
+type SavedPlayerSettings = Partial<PlayerSettings> & { lyricFontSize?: unknown }
+
+export function migrateSettings(saved: SavedPlayerSettings): PlayerSettings {
   const input = saved && typeof saved === 'object' ? saved : {}
   return {
     volume: sanitizeNumber(input.volume, defaultSettings.volume, 0, 1),
@@ -69,7 +71,7 @@ export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings 
       -100,
       300,
     ),
-    lyricFontSize: sanitizeNumber(input.lyricFontSize, defaultSettings.lyricFontSize, 15, 30),
+    lyricScale: migrateLyricScale(input),
     lyricAnimation: sanitizeBoolean(input.lyricAnimation, defaultSettings.lyricAnimation),
     lyricSpring: sanitizeNumber(input.lyricSpring, defaultSettings.lyricSpring, 0.5, 2),
     lyricTranslation: sanitizeBoolean(input.lyricTranslation, defaultSettings.lyricTranslation),
@@ -85,6 +87,20 @@ export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings 
     equalizer: sanitizeEqualizer(input.equalizer),
     settingsVersion: CURRENT_SETTINGS_VERSION,
   }
+}
+
+function migrateLyricScale(input: SavedPlayerSettings): number {
+  // 有新字段时以它为准，即使损坏也不恢复旧像素值，避免已调整的偏好倒退。
+  const hasScale = Object.prototype.hasOwnProperty.call(input, 'lyricScale')
+  const value = hasScale ? input.lyricScale : input.lyricFontSize
+  if (
+    (typeof value !== 'number' && typeof value !== 'string') ||
+    (typeof value === 'string' && !value.trim())
+  )
+    return defaultSettings.lyricScale
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return defaultSettings.lyricScale
+  return sanitizeNumber(hasScale ? numeric : numeric / 20, defaultSettings.lyricScale, 0.75, 1.5)
 }
 
 function sanitizeNumber(value: unknown, fallback: number, min: number, max: number): number {
@@ -110,9 +126,7 @@ function sanitizeBeatAnalysisMode(value: unknown): BeatAnalysisMode {
 
 function loadSettings(): PlayerSettings {
   try {
-    const saved = JSON.parse(
-      settingsStore().getItem(SETTINGS_KEY) || '{}',
-    ) as Partial<PlayerSettings>
+    const saved = JSON.parse(settingsStore().getItem(SETTINGS_KEY) || '{}') as SavedPlayerSettings
     return migrateSettings(saved)
   } catch {
     return { ...defaultSettings }

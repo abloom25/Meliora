@@ -173,6 +173,8 @@
   display: grid;
   width: 38px;
   height: 38px;
+  flex-shrink: 0;
+  padding: 0;
   place-items: center;
   border: 0;
   border-radius: 50%;
@@ -228,7 +230,6 @@
   justify-content: center;
   flex-direction: column;
   transition:
-    width 720ms cubic-bezier(0.16, 1, 0.3, 1),
     opacity 280ms ease,
     transform 320ms ease;
 }
@@ -514,6 +515,8 @@
   display: grid;
   width: 36px;
   height: 36px;
+  flex-shrink: 0;
+  padding: 0;
   place-items: center;
   border: 0;
   border-radius: 50%;
@@ -914,8 +917,12 @@
       visibility 0s linear;
   }
   .lyrics-disabled {
-    transform: none;
-    transition: none;
+    transform: translateY(14px) scale(0.985);
+    transition:
+      opacity 280ms ease,
+      filter 280ms ease,
+      transform 420ms cubic-bezier(0.16, 1, 0.3, 1),
+      visibility 0s linear 420ms;
   }
   .mobile-shared-controls {
     position: fixed;
@@ -960,6 +967,11 @@
     opacity: 0;
     filter: blur(12px);
     pointer-events: none;
+    transition:
+      opacity 280ms ease,
+      filter 280ms ease,
+      transform 420ms cubic-bezier(0.16, 1, 0.3, 1),
+      visibility 0s linear 420ms;
   }
   .artwork-column.mobile-hidden {
     transform: translateY(-10px) scale(0.985);
@@ -1156,24 +1168,42 @@
   }
 }
 
-// 手机横屏单独排版,不使用竖屏封面/歌词互斥和底部高控制区。
-.phone-landscape {
+// 短横屏按可用空间单独排版,手机、平板与桌面窗口共用。
+.compact-landscape {
   --landscape-left: max(16px, env(safe-area-inset-left));
   --landscape-right: max(16px, env(safe-area-inset-right));
-  --landscape-bottom: max(6px, env(safe-area-inset-bottom));
-  --landscape-dock-height: 44px;
+  --landscape-bottom: max(8px, env(safe-area-inset-bottom));
+  --landscape-dock-height: 48px;
+  --landscape-available-width: calc(
+    var(--player-viewport-width, 100vw) - var(--landscape-left) - var(--landscape-right)
+  );
+  --landscape-control-size: clamp(44px, calc(var(--landscape-available-width) * 0.06), 48px);
+  --landscape-top: calc(48px + env(safe-area-inset-top));
 
-  min-height: var(--player-viewport-height);
-  height: var(--player-viewport-height);
+  // 舞台与固定控件共用可视区域原点,根裁切边界也要包含 Safari 的平移量。
+  min-height: calc(var(--player-viewport-top) + var(--player-viewport-height));
+  height: calc(var(--player-viewport-top) + var(--player-viewport-height));
 
   .topbar {
     top: var(--player-viewport-top);
+    left: var(--player-viewport-left, 0px);
+    right: auto;
+    width: var(--player-viewport-width, 100vw);
     height: calc(44px + env(safe-area-inset-top));
     padding: env(safe-area-inset-top) var(--landscape-right) 0 var(--landscape-left);
   }
 
   .brand {
+    min-width: 0;
     font-size: 0.85rem;
+  }
+  .brand span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .top-actions {
+    flex: none;
   }
   .nav-button {
     width: 44px;
@@ -1184,13 +1214,19 @@
   }
 
   .now-playing-layout {
+    top: var(--player-viewport-top);
+    left: var(--player-viewport-left, 0px);
+    width: var(--player-viewport-width, 100vw);
     display: grid;
-    grid-template-columns: minmax(0, 0.36fr) minmax(0, 0.64fr);
+    grid-template-columns: minmax(0, min(34%, calc(var(--landscape-cover-size) + 32px))) minmax(
+        0,
+        1fr
+      );
     grid-template-rows: minmax(0, 1fr);
-    gap: clamp(18px, 4vw, 40px);
+    gap: clamp(24px, 4vw, 48px);
     height: var(--player-viewport-height);
-    padding: calc(44px + env(safe-area-inset-top)) var(--landscape-right)
-      calc(var(--landscape-dock-height) + 6px + var(--landscape-bottom)) var(--landscape-left);
+    padding: var(--landscape-top) var(--landscape-right)
+      calc(var(--landscape-dock-height) + 12px + var(--landscape-bottom)) var(--landscape-left);
   }
 
   .artwork-column {
@@ -1200,50 +1236,52 @@
     min-height: 0;
     height: auto;
     padding: 0;
-    overflow: hidden;
+    overflow: visible;
     justify-content: center;
     visibility: visible;
     opacity: 1;
     filter: none;
     transform: none;
     pointer-events: auto;
-    transition: opacity 280ms ease;
+    transition:
+      opacity 280ms ease,
+      filter 360ms ease,
+      transform 420ms cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .artwork-frame {
-    --artwork-radius: clamp(16px, 4vh, 28px);
-    width: min(
-      100%,
-      max(
-        48px,
-        calc(
-          var(--player-viewport-height) - env(safe-area-inset-top) - var(--landscape-bottom) - 150px
-        )
-      ),
-      260px
-    );
+    --artwork-radius: clamp(14px, calc(var(--landscape-cover-size) * 0.1), 26px);
+    width: min(100%, var(--landscape-cover-size));
     flex: none;
   }
 
+  .artwork-frame .artwork-glow {
+    opacity: 0.32;
+    filter: blur(24px) saturate(145%);
+    transform: scale(1.04);
+  }
+
   .primary-meta {
-    width: 100%;
-    padding: 6px 2px 0;
-    text-align: center;
+    width: min(100%, var(--landscape-cover-size));
+    min-width: 0;
+    flex: none;
+    padding: 10px 2px 0;
+    text-align: left;
   }
 
   .primary-meta h1 {
     display: block;
     overflow: hidden;
     font-size: clamp(15px, 2.2vw, 19px);
-    text-align: center;
+    text-align: left;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .primary-meta p {
-    margin-top: 3px;
+    margin-top: 5px;
     font-size: 12px;
-    text-align: center;
+    text-align: left;
   }
   .title-version {
     display: none;
@@ -1265,36 +1303,43 @@
     filter: none;
     transform: none;
     pointer-events: auto;
-    transition: opacity 280ms ease;
+    transition:
+      opacity 360ms cubic-bezier(0.22, 1, 0.36, 1),
+      filter 360ms ease,
+      transform 420ms cubic-bezier(0.16, 1, 0.3, 1),
+      visibility 0s linear;
   }
 
   .lyrics-column.lyrics-disabled {
     visibility: hidden;
     opacity: 0;
+    filter: blur(8px);
+    transform: translateX(24px) scale(0.985);
     pointer-events: none;
+    transition:
+      opacity 260ms ease,
+      filter 260ms ease,
+      transform 420ms cubic-bezier(0.16, 1, 0.3, 1),
+      visibility 0s linear 420ms;
   }
   .lyrics-hidden .artwork-column {
     grid-column: 1 / -1;
     width: auto;
   }
   .lyrics-hidden .primary-meta p {
-    text-align: center;
+    text-align: left;
   }
   .lyrics-column :deep(.lyrics-content) {
-    // 引擎读取实际 gap 排版,同时压缩主句和和声间距,避免只改视觉位置造成重叠。
-    --lyric-gap: clamp(10px, calc(var(--lyric-size) * 0.55), 18px);
-    --lyric-harmony-gap: calc(var(--lyric-gap) * 0.4);
+    // 先按歌词舞台选基准,再由组件统一乘用户倍率,避免横屏 clamp 抵消缩放。
+    --lyric-base-size: clamp(18px, min(5cqw, 10cqh), 30px);
+    --lyric-base-gap: clamp(8px, 5cqh, 18px);
     inset-inline: 3%;
   }
   .lyrics-column :deep(.lyrics-viewport) {
     mask-image: linear-gradient(transparent, #000 6%, #000 94%, transparent);
   }
   .lyrics-column :deep(.lyric-line) {
-    font-size: clamp(18px, calc(var(--lyric-size) * 1.1), 30px);
-    line-height: 1.14;
-  }
-  .lyrics-column :deep(.lyric-line.background) {
-    font-size: clamp(14px, calc(var(--lyric-size) * 0.8), 22px);
+    line-height: 1.2;
   }
   .lyrics-column :deep(.lyric-translation),
   .lyrics-column :deep(.lyric-roman) {
@@ -1308,15 +1353,19 @@
 
   .player-dock {
     display: grid;
+    container: landscape-dock / inline-size;
     top: calc(
       var(--player-viewport-top) +
         var(--player-viewport-height) - var(--landscape-bottom) - var(--landscape-dock-height)
     );
-    right: var(--landscape-right);
+    right: auto;
     bottom: auto;
-    left: var(--landscape-left);
-    grid-template-columns: 140px minmax(0, 1fr) 140px;
-    gap: 6px;
+    left: calc(var(--player-viewport-left, 0px) + var(--landscape-left));
+    width: var(--landscape-available-width);
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: var(--landscape-dock-height);
+    grid-template-areas: 'transport progress actions';
+    gap: 8px;
     height: var(--landscape-dock-height);
   }
 
@@ -1330,16 +1379,40 @@
 
   .transport-float,
   .dock-actions {
-    padding: 0 2px;
+    width: max-content;
+    max-width: 100%;
+    padding: 0;
+  }
+  .transport-float {
+    grid-area: transport;
+    justify-self: start;
+  }
+  .dock-actions {
+    grid-area: actions;
+    justify-self: end;
+  }
+  .bottom-progress {
+    grid-area: progress;
+    padding: 0 12px;
   }
   .transport-float :deep(.transport-buttons) {
+    justify-content: space-between;
     gap: 2px;
   }
   .transport-float :deep(button),
   .dock-actions button {
-    width: 44px;
-    height: 44px;
-    flex: 0 0 44px;
+    width: var(--landscape-control-size);
+    height: var(--landscape-control-size);
+    min-width: 0;
+    padding: 0;
+    flex: 0 0 var(--landscape-control-size);
+  }
+  .nav-button :deep(svg),
+  .player-dock :deep(svg) {
+    display: block;
+    flex: none;
+    max-width: 100%;
+    max-height: 100%;
   }
   .bottom-progress :deep(.transport) {
     min-width: 0;
@@ -1351,12 +1424,33 @@
     font-size: 12px;
   }
   .bottom-progress :deep(.range) {
-    --track-height: 6px;
+    --track-height: 12px;
     height: var(--landscape-dock-height);
   }
+  .bottom-progress:hover :deep(.range),
   .bottom-progress :deep(.range:active),
   .bottom-progress :deep(.range:focus-visible) {
-    --track-height: 8px;
+    --track-height: 16px;
+  }
+
+  // 空间不足时将播放模式留在设置中,优先保留进度和常用操作的触控面积。
+  @container landscape-dock (max-width: 640px) {
+    .dock-actions .dock-play-mode {
+      display: none;
+    }
+  }
+
+  @container landscape-dock (max-width: 460px) {
+    .bottom-progress {
+      padding-inline: 8px;
+    }
+    .bottom-progress :deep(.progress-row) {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0;
+    }
+    .bottom-progress :deep(.time) {
+      display: none;
+    }
   }
 
   :deep(input),
@@ -1367,13 +1461,17 @@
 
   // 横屏使用可滚动的侧面板,避开竖屏 sheet 的超屏延长区。
   .side-drawer {
-    top: calc(var(--player-viewport-top) + 44px + env(safe-area-inset-top));
-    right: var(--landscape-right);
+    --landscape-drawer-width: min(390px, var(--landscape-available-width));
+    top: calc(var(--player-viewport-top) + var(--landscape-top));
+    right: auto;
     bottom: auto;
-    left: auto;
-    width: min(390px, calc(100vw - var(--landscape-left) - var(--landscape-right)));
+    left: calc(
+      var(--player-viewport-left, 0px) +
+        var(--player-viewport-width, 100vw) - var(--landscape-right) - var(--landscape-drawer-width)
+    );
+    width: var(--landscape-drawer-width);
     height: calc(
-      var(--player-viewport-height) - 50px - env(safe-area-inset-top) - var(--landscape-bottom)
+      var(--player-viewport-height) - var(--landscape-top) - 6px - var(--landscape-bottom)
     );
     min-height: 0;
     padding-bottom: 0;
@@ -1387,6 +1485,9 @@
   }
   .settings-drawer header {
     margin-bottom: 4px;
+    flex: none;
+    justify-content: space-between;
+    gap: 12px;
   }
   .settings-drawer header p {
     display: none;
@@ -1401,6 +1502,43 @@
   }
   .library-drawer :deep(.track-header) {
     padding-block: 0 6px;
+    flex: none;
+    gap: 12px;
+  }
+  .library-drawer :deep(.track-header > div) {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .library-drawer :deep(.track-header h2) {
+    font-size: 18px;
+  }
+  .library-drawer :deep(.list-toolbar) {
+    flex: none;
+  }
+  .library-drawer :deep(.search-box input) {
+    height: 44px;
+  }
+  .library-drawer :deep(.search-box) {
+    min-height: 44px;
+    padding-right: 0;
+  }
+  .library-drawer :deep(.search-box button),
+  .library-drawer :deep(.reload-button) {
+    width: 44px;
+    height: 44px;
+    flex: 0 0 44px;
+    place-items: center;
+  }
+  .settings-drawer :deep(.toggle-switch) {
+    min-width: 44px;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
+  }
+  .drawer-close {
+    flex: 0 0 44px;
+    background: rgba(255, 255, 255, 0.06);
   }
   .settings-drawer h2 {
     font-size: 18px;
@@ -1413,13 +1551,182 @@
     inset: calc(var(--player-viewport-top) + 44px + env(safe-area-inset-top)) 0 0;
     z-index: 58;
   }
+
+  // 极矮窗口中仍允许关闭已打开的曲库面板,搜索与关闭按钮共用一行。
+  &.short-landscape {
+    .library-drawer :deep(.track-panel) {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 44px;
+      grid-template-rows: auto minmax(0, 1fr);
+      column-gap: 8px;
+      padding: 6px 12px 2px;
+    }
+    .library-drawer :deep(.track-header) {
+      grid-area: 1 / 2;
+      padding: 0;
+    }
+    .library-drawer :deep(.track-header > div) {
+      display: none;
+    }
+    .library-drawer :deep(.list-toolbar) {
+      grid-area: 1 / 1;
+      margin: 0;
+      padding: 0;
+    }
+    .library-drawer :deep(.search-row) {
+      margin: 0;
+    }
+    .library-drawer :deep(.track-list) {
+      grid-area: 2 / 1 / 3 / -1;
+      padding-block: 0;
+      mask-image: none;
+    }
+  }
+}
+
+// 极小布局优先保留歌词与触控空间，横向空间有余量时逐级恢复封面和歌曲信息。
+.app-shell.minimal-player {
+  --landscape-top: max(12px, env(safe-area-inset-top));
+  --landscape-bottom: max(12px, env(safe-area-inset-bottom));
+  --minimal-control-size: clamp(44px, calc(var(--player-viewport-height) * 0.22), 56px);
+
+  .topbar,
+  .player-dock,
+  .mobile-shared-controls,
+  .mobile-view-tabs {
+    display: none;
+  }
+
+  .now-playing-layout {
+    grid-template-columns: minmax(0, 1fr) var(--minimal-control-size);
+    column-gap: clamp(12px, 3vw, 28px);
+    padding: var(--landscape-top) var(--landscape-right) var(--landscape-bottom)
+      var(--landscape-left);
+  }
+
+  .lyrics-column {
+    grid-area: 1 / 1;
+  }
+  .artwork-column {
+    display: none;
+  }
+  &.minimal-artwork-visible {
+    .now-playing-layout {
+      grid-template-columns: var(--minimal-artwork-width) minmax(0, 1fr) var(--minimal-control-size);
+    }
+    .artwork-column {
+      display: flex;
+      align-items: center;
+    }
+    .artwork-frame {
+      --artwork-radius: clamp(14px, calc(var(--minimal-cover-size) * 0.1), 24px);
+      width: var(--minimal-cover-size);
+    }
+    .primary-meta {
+      display: none;
+    }
+    .lyrics-column,
+    .minimal-lyric-message {
+      grid-area: 1 / 2;
+    }
+  }
+  &.minimal-metadata-visible .primary-meta {
+    display: block;
+    width: 100%;
+    padding: 8px 0 0;
+
+    h1 {
+      font-size: 16px;
+      line-height: 1.2;
+    }
+    p {
+      margin-top: 4px;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+  }
+  &.minimal-metadata-beside {
+    .artwork-column {
+      flex-direction: row;
+      gap: 12px;
+    }
+    .primary-meta {
+      flex: 1;
+      width: auto;
+      padding: 0;
+    }
+  }
+  .lyrics-column :deep(.lyrics-content) {
+    --lyric-base-size: clamp(18px, min(5cqw, 12cqh), 32px);
+    --lyric-base-gap: clamp(8px, 5cqh, 18px);
+    inset-inline: 2%;
+  }
+}
+
+.minimal-controls-overlay {
+  --minimal-control-size: clamp(44px, calc(var(--player-viewport-height) * 0.22), 56px);
+  --minimal-right-inset: max(16px, env(safe-area-inset-right));
+  position: fixed;
+  z-index: 45;
+  top: var(--player-viewport-top);
+  left: var(--player-viewport-left);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  width: var(--player-viewport-width);
+  height: var(--player-viewport-height);
+  padding: max(12px, env(safe-area-inset-top)) var(--minimal-right-inset)
+    max(12px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  overflow: hidden;
+  pointer-events: none;
+
+  .minimal-player-controls {
+    flex: none;
+    pointer-events: auto;
+  }
+  .minimal-controls-leave-active {
+    pointer-events: none;
+  }
+}
+
+.minimal-lyric-message {
+  grid-area: 1 / 1;
+  align-self: center;
+  margin: 0;
+  padding-inline: 2%;
+  color: var(--text-subtle);
+  font-size: 0.9rem;
+}
+
+.minimal-controls-enter-active,
+.minimal-controls-leave-active {
+  transition:
+    opacity 260ms ease,
+    translate 380ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.minimal-controls-enter-from,
+.minimal-controls-leave-to {
+  opacity: 0;
+  translate: calc(100% + var(--minimal-right-inset)) 0;
+}
+
+// 对齐由内容布局决定：单封面居中，双栏保持左对齐。
+.now-playing-layout.cover-centered {
+  .primary-meta,
+  .primary-meta h1,
+  .primary-meta p {
+    text-align: center;
+  }
+  .display-title {
+    justify-content: center;
+  }
 }
 
 @supports (-webkit-touch-callout: none) {
-  .phone-landscape .artwork-background {
+  .compact-landscape .artwork-background {
     --artwork-bright-display: none;
   }
-  .phone-landscape .artwork-background::after {
+  .compact-landscape .artwork-background::after {
     display: none;
   }
   @media (max-width: 720px) {
@@ -1450,6 +1757,11 @@
   .lyrics-column,
   .artwork-frame {
     transition-duration: 0ms;
+    transition-delay: 0ms;
+  }
+  .minimal-controls-enter-active,
+  .minimal-controls-leave-active {
+    transition: none;
   }
 }
 
@@ -1503,16 +1815,22 @@
   }
 }
 
-.phone-landscape .side-drawer.debug-drawer {
-  top: calc(var(--player-viewport-top) + 44px + env(safe-area-inset-top));
-  width: min(460px, calc(100vw - var(--landscape-left) - var(--landscape-right)));
+.compact-landscape .side-drawer.debug-drawer {
+  --landscape-drawer-width: min(460px, var(--landscape-available-width));
+  top: calc(var(--player-viewport-top) + var(--landscape-top));
+  right: auto;
+  left: calc(
+    var(--player-viewport-left, 0px) +
+      var(--player-viewport-width, 100vw) - var(--landscape-right) - var(--landscape-drawer-width)
+  );
+  width: var(--landscape-drawer-width);
   height: calc(
-    var(--player-viewport-height) - 50px - env(safe-area-inset-top) - var(--landscape-bottom)
+    var(--player-viewport-height) - var(--landscape-top) - 6px - var(--landscape-bottom)
   );
 }
 
-.phone-landscape .drawer-backdrop.debug-backdrop {
-  top: calc(var(--player-viewport-top) + 44px + env(safe-area-inset-top));
+.compact-landscape .drawer-backdrop.debug-backdrop {
+  top: calc(var(--player-viewport-top) + var(--landscape-top));
 }
 
 @media (prefers-reduced-motion: reduce) {

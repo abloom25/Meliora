@@ -18,7 +18,10 @@ export function useFocusTrap(
   containerRef: Ref<HTMLElement | null>,
   active: Ref<boolean>,
   onClose?: () => void,
-  options?: { autoFocus?: MaybeRefOrGetter<boolean> },
+  options?: {
+    autoFocus?: MaybeRefOrGetter<boolean>
+    initialFocus?: () => HTMLElement | null
+  },
 ) {
   const triggerRef = ref<HTMLElement | null>(null)
   const trapId = Symbol('focus-trap')
@@ -92,8 +95,13 @@ export function useFocusTrap(
     }
   }
 
-  function focusFirstFocusable() {
+  function focusInitialElement() {
     if (!containerRef.value) return false
+    const preferred = options?.initialFocus?.()
+    if (preferred && containerRef.value.contains(preferred)) {
+      preferred.focus()
+      if (document.activeElement === preferred) return true
+    }
     const { first } = getFocusableEdges(containerRef.value)
     if (first) {
       first.focus()
@@ -107,20 +115,19 @@ export function useFocusTrap(
   }
 
   async function activateTrap() {
-    triggerRef.value = document.activeElement as HTMLElement
     pendingActivation = true
 
     await nextTick()
 
     if (!pendingActivation) return
 
-    if (focusFirstFocusable()) {
+    if (focusInitialElement()) {
       pendingActivation = false
       return
     }
 
     await nextTick()
-    if (pendingActivation && focusFirstFocusable()) {
+    if (pendingActivation && focusInitialElement()) {
       pendingActivation = false
     }
   }
@@ -148,6 +155,8 @@ export function useFocusTrap(
     active,
     (isActive) => {
       if (isActive) {
+        // 关闭时恢复焦点与是否自动入焦无关；触屏抽屉仍可在打开后通过 Tab 进入。
+        triggerRef.value = document.activeElement as HTMLElement
         pushTrap()
         if (toValue(options?.autoFocus) !== false) void activateTrap()
         else pendingActivation = false
@@ -163,7 +172,7 @@ export function useFocusTrap(
     if (!pendingActivation || !active.value) return
     if (container) {
       void nextTick().then(() => {
-        if (pendingActivation && focusFirstFocusable()) {
+        if (pendingActivation && focusInitialElement()) {
           pendingActivation = false
         }
       })
@@ -174,7 +183,7 @@ export function useFocusTrap(
     document.addEventListener('keydown', handleKeydown)
     if (active.value && pendingActivation) {
       void nextTick().then(() => {
-        if (pendingActivation && focusFirstFocusable()) {
+        if (pendingActivation && focusInitialElement()) {
           pendingActivation = false
         }
       })
