@@ -1,4 +1,5 @@
 import { onBeforeUnmount } from 'vue'
+import type { LyricsEngineDebugSnapshot } from '../core/diagnostics/lyrics-debug'
 import {
   createSpringState,
   isSpringSettled,
@@ -7,7 +8,7 @@ import {
   type SpringConfig,
   type SpringState,
 } from '../core/motion/spring'
-import { layoutLyricLines, lyricFocusOffset, type LyricLayout } from '../core/lyrics'
+import { VirtualLyricLayout } from '../core/lyrics/virtual-layout'
 
 // 歌词行的位移引擎。
 //
@@ -28,21 +29,31 @@ import { layoutLyricLines, lyricFocusOffset, type LyricLayout } from '../core/ly
 export interface LyricsEngineOptions {
   getViewport: () => HTMLElement | null | undefined
   getLineElements: () => readonly (HTMLElement | null | undefined)[]
+  /** Virtual hosts supply global row indices in data-lyric-index. */
+  getLineCount?: () => number
+  getEstimatedHeight?: (index: number) => number
+  onWindowChange?: (indices: readonly number[]) => void
   /** 是否启用动效。false 时所有位移都瞬时完成 */
   isAnimated: () => boolean
   /** 弹簧刚度系数(1 = 默认)。越大越紧绷、越快到位 */
   getSpringScale: () => number
   /** 主行之间与主句—和声之间的间距(像素)。由面板从样式里读出来 */
   getGaps: () => { gap: number; harmonyGap: number }
+  debugEnabled?: () => boolean
+  /** Invalidates a sampled diagnostic view; callers throttle publication. */
+  onDebugUpdate?: () => void
 }
 
 export interface LyricsSceneInput {
   /** 各行是否为背景和声 */
   background: readonly boolean[]
   /** 各行的和声展开状态 */
-  open: readonly boolean[]
+  open?: readonly boolean[]
+  /** Preferred sparse snapshot; avoids scanning all rows on each scene change. */
+  openHarmonies?: readonly number[]
   /** 锚点行,-1 表示还没开始唱 */
   focus: number
+  active?: readonly number[]
 }
 
 /** spring:带错峰的弹簧位移;none:瞬时就位(尺寸变化、关闭动效、切歌) */
@@ -91,6 +102,7 @@ const FLING_STOP_SPEED = 24
 const FLING_MAX_SPEED = 5000
 
 interface LineMotion {
+  index: number
   element: HTMLElement
   spring: SpringState
   target: number
@@ -128,8 +140,9 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   let heights: number[] = []
   let gaps = { gap: 0, harmonyGap: 0 }
   let viewportHeight = 0
-  let layout: LyricLayout = { tops: [], heights: [], total: 0 }
+  let layout = new VirtualLyricLayout(0)
   let scene: LyricsSceneInput | null = null
+  let openHarmonies = new Set<number>()
   let mode: 'follow' | 'browse' = 'follow'
   /** 当前生效的版面偏移:各行 y = tops[i] − offset */
   let offset = 0
@@ -139,10 +152,107 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   let config = springConfig(FOLLOW_STIFFNESS, FOLLOW_DAMPING_RATIO, 1)
   let frame = 0
   let lastFrameAt = 0
+  let publishedWindow = ''
+  let mountTransition: LyricsTransition = 'none'
+  let mountDelta = 0
+
+  function isOpen(index: number): boolean {
+    return scene?.openHarmonies ? openHarmonies.has(index) : Boolean(scene?.open?.[index])
+  }
+
+  function ensureHeights(invalidate = false): void {
+    const count = options.getLineCount?.() ?? options.getLineElements().length
+    if (count === heights.length && !invalidate) return
+    heights = Array.from({ length: count }, (_, index) => options.getEstimatedHeight?.(index) ?? 40)
+    layout = new VirtualLyricLayout(count)
+    rebuildLayout()
+  }
+
+  function setLayoutRow(index: number, open: number): void {
+    const background = scene?.background[index] ?? false
+    layout.set(
+      index,
+      heights[index] ?? 0,
+      background ? gaps.harmonyGap : gaps.gap,
+      background ? open : 1,
+    )
+  }
+
+  function rebuildLayout(): void {
+    const mounted = new Map(motions.map((motion) => [motion.index, motion]))
+    for (let index = 0; index < heights.length; index += 1) {
+      setLayoutRow(index, mounted.get(index)?.open.value ?? (isOpen(index) ? 1 : 0))
+    }
+  }
+
+  function publishWindow(): void {
+    if (!options.onWindowChange || !scene) return
+    const margin = STAGE_MARGIN_PX + viewportHeight * (1 + JUMP_TRAVEL_RATIO)
+    const indices = new Set(layout.window(offset - margin, offset + viewportHeight + margin))
+    for (const index of scene.active ?? [Math.max(0, scene.focus)]) {
+      if (index >= 0 && index < heights.length) indices.add(index)
+    }
+    // Retain departing rows until their transition leaves the stage, and never unmount focus.
+    for (const motion of motions) {
+      if (
+        (motion.spring.value + layout.height(motion.index) > -STAGE_MARGIN_PX &&
+          motion.spring.value < viewportHeight + STAGE_MARGIN_PX) ||
+        motion.element === motion.element.ownerDocument.activeElement
+      )
+        indices.add(motion.index)
+    }
+    const sorted = [...indices].sort((left, right) => left - right)
+    const key = sorted.join(',')
+    if (key === publishedWindow) return
+    publishedWindow = key
+    options.onWindowChange(sorted)
+  }
+
+  function reportDebug() {
+    if (options.debugEnabled?.()) options.onDebugUpdate?.()
+  }
+
+  function readDebugSnapshot(): LyricsEngineDebugSnapshot | null {
+    if (!options.debugEnabled?.()) return null
+    let mountedLineCount = 0
+    let stagedLineCount = 0
+    let visibleLineCount = 0
+    let animatingLineCount = 0
+    for (const motion of motions) {
+      const index = motion.index
+      if (!motion.element.isConnected) continue
+      mountedLineCount += 1
+      const height = layout.height(index)
+      const laidOut = scene !== null && viewportHeight > 0
+      if (laidOut && motion.onstage && height > 0) stagedLineCount += 1
+      if (
+        laidOut &&
+        height > 0 &&
+        motion.spring.value + height > 0 &&
+        motion.spring.value < viewportHeight
+      )
+        visibleLineCount += 1
+      if (motion.moving || motion.delayMs > 0 || !isSpringSettled(motion.open, motion.openTarget))
+        animatingLineCount += 1
+    }
+    return {
+      mountedLineCount,
+      stagedLineCount,
+      visibleLineCount,
+      animatingLineCount,
+      viewportHeight,
+      offset,
+      browseOffset,
+      scrollMode: mode,
+      flingVelocity,
+      frameScheduled: frame !== 0,
+      anchorIndex: scene?.focus ?? -1,
+    }
+  }
 
   function write(motion: LineMotion, index: number) {
     const y = motion.spring.value
-    const height = layout.heights[index] ?? heights[index] ?? 0
+    const height = layout.height(index)
     // 视口之外的行不渲染。用内联 visibility 而不是 class:行上的 class 由 Vue 整体
     // 重写,这里加的会在下一次打补丁时被抹掉
     const onstage = y + height > -STAGE_MARGIN_PX && y < viewportHeight + STAGE_MARGIN_PX
@@ -168,7 +278,8 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   }
 
   function writeAll() {
-    for (const [index, motion] of motions.entries()) write(motion, index)
+    for (const motion of motions) write(motion, motion.index)
+    reportDebug()
   }
 
   /** 行节点与弹簧一一对应;节点被 Vue 重建时沿用不了旧弹簧,从目标位置重新开始 */
@@ -176,24 +287,34 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     const elements = options.getLineElements()
     const previous = new Map(motions.map((motion) => [motion.element, motion]))
     const next: LineMotion[] = []
-    for (const element of elements) {
+    for (const [slot, element] of elements.entries()) {
       if (!element) continue
+      const index = options.getLineCount ? Number(element.dataset.lyricIndex) : slot
+      if (!Number.isInteger(index) || index < 0 || index >= heights.length) continue
       const existing = previous.get(element)
+      previous.delete(element)
+      const target = layout.top(index) - offset
+      const travel = Math.max(viewportHeight * JUMP_TRAVEL_RATIO, 1)
+      const start =
+        target +
+        (mountTransition === 'spring' ? Math.max(-travel, Math.min(travel, mountDelta)) : 0)
       next.push(
         existing ?? {
+          index,
           element,
-          spring: createSpringState(0, 0),
-          target: 0,
+          spring: createSpringState(start, 0),
+          target,
           delayMs: 0,
           moving: false,
           onstage: true,
           lastWritten: '',
-          open: createSpringState(0, 0),
-          openTarget: 0,
+          open: createSpringState(isOpen(index) ? 1 : 0, 0),
+          openTarget: isOpen(index) ? 1 : 0,
           lastOpenWritten: '',
         },
       )
     }
+    for (const motion of previous.values()) setLayoutRow(motion.index, motion.openTarget)
     motions = next
   }
 
@@ -229,7 +350,8 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
 
     let busy = flingVelocity !== 0
     if (stepHarmonies(dt)) busy = true
-    for (const [index, motion] of motions.entries()) {
+    for (const motion of motions) {
+      const index = motion.index
       if (motion.delayMs > 0) {
         // 还没轮到这一行起步:原地停住,保持它被落在后面的样子
         motion.delayMs -= dt * 1000
@@ -252,7 +374,12 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     }
 
     if (busy) frame = window.requestAnimationFrame(tick)
-    else stopLoop()
+    else {
+      mountTransition = 'none'
+      stopLoop()
+    }
+    publishWindow()
+    reportDebug()
   }
 
   /**
@@ -268,13 +395,15 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
       if (isSpringSettled(motion.open, motion.openTarget, 0.004, 0.02)) {
         snapSpring(motion.open, motion.openTarget)
       }
+      setLayoutRow(motion.index, motion.open.value)
       moved = true
     }
     if (!moved) return false
     const before = motions.map((motion) => motion.target)
     computeTargets()
-    for (const [index, motion] of motions.entries()) {
-      const shift = motion.target - (before[index] ?? motion.target)
+    for (const [slot, motion] of motions.entries()) {
+      const index = motion.index
+      const shift = motion.target - (before[slot] ?? motion.target)
       if (shift !== 0) motion.spring.value += shift
       // 被顶动的行多半是静止的,主循环不会再写它们,这里就地写
       if (shift !== 0 || scene?.background[index]) write(motion, index)
@@ -283,7 +412,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   }
 
   function offsetFor(index: number): number {
-    return lyricFocusOffset(layout, index, viewportHeight, LYRIC_ANCHOR_RATIO)
+    return layout.focus(index, viewportHeight, LYRIC_ANCHOR_RATIO)
   }
 
   function clampBrowse(value: number): number {
@@ -294,14 +423,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   function computeTargets(): number {
     const previous = offset
     if (!scene) return 0
-    layout = layoutLyricLines({
-      heights,
-      background: scene.background,
-      open: motions.map((motion) => motion.open.value),
-      gap: gaps.gap,
-      harmonyGap: gaps.harmonyGap,
-    })
-    bounds = [offsetFor(0), offsetFor(layout.tops.length - 1)]
+    bounds = [offsetFor(0), offsetFor(heights.length - 1)]
     if (bounds[1] < bounds[0]) bounds = [bounds[0], bounds[0]]
     if (mode === 'follow') {
       offset = offsetFor(scene.focus)
@@ -309,9 +431,10 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
       browseOffset = clampBrowse(browseOffset)
       offset = browseOffset
     }
-    for (const [index, motion] of motions.entries()) {
-      motion.target = (layout.tops[index] ?? 0) - offset
+    for (const motion of motions) {
+      motion.target = layout.top(motion.index) - offset
     }
+    publishWindow()
     return offset - previous
   }
 
@@ -328,10 +451,12 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   function assignHarmonyTargets(animated: boolean) {
     if (!scene) return
     let snapped = false
-    for (const [index, motion] of motions.entries()) {
-      motion.openTarget = scene.background[index] && scene.open[index] ? 1 : 0
+    for (const motion of motions) {
+      const index = motion.index
+      motion.openTarget = scene.background[index] && isOpen(index) ? 1 : 0
       if (animated || motion.open.value === motion.openTarget) continue
       snapSpring(motion.open, motion.openTarget)
+      setLayoutRow(index, motion.openTarget)
       snapped = true
     }
     if (snapped) computeTargets()
@@ -352,8 +477,8 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
       y + height > -STAGE_MARGIN_PX - extra && y < viewportHeight + STAGE_MARGIN_PX + extra
     const visible = (y: number, height: number) => y + height > 0 && y < viewportHeight
 
-    for (const [index, motion] of motions.entries()) {
-      const height = layout.heights[index] ?? 0
+    for (const motion of motions) {
+      const height = layout.height(motion.index)
       // 行程封顶:跳得太远的行从视口边缘之外重新起步,速度归零。
       // 先封顶再分类 —— 正在离开的可见行封顶后已经在舞台外,不该再占错峰的序号
       const shift = motion.spring.value - motion.target
@@ -430,8 +555,10 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   }
 
   function apply(transition: LyricsTransition, budgetMs = Number.POSITIVE_INFINITY) {
+    mountTransition = transition
     const animated = transition !== 'none' && options.isAnimated()
     const delta = computeTargets()
+    mountDelta = delta
     assignHarmonyTargets(animated)
     if (!animated) {
       snapAll()
@@ -451,12 +578,13 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   }
 
   function shiftBrowse(delta: number, browseOptions: BrowseOptions) {
+    mountTransition = browseOptions.snap || !options.isAnimated() ? 'none' : 'spring'
     if (mode !== 'browse') {
       mode = 'browse'
       browseOffset = offset
     }
     browseOffset = clampBrowse(browseOffset + delta)
-    computeTargets()
+    mountDelta = computeTargets()
     if (browseOptions.snap || !options.isAnimated()) {
       snapAll()
       return
@@ -468,14 +596,41 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   // ---- 对外接口 ----
 
   /** 重新测量视口与各行高度、读取间距,然后按当前场景瞬时就位 */
-  function remeasure() {
+  function remeasure(invalidate = false) {
     const viewport = options.getViewport()
     if (!viewport) return
+    ensureHeights(invalidate)
     syncMotions()
     viewportHeight = viewport.clientHeight
     gaps = options.getGaps()
-    heights = motions.map((motion) => motion.element.offsetHeight)
+    for (const motion of motions) {
+      const measured = motion.element.offsetHeight
+      if (measured > 0) heights[motion.index] = measured
+    }
+    rebuildLayout()
     if (scene) apply('none')
+  }
+
+  /** Newly mounted rows are measured in one read batch without stopping existing springs. */
+  function syncMounted(): void {
+    ensureHeights()
+    syncMotions()
+    const beforeTargets = motions.map((motion) => motion.target)
+    const anchor = motions.find((motion) => motion.target + layout.height(motion.index) > 0)
+    const beforeAnchor = anchor ? layout.top(anchor.index) : 0
+    const measurements = motions.map((motion) => motion.element.offsetHeight)
+    for (const [slot, motion] of motions.entries()) {
+      if (measurements[slot]! > 0) heights[motion.index] = measurements[slot]!
+      setLayoutRow(motion.index, motion.open.value)
+    }
+    if (mode === 'browse' && anchor) browseOffset += layout.top(anchor.index) - beforeAnchor
+    computeTargets()
+    for (const [slot, motion] of motions.entries()) {
+      motion.spring.value += motion.target - beforeTargets[slot]!
+    }
+    if (mountTransition === 'spring' && options.isAnimated()) retargetStaggered(mountDelta)
+    else snapAll()
+    publishWindow()
   }
 
   function setScene(
@@ -483,14 +638,36 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     transition: LyricsTransition,
     sceneOptions: SetSceneOptions = {},
   ) {
+    const previous = scene
+    const previousOpen = openHarmonies
     scene = next
+    openHarmonies = new Set(next.openHarmonies)
+    ensureHeights()
     if (sceneOptions.follow) {
       mode = 'follow'
       flingVelocity = 0
     }
     syncMotions()
+    if (
+      !previous ||
+      previous.background !== next.background ||
+      !previous.openHarmonies ||
+      !next.openHarmonies
+    ) {
+      rebuildLayout()
+    } else {
+      const mounted = new Set(motions.map((motion) => motion.index))
+      // Mounted harmony rows retain their current spring value; only offscreen
+      // changed rows jump directly to the new extent. Primary rows never change.
+      for (const index of previousOpen) {
+        if (!openHarmonies.has(index) && !mounted.has(index)) setLayoutRow(index, 0)
+      }
+      for (const index of openHarmonies) {
+        if (!previousOpen.has(index) && !mounted.has(index)) setLayoutRow(index, 1)
+      }
+    }
     // 还没量过(第一次就绪)或行数对不上(列表重建):先补一次测量,这一次瞬时就位
-    if (!viewportHeight || heights.length !== motions.length) {
+    if (!viewportHeight) {
       remeasure()
       return
     }
@@ -534,14 +711,14 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
    * 返回 true 表示确实滚动了,面板据此进入浏览态
    */
   function reveal(index: number): boolean {
-    const motion = motions[index]
-    if (!motion || !scene) return false
-    const height = layout.heights[index] ?? 0
+    if (index < 0 || index >= heights.length || !scene) return false
+    const target = layout.top(index) - offset
+    const height = layout.height(index)
     const top = viewportHeight * 0.12
     const bottom = viewportHeight * 0.88
     let delta = 0
-    if (motion.target < top) delta = motion.target - top
-    else if (motion.target + height > bottom) delta = motion.target + height - bottom
+    if (target < top) delta = target - top
+    else if (target + height > bottom) delta = target + height - bottom
     if (Math.abs(delta) < 1) return false
     browseBy(delta)
     return true
@@ -551,7 +728,10 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   function cancel() {
     stopLoop()
     flingVelocity = 0
-    for (const motion of motions) snapSpring(motion.open, motion.openTarget)
+    for (const motion of motions) {
+      snapSpring(motion.open, motion.openTarget)
+      setLayoutRow(motion.index, motion.openTarget)
+    }
     if (scene) computeTargets()
     for (const motion of motions) {
       if (!motion.element.isConnected) continue
@@ -571,11 +751,17 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     flingVelocity = 0
     motions = []
     heights = []
-    layout = { tops: [], heights: [], total: 0 }
+    layout = new VirtualLyricLayout(0)
     scene = null
+    openHarmonies.clear()
     mode = 'follow'
     offset = 0
     browseOffset = 0
+    publishedWindow = ''
+    mountTransition = 'none'
+    mountDelta = 0
+    options.onWindowChange?.([])
+    reportDebug()
   }
 
   function isBrowsing(): boolean {
@@ -593,6 +779,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
 
   return {
     remeasure,
+    syncMounted,
     setScene,
     follow,
     browseBy,
@@ -602,5 +789,6 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     reset,
     isBrowsing,
     targets,
+    readDebugSnapshot,
   }
 }

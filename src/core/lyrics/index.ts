@@ -45,6 +45,7 @@ export { createLyricClock, type LyricClock, type LyricClockOptions } from './clo
 export {
   createLyricTimeline,
   harmonyParentsOf,
+  isLyricHarmonyOpen,
   layoutLyricLines,
   lyricFocusOffset,
   lyricTempoScale,

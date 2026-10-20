@@ -17,6 +17,11 @@ import {
 } from '../core/platform/lyrics-cache'
 import { webLyricsCacheStore } from '../platform/web/lyrics-cache'
 import { httpFetch } from './http'
+import {
+  acquireLyricsRequest,
+  initializeLyricsPriority,
+  subscribeLyricsPriority,
+} from './lyrics-requests'
 
 export interface NativeLyricsQuery {
   source: NativeLyricsSource
@@ -160,7 +165,9 @@ async function readSaved(
 async function requestNative(query: NativeLyricsQuery, signal: AbortSignal): Promise<NativeLookup> {
   const params = new URLSearchParams({ source: query.source, id: query.id.trim() })
   const unavailable: NativeLookup = { text: null, lines: null, definitive: false }
+  const release = await acquireLyricsRequest(signal)
   try {
+    signal.throwIfAborted()
     const response = await withSignal(
       httpFetch(`${NATIVE_LYRICS_API_URL}?${params}`, {
         signal,
@@ -188,6 +195,8 @@ async function requestNative(query: NativeLyricsQuery, signal: AbortSignal): Pro
     return lines ? { text: JSON.stringify(payload.data), lines, definitive: true } : unavailable
   } catch {
     return unavailable
+  } finally {
+    release()
   }
 }
 
@@ -234,12 +243,14 @@ async function loadSavedOrRequest(
 }
 
 function subscribe(entry: PendingNativeLyrics, signal?: AbortSignal): Promise<LyricLine[] | null> {
+  const releasePriority = subscribeLyricsPriority(entry.controller.signal, signal)
   entry.subscribers += 1
   return new Promise((resolve) => {
     let released = false
     const finish = (lines: LyricLine[] | null) => {
       if (released) return
       released = true
+      releasePriority()
       signal?.removeEventListener('abort', onAbort)
       entry.subscribers -= 1
       if (!entry.subscribers && !entry.settled) entry.controller.abort()
@@ -265,6 +276,8 @@ export function loadNativeLyrics(
   const existing = pendingLyrics.get(key)
   if (existing && !existing.controller.signal.aborted) return subscribe(existing, signal)
   const controller = new AbortController()
+  initializeLyricsPriority(controller.signal)
+  const releaseInitialPriority = subscribeLyricsPriority(controller.signal, signal)
   const timer = setTimeout(() => controller.abort(), NATIVE_LYRICS_TIMEOUT_MS)
   const entry: PendingNativeLyrics = {
     controller,
@@ -280,5 +293,7 @@ export function loadNativeLyrics(
       if (pendingLyrics.get(key) === entry) pendingLyrics.delete(key)
     })
   pendingLyrics.set(key, entry)
-  return subscribe(entry, signal)
+  const result = subscribe(entry, signal)
+  releaseInitialPriority()
+  return result
 }

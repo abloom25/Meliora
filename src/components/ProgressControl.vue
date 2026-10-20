@@ -3,7 +3,7 @@
   import { storeToRefs } from 'pinia'
   import { usePlayerStore } from '../stores/player'
   import { wordEdgeSoftness, wordFillProgress } from '../core/lyrics'
-  import { createLyricTimeline, harmonyParentsOf } from '../core/lyrics'
+  import { createLyricTimeline, harmonyParentsOf, isLyricHarmonyOpen } from '../core/lyrics'
   import type { LyricsSnapshot } from '../core/types'
 
   /** 气泡里的一个音节。fill / edge 是预览时刻的静态扫光快照 */
@@ -79,7 +79,7 @@
     // 和声只在它所属的主句被唱到时跟着出现。这里必须按"有主句"过滤:
     // 找不到主句的和声在面板里是常驻的,气泡只显示当前这一句,不能把它也带上
     for (const [index] of previewHarmonyParents.value) {
-      if (scene.harmonyOpen[index]) shown.add(index)
+      if (isLyricHarmonyOpen(scene, index)) shown.add(index)
     }
     return [...shown]
       .sort((left, right) => left - right)

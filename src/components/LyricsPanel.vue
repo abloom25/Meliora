@@ -4,10 +4,12 @@
   import { usePlayerStore } from '../stores/player'
   import { getLyricsSource, hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
   import { createLyricClock } from '../core/lyrics'
+  import type { LyricsDebugSnapshot } from '../core/diagnostics/lyrics-debug'
   import { listenMediaQuery } from '../platform/web/media-query'
   import { isApplePlatform } from '../platform/web/browser'
   import {
     createLyricTimeline,
+    isLyricHarmonyOpen,
     lyricTempoScale,
     nextPrimaryTime,
     sameLyricScene,
@@ -15,6 +17,7 @@
   } from '../core/lyrics'
   import { useLyricsEngine, type LyricsTransition } from '../composables/useLyricsEngine'
   import { useLyricsKaraoke } from '../composables/useLyricsKaraoke'
+  import { scheduleLyricRender, type LyricPlaybackState } from '../core/lyrics/render-schedule'
   import type {
     LyricAvailability,
     LyricLine,
@@ -27,13 +30,20 @@
     seek: [time: number]
     availability: [availability: LyricAvailability]
     snapshot: [snapshot: LyricsSnapshot]
+    debug: [snapshot: LyricsDebugSnapshot | null]
   }>()
   const props = withDefaults(
     defineProps<{
       active?: boolean
+      debugEnabled?: boolean
+      getLyricsPlaybackState?: () => LyricPlaybackState
+      subscribeLyricsPlayback?: (listener: () => void) => () => void
     }>(),
     {
       active: true,
+      debugEnabled: false,
+      getLyricsPlaybackState: undefined,
+      subscribeLyricsPlayback: undefined,
     },
   )
 
@@ -59,6 +69,15 @@
   // timeupdate 只有约 4Hz,逐字扫光需要每帧的播放位置,这里统一走外推时钟
   const clock = createLyricClock()
   const lines = shallowRef<LyricLine[]>([])
+  const renderedIndices = shallowRef<readonly number[]>([])
+  const renderedLines = computed(() =>
+    renderedIndices.value.flatMap((index) => {
+      const line = displayedLines.value[index]
+      return line ? [{ index, line }] : []
+    }),
+  )
+  let estimatedLineHeight = 40
+  let estimatedCharactersPerRow = 30
   // 场景按时间区间整体替换,保留快照引用即可跳过逐帧的活跃行集合比较。
   const scene = shallowRef<LyricScene>(emptyScene())
   const status = ref<LyricStatus>('idle')
@@ -66,6 +85,7 @@
   const viewport = ref<HTMLElement>()
   const lyricsContent = ref<HTMLElement>()
   const userBrowsing = ref(false)
+  const keyboardIndex = ref<number | null>(null)
   // 行节点直接从 DOM 读:它们在 Transition 的插槽里,由 Transition 自己渲染,
   // 面板自身重渲染时插槽不一定跟着跑,靠 ref 收集会在 onBeforeUpdate 清空后拿不回来
   function lineElements(): HTMLElement[] {
@@ -77,6 +97,8 @@
   let measureRaf = 0
   let requestId = 0
   let renderFrame = 0
+  let renderTimer = 0
+  let stopPlaybackSubscription: (() => void) | undefined
   let lyricsController: AbortController | null = null
   let resizeObserver: ResizeObserver | null = null
   // 视口尺寸监听只用单一事件源:支持 visualViewport 的平台(移动端)用它,
@@ -89,6 +111,90 @@
       ? window.matchMedia('(prefers-reduced-motion: reduce)')
       : null
   let prefersReducedMotion = reducedMotionQuery?.matches ?? false
+  let debugTimer = 0
+  let debugSampledAt = Number.NEGATIVE_INFINITY
+  // 源时间轴换新时才统计；关闭诊断后没有读取者，也不会遍历歌词。
+  const debugLineCounts = computed(() => {
+    const counts = {
+      lineCount: lines.value.length,
+      wordLineCount: 0,
+      wordCount: 0,
+      translationLineCount: 0,
+      romanLineCount: 0,
+      harmonyLineCount: 0,
+    }
+    for (const line of lines.value) {
+      if (line.words?.length) counts.wordLineCount += 1
+      counts.wordCount += line.words?.length ?? 0
+      if (line.translation) counts.translationLineCount += 1
+      if (line.roman) counts.romanLineCount += 1
+      if (line.background) counts.harmonyLineCount += 1
+    }
+    return counts
+  })
+
+  function scheduleDebug() {
+    if (!props.debugEnabled || !isPanelMounted || debugTimer) return
+    const wait = Math.max(0, 200 - (performance.now() - debugSampledAt))
+    debugTimer = window.setTimeout(() => {
+      debugTimer = 0
+      if (!props.debugEnabled || !isPanelMounted) return
+      const sampledAtMs = performance.now()
+      const clockSeconds = readClock()
+      debugSampledAt = sampledAtMs
+      const rows = lines.value
+      const engineSnapshot = engine.readDebugSnapshot()
+      const stageVisible = props.active && !document.hidden
+      emit('debug', {
+        sampledAtMs,
+        trackId: currentTrack.value?.id ?? null,
+        status: status.value,
+        source: getLyricsSource(rows) ?? null,
+        ...debugLineCounts.value,
+        activeIndices: [...scene.value.active],
+        activeLines: scene.value.active.slice(0, 3).flatMap((index) => {
+          const line = rows[index]
+          return line
+            ? [
+                {
+                  index,
+                  text: line.text.slice(0, 120),
+                  background: Boolean(line.background),
+                  timeSeconds: line.time,
+                  wordCount: line.words?.length ?? 0,
+                },
+              ]
+            : []
+        }),
+        mediaSeconds: currentTime.value,
+        clockSeconds,
+        clockDriftMs: (clockSeconds - currentTime.value) * 1000,
+        playing: isPlaying.value,
+        panelActive: props.active,
+        animationEnabled: animationEnabled(),
+        translationEnabled: settings.value.lyricTranslation,
+        documentHidden: document.hidden,
+        reducedMotion: prefersReducedMotion,
+        renderLoopRunning: renderFrame !== 0,
+        renderSchedule: renderFrame ? 'frame' : renderTimer ? 'timer' : 'idle',
+        userBrowsing: userBrowsing.value,
+        sceneHeld: scene.value.held,
+        engine: engineSnapshot
+          ? {
+              ...engineSnapshot,
+              stagedLineCount: stageVisible ? engineSnapshot.stagedLineCount : 0,
+              visibleLineCount: stageVisible ? engineSnapshot.visibleLineCount : 0,
+            }
+          : null,
+      })
+    }, wait)
+  }
+
+  function clearDebug() {
+    window.clearTimeout(debugTimer)
+    debugTimer = 0
+    emit('debug', null)
+  }
 
   function animationEnabled(): boolean {
     return settings.value.lyricAnimation && !prefersReducedMotion
@@ -111,6 +217,7 @@
   // roving tabindex:仅当前激活行(无激活行时退回第一个可 seek 的行)是 Tab 停靠点,
   // 避免数百行歌词全部进入 Tab 序列
   const keyboardFocusIndex = computed(() => {
+    if (userBrowsing.value && keyboardIndex.value !== null) return keyboardIndex.value
     if (scene.value.anchor >= 0) return scene.value.anchor
     return displayedLines.value.findIndex((line) => line.time !== null)
   })
@@ -137,14 +244,29 @@
   const engine = useLyricsEngine({
     getViewport: () => viewport.value,
     getLineElements: lineElements,
+    getLineCount: () => lines.value.length,
+    getEstimatedHeight: (index) => {
+      const line = displayedLines.value[index]
+      if (!line) return estimatedLineHeight
+      const rows = Math.max(1, Math.ceil(line.text.length / estimatedCharactersPerRow))
+      const extra = (line.translation ? 0.55 : 0) + (line.roman ? 0.55 : 0)
+      return estimatedLineHeight * (rows + extra)
+    },
+    onWindowChange: (indices) => {
+      renderedIndices.value = indices
+    },
     isAnimated: animationEnabled,
     getSpringScale: () => settings.value.lyricSpring,
     getGaps: readGaps,
+    debugEnabled: () => props.debugEnabled && isPanelMounted,
+    onDebugUpdate: scheduleDebug,
   })
 
   const karaoke = useLyricsKaraoke({
     getLines: () => displayedLines.value,
     getLineElements: lineElements,
+    getLineElement: (index) =>
+      lineElements().find((element) => Number(element.dataset.lyricIndex) === index),
     isEnabled: animationEnabled,
   })
 
@@ -159,6 +281,7 @@
   }
 
   function emitSnapshot() {
+    scheduleDebug()
     emit('snapshot', {
       lines: displayedLines.value,
       activeIndex: scene.value.anchor,
@@ -171,7 +294,20 @@
   }
 
   function readClock(): number {
+    const actual = props.getLyricsPlaybackState?.().timeSeconds
+    if (actual !== undefined && Number.isFinite(actual)) return actual
     return clock.read(performance.now())
+  }
+
+  function readPlaybackState(): LyricPlaybackState {
+    return (
+      props.getLyricsPlaybackState?.() ?? {
+        timeSeconds: readClock(),
+        playing: isPlaying.value,
+        playbackRate: 1,
+        seeking: false,
+      }
+    )
   }
 
   /** 把当前场景交给引擎排版。面板不活跃时不动版面,重新活跃时会整体重排 */
@@ -180,8 +316,10 @@
     engine.setScene(
       {
         background: backgroundFlags.value,
-        open: scene.value.harmonyOpen,
+        openHarmonies: scene.value.openHarmonies,
+        ...(scene.value.openHarmonies ? {} : { open: scene.value.harmonyOpen }),
         focus: scene.value.anchor,
+        active: scene.value.active,
       },
       transition,
       { follow: !userBrowsing.value, budgetMs: scrollBudgetMs() },
@@ -255,6 +393,7 @@
   }
 
   function resetTransientLyrics() {
+    if (props.debugEnabled) clearDebug()
     lyricsController?.abort()
     lyricsController = null
     stopRenderLoop()
@@ -265,17 +404,33 @@
     karaoke.release()
     lyricTempo.value = 1
     lines.value = []
+    keyboardIndex.value = null
     scene.value = emptyScene()
     status.value = 'idle'
   }
 
   /** 行节点刚挂上来 / 尺寸变化 / 内容重排后:重新测量并瞬时就位 */
   function relayout() {
-    if (!isPanelMounted || status.value !== 'ready') return
-    engine.remeasure()
+    if (!isPanelMounted || status.value !== 'ready' || !props.active || document.hidden) return
+    const firstLine = lineElements()[0]
+    if (firstLine) {
+      const style = getComputedStyle(firstLine)
+      const size = Number.parseFloat(style.fontSize)
+      const lineHeight = Number.parseFloat(style.lineHeight)
+      if (Number.isFinite(size) && size > 0) {
+        estimatedLineHeight = Number.isFinite(lineHeight) ? lineHeight : size * 1.18
+        estimatedCharactersPerRow = Math.max(
+          1,
+          (lyricsContent.value?.clientWidth ?? 400) / (size * 0.8),
+        )
+      }
+    }
+    engine.remeasure(true)
     applyScene('none')
     karaoke.bind(scene.value.active)
     karaoke.write(readClock())
+    stopRenderLoop()
+    startRenderLoop()
   }
 
   function scheduleRelayout() {
@@ -289,7 +444,8 @@
   // ---- 每帧渲染 ----
 
   function renderOnce() {
-    if (!isPanelMounted || status.value !== 'ready') return
+    scheduleDebug()
+    if (!isPanelMounted || status.value !== 'ready' || !props.active || document.hidden) return
     const time = readClock()
     syncScene(time)
     karaoke.ensure(scene.value.active)
@@ -298,8 +454,9 @@
 
   function renderTick() {
     renderFrame = 0
+    renderTimer = 0
     renderOnce()
-    if (shouldRunRenderLoop()) renderFrame = window.requestAnimationFrame(renderTick)
+    startRenderLoop()
   }
 
   function shouldRunRenderLoop(): boolean {
@@ -315,14 +472,30 @@
   }
 
   function startRenderLoop() {
-    if (renderFrame || !shouldRunRenderLoop()) return
-    renderFrame = window.requestAnimationFrame(renderTick)
+    if (renderFrame || renderTimer || !shouldRunRenderLoop()) return
+    const playback = readPlaybackState()
+    const plan = scheduleLyricRender(
+      playback,
+      timeline.value.nextBoundary(playback.timeSeconds),
+      karaoke.getWords(),
+      animationEnabled(),
+    )
+    if (plan.kind === 'frame') renderFrame = window.requestAnimationFrame(renderTick)
+    else if (plan.kind === 'timer') renderTimer = window.setTimeout(renderTick, plan.delayMs)
   }
 
   function stopRenderLoop() {
-    if (!renderFrame) return
-    window.cancelAnimationFrame(renderFrame)
+    if (renderFrame) window.cancelAnimationFrame(renderFrame)
     renderFrame = 0
+    if (renderTimer) window.clearTimeout(renderTimer)
+    renderTimer = 0
+  }
+
+  function handlePlaybackChange(): void {
+    stopRenderLoop()
+    if (!props.active || document.hidden) return
+    renderOnce()
+    startRenderLoop()
   }
 
   // ---- 用户接管滚动 ----
@@ -408,8 +581,32 @@
     engine.fling((-(last.y - first.y) / (last.at - first.at)) * 1000)
   }
 
-  function handleKeydown(event: KeyboardEvent) {
+  async function handleKeydown(event: KeyboardEvent) {
     if (status.value !== 'ready') return
+    const focused = (event.target as HTMLElement | null)?.closest<HTMLElement>('.lyric-line')
+    if (focused && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault()
+      const direction = event.key === 'ArrowUp' || event.key === 'End' ? -1 : 1
+      let index =
+        event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? lines.value.length - 1
+            : Number(focused.dataset.lyricIndex) + direction
+      while (index >= 0 && index < lines.value.length) {
+        if (lines.value[index]?.time !== null && !isHarmonyHidden(index)) break
+        index += direction
+      }
+      if (index < 0 || index >= lines.value.length) return
+      markBrowsing()
+      keyboardIndex.value = index
+      engine.reveal(index)
+      await nextTick()
+      lineElements()
+        .find((element) => Number(element.dataset.lyricIndex) === index)
+        ?.focus({ preventScroll: true })
+      return
+    }
     const height = viewport.value?.clientHeight ?? 0
     let delta: number
     switch (event.key) {
@@ -448,7 +645,8 @@
   function handleFocusIn(event: FocusEvent) {
     const target = (event.target as HTMLElement | null)?.closest<HTMLElement>('.lyric-line')
     if (!target) return
-    const index = lineElements().indexOf(target)
+    const index = Number(target.dataset.lyricIndex)
+    keyboardIndex.value = index
     if (index >= 0 && engine.reveal(index)) markBrowsing()
   }
 
@@ -469,8 +667,10 @@
   }
 
   function handleVisibilityChange() {
+    scheduleDebug()
     if (document.hidden) {
       stopRenderLoop()
+      engine.cancel()
       return
     }
     // 后台期间 rAF 停转,时钟锚点已经过期,恢复时先重锚再继续
@@ -490,10 +690,14 @@
     karaoke.bind(scene.value.active)
     renderOnce()
     applyScene('none')
+    stopRenderLoop()
+    startRenderLoop()
   }
 
   onMounted(() => {
     isPanelMounted = true
+    stopPlaybackSubscription = props.subscribeLyricsPlayback?.(handlePlaybackChange)
+    scheduleDebug()
     if (reducedMotionQuery) {
       stopReducedMotionListener = listenMediaQuery(reducedMotionQuery, handleReducedMotionChange)
     }
@@ -513,6 +717,7 @@
 
   onBeforeUnmount(() => {
     isPanelMounted = false
+    clearDebug()
     stopRenderLoop()
     window.clearTimeout(browseTimer)
     window.cancelAnimationFrame(measureRaf)
@@ -523,9 +728,22 @@
     karaoke.release()
     stopReducedMotionListener?.()
     stopReducedMotionListener = null
+    stopPlaybackSubscription?.()
   })
 
   // ---- 响应 ----
+
+  watch(
+    () => props.debugEnabled,
+    (enabled) => {
+      if (!enabled) clearDebug()
+      else {
+        debugSampledAt = Number.NEGATIVE_INFINITY
+        scheduleDebug()
+      }
+    },
+  )
+  watch(userBrowsing, scheduleDebug)
 
   watch(
     () => [currentTrack.value?.id, currentTrackVersion.value] as const,
@@ -536,10 +754,23 @@
   watch(lyricsContent, (content) => {
     if (content) relayout()
   })
+  watch(
+    renderedIndices,
+    () => {
+      if (!isPanelMounted || status.value !== 'ready' || !props.active || document.hidden) return
+      engine.syncMounted()
+      karaoke.bind(scene.value.active)
+      karaoke.write(readClock())
+      stopRenderLoop()
+      startRenderLoop()
+    },
+    { flush: 'post' },
+  )
   watch(currentTime, (value) => {
     clock.anchor(value, performance.now())
+    if (props.getLyricsPlaybackState && props.subscribeLyricsPlayback) return
     // 循环没跑时(暂停、面板隐藏)靠 timeupdate 驱动一次同步
-    if (!renderFrame) renderOnce()
+    if (!renderFrame) handlePlaybackChange()
   })
   watch(
     isPlaying,
@@ -576,9 +807,11 @@
   watch(
     () => props.active,
     (active) => {
+      scheduleDebug()
       if (!active) {
         stopRenderLoop()
         stopBrowsing()
+        engine.cancel()
         return
       }
       // 隐藏期间尺寸可能变了,回来先整体重排,再从当前位置继续
@@ -595,7 +828,7 @@
   }
 
   function isHarmonyHidden(index: number): boolean {
-    return Boolean(lines.value[index]?.background) && !scene.value.harmonyOpen[index]
+    return Boolean(lines.value[index]?.background) && !isLyricHarmonyOpen(scene.value, index)
   }
 </script>
 
@@ -626,8 +859,10 @@
         <div v-else key="lyrics" class="lyric-stage">
           <div ref="lyricsContent" class="lyrics-content">
             <button
-              v-for="(line, index) in displayedLines"
+              v-for="{ line, index } in renderedLines"
               :key="`${line.time}-${index}`"
+              :data-lyric-index="index"
+              :aria-label="`${index + 1} / ${displayedLines.length} ${[line.text, line.roman, line.translation].filter(Boolean).join(' ')}`"
               class="lyric-line"
               :class="[
                 lineDistanceClass(index),

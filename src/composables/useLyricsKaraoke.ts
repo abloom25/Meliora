@@ -8,6 +8,7 @@ import { wordEdgeSoftness, wordFillProgress } from '../core/lyrics'
 export interface LyricsKaraokeOptions {
   getLines: () => readonly LyricLine[]
   getLineElements: () => readonly (HTMLElement | null | undefined)[]
+  getLineElement?: (index: number) => HTMLElement | null | undefined
   /**
    * 扫光本身就是动画,关掉「歌词动画」后不该继续跑。必须在 JS 侧拦住:
    * 每帧写入的是内联自定义属性,优先级高于任何 CSS 声明,CSS 关不掉它
@@ -24,6 +25,7 @@ interface KaraokeTarget {
 
 export function useLyricsKaraoke(options: LyricsKaraokeOptions) {
   let targets: KaraokeTarget[] = []
+  let words: readonly LyricWord[] = []
   // 已绑定的活跃行集合(以 "1,2" 形式记),用于判断要不要重绑
   let boundKey: string | null = null
 
@@ -34,6 +36,7 @@ export function useLyricsKaraoke(options: LyricsKaraokeOptions) {
       target.element.style.removeProperty('--lyric-word-edge')
     }
     targets = []
+    words = []
     boundKey = null
   }
 
@@ -53,7 +56,8 @@ export function useLyricsKaraoke(options: LyricsKaraokeOptions) {
     for (const index of active) {
       const line = lines[index]
       if (!line?.words?.length) continue
-      const spans = elements[index]?.querySelectorAll<HTMLElement>('.lyric-word')
+      const element = options.getLineElement ? options.getLineElement(index) : elements[index]
+      const spans = element?.querySelectorAll<HTMLElement>('.lyric-word')
       if (!spans || spans.length !== line.words.length) return
       for (const [wordIndex, word] of line.words.entries()) {
         next.push({ element: spans[wordIndex]!, word, lastFill: '', lastEdge: '' })
@@ -61,6 +65,7 @@ export function useLyricsKaraoke(options: LyricsKaraokeOptions) {
     }
     boundKey = key
     targets = next
+    words = next.map((target) => target.word)
   }
 
   /**
@@ -89,5 +94,5 @@ export function useLyricsKaraoke(options: LyricsKaraokeOptions) {
     }
   }
 
-  return { bind, ensure, write, release }
+  return { bind, ensure, write, release, getWords: () => words }
 }

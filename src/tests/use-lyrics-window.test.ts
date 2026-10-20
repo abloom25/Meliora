@@ -3,6 +3,8 @@ import { defineComponent, nextTick, reactive, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLyricsWindow } from '../platform/web/useLyricsWindow'
 import type { LyricsSnapshot, Track } from '../core/types'
+import type { LyricPlaybackState } from '../core/lyrics/render-schedule'
+import { supportsDocumentPictureInPicture } from '../platform/web/browser'
 
 vi.mock('../platform/web/browser', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../platform/web/browser')>()),
@@ -15,9 +17,12 @@ function createPopupWindow(readyState: DocumentReadyState = 'complete'): Window 
     configurable: true,
     value: readyState,
   })
+  Object.defineProperty(popupDocument, 'hidden', { configurable: true, value: false })
   const frames: FrameRequestCallback[] = []
   return {
     closed: false,
+    innerWidth: 430,
+    innerHeight: 600,
     document: popupDocument,
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
@@ -28,17 +33,27 @@ function createPopupWindow(readyState: DocumentReadyState = 'complete'): Window 
       return frames.length
     }),
     cancelAnimationFrame: vi.fn(),
+    setTimeout: vi.fn((callback: () => void, delay: number) => window.setTimeout(callback, delay)),
+    clearTimeout: vi.fn((handle: number) => window.clearTimeout(handle)),
     close: vi.fn(function close(this: Window & { closed: boolean }) {
       this.closed = true
     }),
   } as unknown as Window
 }
 
-function mountLyricsWindowHarness(popup = createPopupWindow()) {
+function mountLyricsWindowHarness(
+  popup = createPopupWindow(),
+  getPlaybackSeconds?: () => number,
+  playback: {
+    getLyricsPlaybackState?: () => LyricPlaybackState
+    subscribeLyricsPlayback?: (listener: () => void) => () => void
+  } = {},
+) {
   vi.spyOn(window, 'open').mockReturnValue(popup)
   const isPlaying = ref(false)
   const currentTime = ref(0)
   const lyricAnimation = ref(true)
+  const debugEnabled = ref(false)
 
   const track = reactive<Track>({
     id: 'track-1',
@@ -53,14 +68,22 @@ function mountLyricsWindowHarness(popup = createPopupWindow()) {
   const wrapper = mount(
     defineComponent({
       setup() {
-        api = useLyricsWindow({ currentTrack: ref(track), isPlaying, currentTime, lyricAnimation })
+        api = useLyricsWindow({
+          currentTrack: ref(track),
+          isPlaying,
+          currentTime,
+          getPlaybackSeconds,
+          ...playback,
+          lyricAnimation,
+          debugEnabled,
+        })
         return {}
       },
       template: '<div />',
     }),
   )
 
-  return { api, popup, track, wrapper, isPlaying, currentTime, lyricAnimation }
+  return { api, popup, track, wrapper, isPlaying, currentTime, lyricAnimation, debugEnabled }
 }
 
 function runPopupFrames(popup: Window, count: number, stepMs = 16) {
@@ -117,15 +140,237 @@ async function mountScrollingHarness() {
 }
 
 describe('useLyricsWindow', () => {
+  it('uses its own boundary timer while the main page is hidden and responds immediately to media state changes', async () => {
+    const state: LyricPlaybackState = {
+      timeSeconds: 0.2,
+      playing: true,
+      playbackRate: 2,
+      seeking: false,
+    }
+    const getState = vi.fn(() => state)
+    const listeners = new Set<() => void>()
+    const { api, popup, wrapper, isPlaying, currentTime } = mountLyricsWindowHarness(
+      createPopupWindow(),
+      undefined,
+      {
+        getLyricsPlaybackState: getState,
+        subscribeLyricsPlayback: (listener) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+      },
+    )
+    const notify = () => listeners.forEach((listener) => listener())
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+    try {
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        lines: [
+          { time: 0, text: 'First' },
+          { time: 1, text: 'Second' },
+          { time: 2, text: 'Third' },
+        ],
+      })
+      isPlaying.value = true
+      await nextTick()
+      runPopupFrames(popup, 1)
+      expect(popup.setTimeout).toHaveBeenCalledWith(expect.any(Function), 400)
+      vi.mocked(popup.requestAnimationFrame).mockClear()
+      await vi.advanceTimersByTimeAsync(200)
+      expect(popup.requestAnimationFrame).not.toHaveBeenCalled()
+      state.timeSeconds = 1.01
+      await vi.advanceTimersByTimeAsync(200)
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('Second')
+      expect(currentTime.value).toBe(0)
+      runPopupFrames(popup, 1)
+      state.playing = false
+      notify()
+      getState.mockClear()
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(getState).not.toHaveBeenCalled()
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('Second')
+      state.timeSeconds = 0.1
+      state.seeking = true
+      notify()
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('First')
+      state.seeking = false
+      state.playing = true
+      state.playbackRate = 0.5
+      notify()
+      expect(popup.setTimeout).toHaveBeenLastCalledWith(expect.any(Function), 1000)
+      Object.defineProperty(popup.document, 'hidden', { configurable: true, value: true })
+      popup.document.dispatchEvent(new Event('visibilitychange'))
+      runPopupFrames(popup, 1)
+      getState.mockClear()
+      state.timeSeconds = 2.1
+      notify()
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(getState).not.toHaveBeenCalled()
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('First')
+      Object.defineProperty(popup.document, 'hidden', { configurable: true, value: false })
+      popup.document.dispatchEvent(new Event('visibilitychange'))
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('Third')
+      await api.toggleLyricsWindow()
+      getState.mockClear()
+      state.timeSeconds = 2.1
+      notify()
+      currentTime.value = 2.1
+      await nextTick()
+      expect(getState).not.toHaveBeenCalled()
+      const reopened = createPopupWindow()
+      vi.mocked(window.open).mockReturnValueOnce(reopened)
+      await api.toggleLyricsWindow()
+      expect(reopened.document.querySelector('.line.active')?.textContent).toBe('Third')
+    } finally {
+      Reflect.deleteProperty(document, 'hidden')
+      wrapper.unmount()
+    }
+    expect(listeners.size).toBe(0)
+  })
+
   beforeEach(() => {
     vi.useFakeTimers()
+    vi.mocked(supportsDocumentPictureInPicture).mockReturnValue(false)
   })
 
   afterEach(() => {
     vi.runOnlyPendingTimers()
     vi.useRealTimers()
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
     document.body.innerHTML = ''
+  })
+
+  it('observes real popup slots and lifecycle only while diagnostics are enabled', async () => {
+    const { api, popup, wrapper, debugEnabled, isPlaying, currentTime, track } =
+      mountLyricsWindowHarness()
+    try {
+      expect(api.debugSnapshot.value).toBeNull()
+      debugEnabled.value = true
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(api.debugSnapshot.value).toMatchObject({
+        open: false,
+        kind: null,
+        nodesReady: false,
+        lifecycle: [],
+      })
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        source: 'netease',
+        activeIndex: 0,
+        lines: [{ time: 0, text: 'word', words: [{ time: 0, duration: 5, text: 'word' }] }],
+      })
+      isPlaying.value = true
+      currentTime.value = 1
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(200)
+      expect(api.debugSnapshot.value).toMatchObject({
+        open: true,
+        opening: false,
+        kind: 'popup',
+        width: 430,
+        height: 600,
+        nodesReady: true,
+        mountedLineCount: 1,
+        activeSlots: [0],
+        karaokeRunning: true,
+        animatedWordCount: 1,
+        source: 'netease',
+        mediaSeconds: 1,
+      })
+      expect(api.debugSnapshot.value?.lifecycle.map((entry) => entry.event)).toEqual([
+        'opening',
+        'opened',
+      ])
+      track.id = 'track-2'
+      api.setSnapshot({ status: 'loading', activeIndex: -1, lines: [] })
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(200)
+      expect(api.debugSnapshot.value).toMatchObject({
+        trackId: 'track-2',
+        status: 'loading',
+        source: null,
+        mountedLineCount: 0,
+        activeSlots: [],
+        animatedWordCount: 0,
+        karaokeRunning: false,
+      })
+      await api.toggleLyricsWindow()
+      await vi.advanceTimersByTimeAsync(200)
+      expect(api.debugSnapshot.value).toMatchObject({ open: false, kind: null, nodesReady: false })
+      expect(api.debugSnapshot.value?.lifecycle.at(-1)?.event).toBe('closed')
+      expect(popup.close).toHaveBeenCalled()
+      debugEnabled.value = false
+      await nextTick()
+      expect(api.debugSnapshot.value).toBeNull()
+      currentTime.value = 10
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(api.debugSnapshot.value).toBeNull()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('reports blocked windows without changing the failure and bounds debug history', async () => {
+    const { api, wrapper, debugEnabled } = mountLyricsWindowHarness()
+    try {
+      vi.mocked(window.open).mockReturnValue(null)
+      debugEnabled.value = true
+      await nextTick()
+      for (let attempt = 0; attempt < 10; attempt += 1)
+        await expect(api.toggleLyricsWindow()).rejects.toThrow('Lyrics window was blocked')
+      await vi.advanceTimersByTimeAsync(200)
+      expect(api.debugSnapshot.value).toMatchObject({
+        open: false,
+        opening: false,
+        kind: null,
+        nodesReady: false,
+        lastFailure: '浏览器阻止了歌词小窗',
+      })
+      expect(api.debugSnapshot.value?.lifecycle).toHaveLength(12)
+      expect(api.debugSnapshot.value?.lifecycle.at(-1)?.event).toBe('failed')
+      wrapper.unmount()
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(api.debugSnapshot.value).toBeNull()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('identifies document PiP and cleans up a window whose document could not be created', async () => {
+    const { api, popup, wrapper, debugEnabled } = mountLyricsWindowHarness()
+    try {
+      debugEnabled.value = true
+      await nextTick()
+      vi.mocked(supportsDocumentPictureInPicture).mockReturnValue(true)
+      vi.stubGlobal('documentPictureInPicture', { requestWindow: vi.fn(async () => popup) })
+      await api.toggleLyricsWindow()
+      await vi.advanceTimersByTimeAsync(200)
+      expect(api.debugSnapshot.value).toMatchObject({ open: true, kind: 'document-pip' })
+      await api.toggleLyricsWindow()
+      const broken = createPopupWindow()
+      vi.stubGlobal('documentPictureInPicture', { requestWindow: vi.fn(async () => broken) })
+      vi.spyOn(broken.document, 'write').mockImplementation(() => {
+        throw new Error('write failed')
+      })
+      await expect(api.toggleLyricsWindow()).rejects.toThrow(
+        'Failed to write lyrics window document',
+      )
+      await vi.advanceTimersByTimeAsync(200)
+      expect(broken.close).toHaveBeenCalled()
+      expect(api.debugSnapshot.value).toMatchObject({
+        open: false,
+        nodesReady: false,
+        lastFailure: '无法写入歌词小窗内容',
+      })
+    } finally {
+      wrapper.unmount()
+    }
   })
 
   it('does not force the first plain lyric line active when activeIndex is -1', async () => {
@@ -202,15 +447,24 @@ describe('useLyricsWindow', () => {
 
   it('closes a popup that is still opening when the composable unmounts', async () => {
     const popup = createPopupWindow('loading')
-    const { api, wrapper } = mountLyricsWindowHarness(popup)
+    const { api, wrapper, debugEnabled } = mountLyricsWindowHarness(popup)
+    debugEnabled.value = true
 
     const opening = api.toggleLyricsWindow()
     await nextTick()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(api.debugSnapshot.value).toMatchObject({
+      opening: true,
+      open: false,
+      kind: 'popup',
+      nodesReady: false,
+    })
     wrapper.unmount()
     await vi.runOnlyPendingTimersAsync()
     await opening
 
     expect(popup.close).toHaveBeenCalled()
+    expect(api.debugSnapshot.value).toBeNull()
   })
 
   it('prioritizes current lyrics and restores context when the popup grows', async () => {
@@ -229,17 +483,26 @@ describe('useLyricsWindow', () => {
     const viewport = popup.document.querySelector<HTMLElement>('.lyrics')!
     const container = popup.document.querySelector<HTMLElement>('.lyrics-lines')!
     let height = 110
+    let containerReads = 0
     Object.defineProperty(viewport, 'clientHeight', { get: () => height })
+    for (const node of container.children) {
+      Object.defineProperty(node, 'offsetHeight', {
+        get: () => (node.querySelector('.translation') ? 100 : 40),
+      })
+    }
     Object.defineProperty(container, 'offsetHeight', {
-      get: () =>
-        [...container.children].reduce(
+      get: () => {
+        containerReads += 1
+        return [...container.children].reduce(
           (total, node) =>
             total +
             ((node as HTMLElement).hidden ? 0 : node.querySelector('.translation') ? 100 : 40),
           0,
-        ),
+        )
+      },
     })
     runPopupFrames(popup, 1)
+    expect(containerReads).toBe(1)
     const visibleText = () =>
       [...container.querySelectorAll<HTMLElement>('.line')]
         .filter((node) => !node.hidden)
@@ -253,6 +516,7 @@ describe('useLyricsWindow', () => {
     height = 160
     resize(new Event('resize'))
     runPopupFrames(popup, 1)
+    expect(containerReads).toBe(2)
     expect(visibleText()).toEqual(['Current', 'Next'])
 
     height = 300
@@ -360,10 +624,23 @@ describe('useLyricsWindow', () => {
   })
 
   it('does not restart scrolling or lose karaoke bindings for an unchanged snapshot', async () => {
-    const { popup, show, animate, animations, currentTime, lyricAnimation, wrapper } =
-      await mountScrollingHarness()
+    const {
+      api,
+      debugEnabled,
+      popup,
+      show,
+      animate,
+      animations,
+      currentTime,
+      lyricAnimation,
+      wrapper,
+    } = await mountScrollingHarness()
+    debugEnabled.value = true
+    await nextTick()
     show(2)
     runPopupFrames(popup, 1)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(api.debugSnapshot.value?.scrollAnimationCount).toBe(1)
     const calls = animate.mock.calls.length
     const frames = vi.mocked(popup.requestAnimationFrame).mock.calls.length
     show(2)
@@ -374,6 +651,12 @@ describe('useLyricsWindow', () => {
     ).toBe(true)
     lyricAnimation.value = false
     await nextTick()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(api.debugSnapshot.value).toMatchObject({
+      scrollAnimationCount: 0,
+      animatedWordCount: 0,
+      animationEnabled: false,
+    })
     expect(
       animations.every((animation) => vi.mocked(animation.cancel).mock.calls.length === 1),
     ).toBe(true)
@@ -566,5 +849,90 @@ describe('useLyricsWindow', () => {
     runPopupFrames(popup, 20)
 
     expect(Number(word.style.getPropertyValue('--w'))).toBeGreaterThan(before)
+  })
+
+  it('changes plain lyric lines from the popup media clock while the main page stays stale', async () => {
+    let mediaSeconds = 0
+    const { api, popup, wrapper, isPlaying, currentTime, lyricAnimation } =
+      mountLyricsWindowHarness(createPopupWindow(), () => mediaSeconds)
+    try {
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        lines: [
+          { time: 0, text: 'First' },
+          { time: 1, text: 'Second' },
+          { time: 2, text: 'Third' },
+        ],
+      })
+      isPlaying.value = true
+      await nextTick()
+      lyricAnimation.value = false
+      await nextTick()
+      mediaSeconds = 1.1
+      await vi.advanceTimersByTimeAsync(1000)
+      runPopupFrames(popup, 2)
+      expect(currentTime.value).toBe(0)
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('Second')
+      const second = popup.document.querySelector('.line.active')
+      // A stalled media clock must not keep extrapolating or rebuild unchanged rows.
+      runPopupFrames(popup, 150)
+      expect(popup.document.querySelector('.line.active')).toBe(second)
+      mediaSeconds = 2.1
+      await vi.advanceTimersByTimeAsync(1000)
+      runPopupFrames(popup, 2)
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('Third')
+      isPlaying.value = false
+      await nextTick()
+      mediaSeconds = 0.5
+      currentTime.value = 0.5
+      await nextTick()
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('First')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('keeps independently timed duet and harmony groups together across seeks and source upgrades', async () => {
+    let mediaSeconds = 0
+    const { api, popup, wrapper, isPlaying } = mountLyricsWindowHarness(
+      createPopupWindow(),
+      () => mediaSeconds,
+    )
+    try {
+      await api.toggleLyricsWindow()
+      const lines = [
+        { time: 0, endTime: 1, text: 'Intro' },
+        { time: 1, endTime: 3, text: 'Lead' },
+        { time: 1, endTime: 3, text: 'Duet', agent: 'secondary' as const },
+        { time: 1.5, endTime: 2, text: 'Harmony', background: true },
+      ]
+      api.setSnapshot({ status: 'ready', activeIndex: 0, lines })
+      isPlaying.value = true
+      await nextTick()
+      mediaSeconds = 1.6
+      await vi.advanceTimersByTimeAsync(1000)
+      runPopupFrames(popup, 2)
+      expect(
+        [...popup.document.querySelectorAll('.line.active')].map((node) => node.textContent),
+      ).toEqual(['Lead', 'Duet', 'Harmony'])
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        lines: lines.map((line) => ({ ...line, translation: 'Translation' })),
+      })
+      expect(popup.document.querySelectorAll('.line.active')).toHaveLength(3)
+      mediaSeconds = 2.1
+      await vi.advanceTimersByTimeAsync(1000)
+      runPopupFrames(popup, 2)
+      expect(popup.document.querySelectorAll('.line.active')).toHaveLength(2)
+      mediaSeconds = 0.2
+      await vi.advanceTimersByTimeAsync(1000)
+      runPopupFrames(popup, 2)
+      expect(popup.document.querySelector('.line.active .main')?.textContent).toBe('Intro')
+    } finally {
+      wrapper.unmount()
+    }
   })
 })
