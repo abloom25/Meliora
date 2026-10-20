@@ -6,109 +6,81 @@ import {
   fadeProgress,
 } from '../../core/audio/fade'
 
-/** 每个播放器独立持有增益动画及其浏览器帧资源。 */
+/** 增益动画独占通道。取消会结束 Promise，但绝不提交旧动画的最终音量。 */
 export function createAudioGain() {
-  // 按通道独立的动画标识:同一路上后启动的淡入淡出会取消前一个,
-  // 但不同通道互不干扰 —— 旧曲目的淡出不会被新曲目的淡入取消,
-  // 否则手动切歌时旧音频来不及衰减就会与新的叠着响。
-  // 计数器从 1 起,0 表示"无动画/已取消"。
-  const gainAnimations = new WeakMap<AudioChannel, number>()
-  const gainAnimationFrames = new Set<number>()
-  // 取消某一路正在进行的淡入淡出:把它的 animationId 归零,
-  // 挂起的 rAF step 在下一帧自检时就会提前结束
-  function cancelGainAnimation(channel: AudioChannel) {
-    gainAnimations.set(channel, 0)
+  const owners = new Map<AudioChannel, (completed: boolean) => void>()
+
+  function cancelGainAnimation(channel: AudioChannel): void {
+    owners.get(channel)?.(false)
   }
 
-  function clearGainAnimationFrames() {
-    // 创建副本以避免在迭代过程中修改集合
-    const framesToCancel = Array.from(gainAnimationFrames)
-    for (const frame of framesToCancel) {
-      try {
-        window.cancelAnimationFrame(frame)
-      } catch (error) {
-        // 忽略无效的 frame ID，防止清理过程本身出错
-        console.warn('Failed to cancel animation frame:', error)
-      }
-    }
-    gainAnimationFrames.clear()
+  function clearGainAnimationFrames(): void {
+    for (const finish of new Set(owners.values())) finish(false)
   }
 
-  function requestGainAnimationFrame(callback: FrameRequestCallback) {
-    const frame = window.requestAnimationFrame((now) => {
-      gainAnimationFrames.delete(frame)
-      callback(now)
-    })
-    gainAnimationFrames.add(frame)
-  }
-
-  // updaters 收到的是**原始进度**(0…1),缓动曲线由 core/audio/fade 施加,
-  // 保证 Web 与桌面端的淡入淡出手感一致
   function animateGain(
     targets: AudioChannel[],
-    updaters: Array<(progress: number) => void>,
+    update: (progress: number) => void,
     duration: number,
-  ): Promise<void> {
-    const animationId = Math.max(1, ...targets.map((c) => (gainAnimations.get(c) ?? 0) + 1))
-    for (const c of targets) gainAnimations.set(c, animationId)
-    const startedAt = performance.now()
-    return new Promise<void>((resolve) => {
-      function applyAll(progress: number) {
-        for (const update of updaters) update(progress)
-      }
-
-      function step(now: number) {
-        // 任一涉及通道被新动画接管即整体停止;0 表示被 cancelGainAnimation 显式取消。
-        if (targets.some((c) => gainAnimations.get(c) !== animationId)) {
-          resolve()
-          return
+  ): Promise<boolean> {
+    for (const channel of targets) cancelGainAnimation(channel)
+    return new Promise<boolean>((resolve) => {
+      let frame = 0
+      let settled = false
+      const startedAt = performance.now()
+      function finish(completed: boolean): void {
+        if (settled) return
+        settled = true
+        window.cancelAnimationFrame(frame)
+        document.removeEventListener('visibilitychange', onVisibilityChange)
+        if (completed) update(1)
+        for (const channel of targets) {
+          if (owners.get(channel) === finish) owners.delete(channel)
         }
-        const raw = fadeProgress(now - startedAt, duration)
-        applyAll(raw)
-
-        if (raw >= 1) {
-          resolve()
-          return
-        }
-        if (document.hidden) {
-          applyAll(1)
-          resolve()
-          return
-        }
-        requestGainAnimationFrame(step)
+        resolve(completed)
       }
-
-      if (document.hidden) {
-        applyAll(1)
-        resolve()
-        return
+      function onVisibilityChange(): void {
+        if (document.hidden) finish(true)
       }
-      requestGainAnimationFrame(step)
+      function step(now: number): void {
+        if (settled) return
+        const progress = fadeProgress(now - startedAt, duration)
+        if (progress >= 1 || document.hidden) return finish(true)
+        update(progress)
+        frame = window.requestAnimationFrame(step)
+      }
+      for (const channel of targets) owners.set(channel, finish)
+      if (document.hidden) finish(true)
+      else {
+        document.addEventListener('visibilitychange', onVisibilityChange)
+        frame = window.requestAnimationFrame(step)
+      }
     })
   }
 
-  function crossfadePlayers(outgoing: AudioChannel, incoming: AudioChannel) {
+  function crossfadePlayers(outgoing: AudioChannel, incoming: AudioChannel): Promise<boolean> {
     return animateGain(
       [outgoing, incoming],
-      [
-        (progress) => outgoing.setGain(crossfadeGains(progress).outgoing),
-        (progress) => incoming.setGain(crossfadeGains(progress).incoming),
-      ],
+      (progress) => {
+        const gains = crossfadeGains(progress)
+        outgoing.setGain(gains.outgoing)
+        incoming.setGain(gains.incoming)
+      },
       CROSSFADE_DURATION_MS,
-    ).then(() => {
-      outgoing.setGain(0)
-      incoming.setGain(1)
-    })
+    )
   }
 
-  function fadePlayer(channel: AudioChannel, fromGain: number, toGain: number, duration: number) {
+  function fadePlayer(
+    channel: AudioChannel,
+    fromGain: number,
+    toGain: number,
+    duration: number,
+  ): Promise<boolean> {
     return animateGain(
       [channel],
-      [(progress) => channel.setGain(fadeGain(fromGain, toGain, progress))],
+      (progress) => channel.setGain(fadeGain(fromGain, toGain, progress)),
       duration,
-    ).then(() => {
-      channel.setGain(toGain)
-    })
+    )
   }
 
   return { cancelGainAnimation, clearGainAnimationFrames, crossfadePlayers, fadePlayer }

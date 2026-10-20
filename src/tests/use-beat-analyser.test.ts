@@ -1,8 +1,71 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { defineComponent, h, nextTick, ref } from 'vue'
-import { mount } from '@vue/test-utils'
+import { defineComponent, h, nextTick, ref, type Ref } from 'vue'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
 import { useBeatAnalyser } from '../platform/web/useBeatAnalyser'
 import { createBeatVisualRenderer } from '../platform/web/beat-visuals'
+import { buildBeatTimeline } from '../platform/web/beat-preanalysis'
+import type {
+  BeatBuildStatus,
+  BeatPreloadTarget,
+  BeatTimeline,
+} from '../core/analysis/beat-timeline'
+
+vi.mock('../platform/web/beat-preanalysis', () => ({ buildBeatTimeline: vi.fn() }))
+enableAutoUnmount(afterEach)
+
+interface BuildRequest {
+  source: string
+  signal: AbortSignal
+  onStatus: (status: BeatBuildStatus) => void
+  onPartial?: (timeline: BeatTimeline) => void
+  resolve: (timeline: BeatTimeline) => void
+}
+
+let buildRequests: BuildRequest[] = []
+let sourceId = 0
+
+beforeEach(() => {
+  buildRequests = []
+  vi.mocked(buildBeatTimeline)
+    .mockReset()
+    .mockImplementation(
+      (source, signal, onStatus, dependencies) =>
+        new Promise<BeatTimeline>((resolve) => {
+          buildRequests.push({
+            source,
+            signal,
+            onStatus,
+            resolve,
+            onPartial: dependencies?.onPartial,
+          })
+        }),
+    )
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
+
+function timelineWithPulse(): BeatTimeline {
+  const levels = Float32Array.from({ length: 41 }, (_, index) =>
+    index >= 10 && index <= 14 ? 1 : 0,
+  )
+  return {
+    durationSeconds: 4,
+    stepSeconds: 0.1,
+    levels: [levels.slice(), levels.slice(), levels.slice(), levels.slice()],
+    sustain: Float32Array.from(levels, (level) => level * 0.25),
+  }
+}
+
+async function finishBuild(index = 0, timeline = timelineWithPulse()): Promise<void> {
+  const request = buildRequests[index]
+  if (!request) throw new Error('expected a pending timeline build')
+  request.resolve(timeline)
+  for (let tick = 0; tick < 5; tick += 1) await Promise.resolve()
+  await nextTick()
+}
 
 function createHarness(setup: () => Record<string, unknown>) {
   return defineComponent({ setup, render: () => h('div') })
@@ -73,6 +136,11 @@ class AudioContextMock {
     return source as unknown as MediaElementAudioSourceNode
   }
 
+  suspend() {
+    this.state = 'suspended'
+    return Promise.resolve()
+  }
+
   resume() {
     this.state = 'running'
     return Promise.resolve()
@@ -110,6 +178,7 @@ describe('useBeatAnalyser', () => {
         players,
         getActiveAudio: () => players[0]!,
         isPlaying: ref(true),
+        source: ref(`/reduced-motion-${++sourceId}.mp3`),
         onEqFiltersReady,
       })
       return { analyser }
@@ -122,11 +191,156 @@ describe('useBeatAnalyser', () => {
     expect(onEqFiltersReady).toHaveBeenCalledTimes(1)
     expect(onEqFiltersReady.mock.calls[0]?.[0]).toHaveLength(5)
     expect(rafSpy).not.toHaveBeenCalled()
+    expect(buildBeatTimeline).not.toHaveBeenCalled()
     expect(addListenerSpy).not.toHaveBeenCalledWith('visibilitychange', expect.any(Function))
   })
 })
 
-describe('useBeatAnalyser beat detection', () => {
+describe('useBeatAnalyser completed timeline playback', () => {
+  it('forwards live neighbor sources and the preload toggle without replacing the current timeline', async () => {
+    const neighborSource = `/neighbor-${++sourceId}.mp3`
+    const adjacent = ref<readonly BeatPreloadTarget[]>([
+      { direction: 'next', source: neighborSource, title: 'Prepared next', durationSeconds: 4 },
+    ])
+    const preloadEnabled = ref(true)
+    const h = await mountBeatHarness({ adjacent, preloadEnabled })
+    expect(buildRequests).toHaveLength(1)
+    await finishBuild()
+    expect(buildRequests).toHaveLength(2)
+    expect(buildRequests[1]!.source).toBe(neighborSource)
+    expect(h.analyser.preanalysis.status.value.adjacent?.[0]).toMatchObject({
+      source: neighborSource,
+      title: 'Prepared next',
+      phase: 'fetching',
+    })
+    const currentTimeline = h.analyser.preanalysis.timeline.value
+    preloadEnabled.value = false
+    await nextTick()
+    expect(buildRequests[1]!.signal.aborted).toBe(true)
+    expect(h.analyser.preanalysis.status.value.adjacent).toEqual([])
+    expect(h.analyser.preanalysis.timeline.value).toBe(currentTimeline)
+  })
+
+  it('holds consecutive seeks until stable while rate, pause, and buffering reach the scheduler', async () => {
+    const h = await mountBeatHarness()
+    const dependencies = vi.mocked(buildBeatTimeline).mock.calls[0]![3]!
+    const receive = vi.fn()
+    const yieldWindow = vi.fn()
+    // A running model window settles cooperatively; playback updates remain
+    // connected until its checkpoint returns and releases the worker slot.
+    dependencies.subscribeYield!(yieldWindow)
+    dependencies.subscribePriority!(receive)
+    h.activeAudio.currentTime = 1.1
+    h.activeAudio.dispatchEvent(new Event('seeking'))
+    vi.advanceTimersByTime(100)
+    h.activeAudio.currentTime = 2.2
+    h.activeAudio.dispatchEvent(new Event('seeked'))
+    h.activeAudio.dispatchEvent(new Event('timeupdate'))
+    vi.advanceTimersByTime(179)
+    expect(receive.mock.calls.every(([state]) => state.seeking)).toBe(true)
+    vi.advanceTimersByTime(1)
+    expect(receive).toHaveBeenLastCalledWith({
+      timeSeconds: 2.2,
+      playing: true,
+      playbackRate: 1,
+      seeking: false,
+    })
+    h.activeAudio.playbackRate = 2
+    h.activeAudio.dispatchEvent(new Event('ratechange'))
+    expect(receive.mock.lastCall![0].playbackRate).toBe(2)
+    h.activeAudio.dispatchEvent(new Event('waiting'))
+    expect(receive.mock.lastCall![0].playing).toBe(false)
+    expect(yieldWindow).toHaveBeenCalledOnce()
+    h.activeAudio.dispatchEvent(new Event('playing'))
+    expect(receive.mock.lastCall![0].playing).toBe(true)
+    Object.defineProperty(h.activeAudio, 'paused', { configurable: true, value: true })
+    h.activeAudio.dispatchEvent(new Event('pause'))
+    expect(receive.mock.lastCall![0].playing).toBe(false)
+    expect(dependencies.getPlaybackState!()).toMatchObject({
+      playing: false,
+      playbackRate: 2,
+      seeking: false,
+    })
+    expect(buildBeatTimeline).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not release a native seek before seeked and discards settlement after a source change', async () => {
+    const h = await mountBeatHarness()
+    const dependencies = vi.mocked(buildBeatTimeline).mock.calls[0]![3]!
+    const receive = vi.fn()
+    dependencies.subscribePriority!(receive)
+    Object.defineProperty(h.activeAudio, 'seeking', { configurable: true, value: true })
+    h.activeAudio.currentTime = 2
+    h.activeAudio.dispatchEvent(new Event('seeking'))
+    vi.advanceTimersByTime(250)
+    expect(receive.mock.calls.every(([state]) => state.seeking)).toBe(true)
+    Object.defineProperty(h.activeAudio, 'seeking', { configurable: true, value: false })
+    h.activeAudio.dispatchEvent(new Event('seeked'))
+    h.source.value = '/changed-during-seek.mp3'
+    vi.advanceTimersByTime(250)
+    expect(receive.mock.calls.every(([state]) => state.seeking)).toBe(true)
+    expect(dependencies.getPlaybackState!().seeking).toBe(false)
+  })
+
+  it('highlights a completed middle range while keeping surrounding holes dark', async () => {
+    const h = await mountBeatHarness()
+    const timeline = timelineWithPulse()
+    for (const levels of timeline.levels) levels.fill(1)
+    timeline.completedRanges = [{ startSeconds: 1, endSeconds: 2 }]
+    buildRequests[0]!.onPartial!(timeline)
+    h.activeAudio.currentTime = 0.5
+    runFrames(30)
+    expect(h.analyser.beatLevel.value).toBe(0)
+    h.activeAudio.currentTime = 1.2
+    runFrames(60)
+    expect(h.analyser.beatLevel.value).toBeGreaterThan(0.99)
+    h.activeAudio.currentTime = 2.2
+    runFrames(1)
+    expect(h.analyser.beatLevel.value).toBe(0)
+    timeline.completedRanges = [{ startSeconds: 1, endSeconds: 3 }]
+    buildRequests[0]!.onPartial!({ ...timeline })
+    runFrames(1)
+    expect(h.analyser.beatLevel.value).toBeGreaterThan(0)
+    expect(h.analyser.beatLevel.value).toBeLessThan(0.2)
+  })
+
+  it('forwards seek and normal playback positions to the existing background build', async () => {
+    const h = await mountBeatHarness()
+    const dependencies = vi.mocked(buildBeatTimeline).mock.calls[0]![3]!
+    const receive = vi.fn()
+    dependencies.subscribePriority!(receive)
+    h.activeAudio.currentTime = 2.1
+    h.activeAudio.dispatchEvent(new Event('seeking'))
+    expect(receive).toHaveBeenLastCalledWith({
+      timeSeconds: 2.1,
+      playing: true,
+      playbackRate: 1,
+      seeking: true,
+    })
+    h.activeAudio.currentTime = 3.2
+    h.activeAudio.dispatchEvent(new Event('timeupdate'))
+    expect(receive).toHaveBeenLastCalledWith({
+      timeSeconds: 3.2,
+      playing: true,
+      playbackRate: 1,
+      seeking: true,
+    })
+    expect(dependencies.getPrioritySeconds!()).toBe(3.2)
+    expect(buildBeatTimeline).toHaveBeenCalledTimes(1)
+    expect(buildRequests[0]!.signal.aborted).toBe(false)
+  })
+
+  it('extends partial coverage without blanking an ongoing pulse or repeating its fade-in', async () => {
+    const h = await mountBeatHarness()
+    h.activeAudio.currentTime = 1.2
+    buildRequests[0]!.onPartial!({ ...timelineWithPulse(), builtUntilSeconds: 2 })
+    runFrames(70)
+    expect(h.analyser.beatLevel.value).toBeGreaterThan(0.99)
+    buildRequests[0]!.onPartial!({ ...timelineWithPulse(), builtUntilSeconds: 3 })
+    expect(h.analyser.beatLevel.value).toBeGreaterThan(0.99)
+    await finishBuild()
+    expect(h.analyser.beatLevel.value).toBeGreaterThan(0.99)
+  })
   let rafCallbacks: FrameRequestCallback[] = []
 
   function installRafMock() {
@@ -168,6 +382,11 @@ describe('useBeatAnalyser beat detection', () => {
     analyser: ReturnType<typeof useBeatAnalyser>
     analyserNode: AnalyserNodeMock
     spectrum: Uint8Array
+    activeAudio: HTMLAudioElement
+    source: Ref<string>
+    enabled: Ref<boolean>
+    beatVisualDelay: Ref<number>
+    beatFlashRate: Ref<number>
   }
 
   async function mountBeatHarness(
@@ -176,26 +395,46 @@ describe('useBeatAnalyser beat detection', () => {
       activeAudio?: HTMLAudioElement
       onTainted?: (audio: HTMLAudioElement) => void
       beatVisualDelay?: number
+      adjacent?: Ref<readonly BeatPreloadTarget[]>
+      preloadEnabled?: Ref<boolean>
     } = {},
   ): Promise<BeatHarness> {
     stubMatchMedia()
     vi.stubGlobal('AudioContext', AudioContextMock)
     installRafMock()
-    // currentTime 恒为 0:不产生播放推进,CORS 全零检测不会误触发
-    const activeAudio =
-      options.activeAudio ?? ({ paused: false, currentTime: 0 } as HTMLAudioElement)
+    const activeAudio = options.activeAudio ?? new Audio(`/timeline-${++sourceId}.mp3`)
+    if (!options.activeAudio) {
+      Object.defineProperty(activeAudio, 'paused', {
+        configurable: true,
+        writable: true,
+        value: false,
+      })
+    }
+    Object.defineProperty(activeAudio, 'readyState', {
+      configurable: true,
+      writable: true,
+      value: HTMLMediaElement.HAVE_ENOUGH_DATA,
+    })
+    const source = ref(`/analysis-source-${++sourceId}.mp3`)
+    const enabled = ref(true)
+    const beatVisualDelay = ref(options.beatVisualDelay ?? 0)
+    const beatFlashRate = ref(1)
     let analyserApi: ReturnType<typeof useBeatAnalyser> | null = null
     const Harness = createHarness(() => {
       analyserApi = useBeatAnalyser({
         players: [activeAudio],
         getActiveAudio: () => activeAudio,
         isPlaying: ref(true),
+        source,
+        enabled,
+        adjacent: options.adjacent,
+        preloadEnabled: options.preloadEnabled,
         onSpectrum: createBeatVisualRenderer({
           getSpectrumTargets: options.spectrumTarget ? () => [options.spectrumTarget] : undefined,
         }).renderSpectrum,
         onTainted: options.onTainted,
-        beatVisualDelay:
-          options.beatVisualDelay === undefined ? undefined : ref(options.beatVisualDelay),
+        beatVisualDelay,
+        beatFlashRate,
       })
       return {}
     })
@@ -203,12 +442,25 @@ describe('useBeatAnalyser beat detection', () => {
     const analyser = analyserApi as unknown as ReturnType<typeof useBeatAnalyser>
     await analyser.startBeatAnalysis()
     const context = AudioContextMock.instances.at(-1)
+    if (context) {
+      context.baseLatency = 0
+      context.outputLatency = 0
+    }
     const analyserNode = context?.lastAnalyser
     if (!analyserNode) throw new Error('analyser mock not created')
     // 48kHz / fftSize 2048 → bin 宽约 23.4Hz;测试频谱按 bin 直接构造
     const spectrum = new Uint8Array(analyserNode.frequencyBinCount)
     analyserNode.spectrum = spectrum
-    return { analyser, analyserNode, spectrum }
+    return {
+      analyser,
+      analyserNode,
+      spectrum,
+      activeAudio,
+      source,
+      enabled,
+      beatVisualDelay,
+      beatFlashRate,
+    }
   }
 
   beforeEach(() => {
@@ -220,73 +472,58 @@ describe('useBeatAnalyser beat detection', () => {
     vi.useRealTimers()
   })
 
-  it('raises beat level on bass onsets and decays back in silence', async () => {
+  it('keeps highlights dark before the whole timeline completes despite loud live bass', async () => {
     const { analyser, spectrum } = await mountBeatHarness()
-
-    runFrames(10)
-    expect(analyser.beatLevel.value).toBeLessThan(0.05)
-
-    // 底鼓 onset:30–130Hz(bin 1–6)瞬时能量;包络一帧内到位,之后按拍长释放
-    for (let index = 1; index <= 6; index += 1) spectrum[index] = 240
-    runFrames(2)
-    expect(analyser.beatLevel.value).toBeGreaterThan(0.6)
-    runFrames(4)
-
-    // 恢复静默后脉冲按时间常数衰减,背景回落
-    spectrum.fill(0)
-    runFrames(80)
-    expect(analyser.beatLevel.value).toBeLessThan(0.1)
+    expect(buildRequests).toHaveLength(1)
+    for (const phase of ['fetching', 'decoding', 'analysing'] as const) {
+      buildRequests[0]!.onStatus({ phase, progress: 0.99, error: null })
+      for (let index = 1; index <= 6; index += 1) spectrum[index] = 250
+      runFrames(10)
+      expect(analyser.beatLevel.value).toBe(0)
+      expect(analyser.preanalysis.timeline.value).toBeNull()
+    }
   })
 
-  it('does not stay lit under constant loud bass without onsets', async () => {
-    const { analyser, spectrum } = await mountBeatHarness()
-
-    // 持续大声的低音能量(无 onset):自适应 floor 跟上后不应常亮
-    for (let index = 1; index <= 30; index += 1) spectrum[index] = 220
-    runFrames(250)
-
+  it('samples a completed timeline at the current media position and fades it in', async () => {
+    const { analyser, activeAudio } = await mountBeatHarness()
+    activeAudio.currentTime = 1.1
+    runFrames(20)
+    expect(analyser.beatLevel.value).toBe(0)
+    await finishBuild()
+    runFrames(1)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0)
     expect(analyser.beatLevel.value).toBeLessThan(0.2)
+    runFrames(60)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0.99)
+    activeAudio.currentTime = 2
+    runFrames(1)
+    expect(analyser.beatLevel.value).toBe(0)
   })
 
-  it('pulses once per kick at a steady tempo and stays dark through a quiet gap', async () => {
-    const { analyser, spectrum } = await mountBeatHarness()
-    const kick = () => {
-      for (let index = 1; index <= 6; index += 1) spectrum[index] = 240
-    }
-
-    // 约 120BPM:每 ~500ms 一个底鼓(帧间隔 16ms,落点有 ±12ms 抖动,贴近真实)
-    // 9s 后进入静默段,验证节拍跟踪是否继续按预测触发(而非反应式停摆)
-    const pulseTimes: number[] = []
-    let wasLow = true
-    let timeMs = 0
-    for (let frame = 0; frame < 750; frame += 1) {
-      if (timeMs < 9000 && timeMs % 500 < 16) kick()
-      else spectrum.fill(0)
-      vi.advanceTimersByTime(16)
-      timeMs += 16
-      const callbacks = rafCallbacks
-      rafCallbacks = []
-      callbacks.forEach((callback) => callback(performance.now()))
-      const level = analyser.beatLevel.value
-      if (wasLow && level > 0.5) {
-        pulseTimes.push(timeMs)
-        wasLow = false
-      }
-      if (level < 0.2) wasLow = true
-    }
-
-    // 训练段(4–9s)的脉冲间隔应锁定在 500ms 附近
-    const trained = pulseTimes.filter((time) => time >= 4000 && time < 9000)
-    expect(trained.length).toBeGreaterThanOrEqual(8)
-    const intervals = trained.slice(1).map((time, index) => time - (trained[index] ?? time))
-    for (const interval of intervals) {
-      expect(interval).toBeGreaterThan(400)
-      expect(interval).toBeLessThan(600)
-    }
-
-    // 静默段(9.3s 起)没有击点就没有闪光:包络不会自己打拍子
-    const invented = pulseTimes.filter((time) => time >= 9300)
-    expect(invented).toHaveLength(0)
+  it('reuses the completed timeline across pause, resume, seeks and density changes', async () => {
+    const { analyser, activeAudio, beatFlashRate } = await mountBeatHarness()
+    const timeline = timelineWithPulse()
+    timeline.levels[3].fill(0.3)
+    await finishBuild(0, timeline)
+    activeAudio.currentTime = 1.1
+    runFrames(60)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0.99)
+    analyser.stopBeatAnalysis()
+    expect(analyser.beatLevel.value).toBe(0)
+    expect(analyser.preanalysis.timeline.value).toBe(timeline)
+    await analyser.startBeatAnalysis()
+    activeAudio.currentTime = 2
+    activeAudio.dispatchEvent(new Event('seeking'))
+    runFrames(60)
+    expect(analyser.beatLevel.value).toBe(0)
+    activeAudio.currentTime = 1.1
+    activeAudio.dispatchEvent(new Event('seeking'))
+    runFrames(60)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0.99)
+    beatFlashRate.value = 4
+    runFrames(1)
+    expect(analyser.beatLevel.value).toBeCloseTo(0.3, 2)
+    expect(buildBeatTimeline).toHaveBeenCalledTimes(1)
   })
 
   it('writes per-band spectrum CSS variables directly to the meter target', async () => {
@@ -329,55 +566,99 @@ describe('useBeatAnalyser beat detection', () => {
     expect(levels[3]).toBeGreaterThan(levels[4] ?? 0)
   })
 
-  it('ignores mid-band hits and lights up on a low percussive hit', async () => {
-    const { analyser, spectrum } = await mountBeatHarness()
-
-    // 持续的低音(bin 1–10 常亮)是谐波成分,不是击点;中频击点(bin 12–60)不在包络的频段里
-    for (let index = 1; index <= 10; index += 1) spectrum[index] = 210
-    runFrames(120)
-    let peak = 0
-    for (let hit = 0; hit < 6; hit += 1) {
-      for (let index = 12; index <= 60; index += 1) spectrum[index] = 200
-      runFrames(4)
-      peak = Math.max(peak, analyser.beatLevel.value)
-      for (let index = 12; index <= 60; index += 1) spectrum[index] = 0
-      runFrames(30)
-    }
-    expect(peak).toBeLessThan(0.15)
-
-    // 低频打击(30–150Hz,bin 1–6 突然抬升)立刻点亮
-    spectrum.fill(0)
+  it('discards an old source build and clears the old highlight before the new source completes', async () => {
+    const { analyser, activeAudio, source } = await mountBeatHarness()
+    source.value = `/replacement-${++sourceId}.mp3`
+    expect(buildRequests[0]!.signal.aborted).toBe(true)
+    await analyser.startBeatAnalysis()
+    // The cancelled decoder keeps the single work slot until it settles.
+    expect(buildRequests).toHaveLength(1)
+    activeAudio.currentTime = 1.1
+    await finishBuild(0)
+    expect(buildRequests).toHaveLength(2)
     runFrames(60)
-    for (let index = 1; index <= 6; index += 1) spectrum[index] = 245
-    runFrames(3)
-    expect(analyser.beatLevel.value).toBeGreaterThan(0.5)
+    expect(analyser.preanalysis.timeline.value).toBeNull()
+    expect(analyser.beatLevel.value).toBe(0)
+    await finishBuild(1)
+    runFrames(60)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0.99)
+    source.value = `/third-${++sourceId}.mp3`
+    expect(analyser.preanalysis.timeline.value).toBeNull()
+    expect(analyser.beatLevel.value).toBe(0)
+    runFrames(10)
+    expect(analyser.beatLevel.value).toBe(0)
   })
 
-  it('delays the visual by the audio output latency so the flash does not lead the sound', async () => {
-    const { analyser, spectrum } = await mountBeatHarness()
+  it('reads the timeline behind the media position by current output and manual latency', async () => {
+    const { analyser, activeAudio, beatVisualDelay } = await mountBeatHarness({
+      beatVisualDelay: 100,
+    })
     const context = AudioContextMock.instances.at(-1)
     if (!context) throw new Error('context mock missing')
-    // 设备输出延迟 125ms,视觉链路自身约 25ms:画面应晚 100ms 左右再亮
-    context.outputLatency = 0.125
-    runFrames(30)
-    for (let index = 1; index <= 6; index += 1) spectrum[index] = 245
-    runFrames(3)
-    expect(analyser.beatLevel.value).toBeLessThan(0.1)
-    runFrames(6)
-    expect(analyser.beatLevel.value).toBeGreaterThan(0.5)
+    context.baseLatency = 0.025
+    context.outputLatency = 0.075
+    await finishBuild()
+    activeAudio.currentTime = 1.05
+    runFrames(60)
+    expect(analyser.beatLevel.value).toBe(0)
+    activeAudio.currentTime = 1.3
+    runFrames(1)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0.99)
+    beatVisualDelay.value = 400
+    runFrames(1)
+    expect(analyser.beatLevel.value).toBe(0)
+    expect(buildBeatTimeline).toHaveBeenCalledTimes(1)
   })
 
-  it('adds the manual visual delay on top of the automatic compensation', async () => {
-    const { analyser, spectrum } = await mountBeatHarness({ beatVisualDelay: 100 })
-    // AudioContext 在模块级共享,清掉上一个用例设置的设备延迟,只看手动值
-    const context = AudioContextMock.instances.at(-1)
-    if (context) context.outputLatency = 0
-    runFrames(30)
-    for (let index = 1; index <= 6; index += 1) spectrum[index] = 245
-    runFrames(3)
-    expect(analyser.beatLevel.value).toBeLessThan(0.1)
-    runFrames(6)
-    expect(analyser.beatLevel.value).toBeGreaterThan(0.5)
+  it('allows negative offsets to advance a known pulse and scales time offsets by playback rate', async () => {
+    const { analyser, activeAudio, beatVisualDelay } = await mountBeatHarness()
+    await finishBuild()
+    activeAudio.currentTime = 0.8
+    runFrames(60)
+    expect(analyser.beatLevel.value).toBe(0)
+    beatVisualDelay.value = -200
+    runFrames(1)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0.99)
+    activeAudio.currentTime = 0.65
+    runFrames(1)
+    expect(analyser.beatLevel.value).toBe(0)
+    activeAudio.playbackRate = 2
+    runFrames(1)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0.99)
+    expect(buildBeatTimeline).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops visual output immediately when beat flashes are disabled', async () => {
+    const { analyser, activeAudio, enabled } = await mountBeatHarness()
+    await finishBuild()
+    activeAudio.currentTime = 1.1
+    runFrames(60)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0.99)
+    enabled.value = false
+    expect(analyser.beatLevel.value).toBe(0)
+    runFrames(1)
+    expect(analyser.beatLevel.value).toBe(0)
+  })
+
+  it('keeps a stalled media element dark and reuses its timeline after buffering ends', async () => {
+    const { analyser, activeAudio } = await mountBeatHarness()
+    await finishBuild()
+    activeAudio.currentTime = 1.1
+    runFrames(60)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0.99)
+    Object.defineProperty(activeAudio, 'readyState', {
+      configurable: true,
+      value: HTMLMediaElement.HAVE_CURRENT_DATA,
+    })
+    runFrames(1)
+    expect(analyser.beatLevel.value).toBe(0)
+    Object.defineProperty(activeAudio, 'readyState', {
+      configurable: true,
+      value: HTMLMediaElement.HAVE_ENOUGH_DATA,
+    })
+    runFrames(60)
+    expect(analyser.beatLevel.value).toBeGreaterThan(0.99)
+    expect(buildBeatTimeline).toHaveBeenCalledTimes(1)
   })
 
   it('does not accumulate tainted silence across a long hidden gap', async () => {
@@ -395,6 +676,20 @@ describe('useBeatAnalyser beat detection', () => {
     callbacks.forEach((callback) => callback(performance.now()))
     runFrames(20)
 
+    expect(onTainted).not.toHaveBeenCalled()
+  })
+
+  it('keeps normal advancing silence from rebuilding the audio or disabling EQ', async () => {
+    const activeAudio = { paused: false, currentTime: 0 } as HTMLAudioElement
+    const onTainted = vi.fn()
+    const { spectrum } = await mountBeatHarness({ activeAudio, onTainted })
+    for (let frame = 0; frame < 400; frame += 1) {
+      activeAudio.currentTime += 0.016
+      runFrames(1)
+    }
+    expect(onTainted).not.toHaveBeenCalled()
+    spectrum[2] = 245
+    runFrames(2)
     expect(onTainted).not.toHaveBeenCalled()
   })
 
@@ -428,5 +723,42 @@ describe('useBeatAnalyser beat detection', () => {
     } finally {
       context.state = 'running'
     }
+  })
+})
+
+describe('useBeatAnalyser explicit source errors', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+  it.each([
+    ['SecurityError', true],
+    ['InvalidStateError', false],
+  ] as const)('only degrades on an explicit security error (%s)', async (name, shouldDegrade) => {
+    vi.resetModules()
+    class RejectingContext extends AudioContextMock {
+      override createMediaElementSource(): MediaElementAudioSourceNode {
+        throw new DOMException('source rejected', name)
+      }
+    }
+    vi.stubGlobal('AudioContext', RejectingContext)
+    const onTainted = vi.fn()
+    const onEqFiltersReady = vi.fn()
+    const { useBeatAnalyser: useFreshAnalyser } = await import('../platform/web/useBeatAnalyser')
+    const audio = new Audio('/safe.mp3')
+    const wrapper = mount(
+      createHarness(() => ({
+        analyser: useFreshAnalyser({
+          players: [audio],
+          getActiveAudio: () => audio,
+          isPlaying: ref(false),
+          onTainted,
+          onEqFiltersReady,
+        }),
+      })),
+    )
+    await (wrapper.vm.analyser as ReturnType<typeof useBeatAnalyser>).startBeatAnalysis()
+    expect(onTainted).toHaveBeenCalledTimes(shouldDegrade ? 1 : 0)
+    wrapper.unmount()
   })
 })

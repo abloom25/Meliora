@@ -6,8 +6,10 @@
   import { formatTrackDisplayTitle } from '../core/library/tracks'
   import type { LyricProviderSource, LyricStatus, Track } from '../core/types'
   import { APP_VERSION } from '../generated/app-version'
+  import type { BeatBuildStatus } from '../core/analysis/beat-timeline'
   import { usePlayerStore, type ResettableSettingKey } from '../stores/player'
   import Collapse from './Collapse.vue'
+  import BeatAnalysisSettings from './BeatAnalysisSettings.vue'
   import EqualizerPanel from './EqualizerPanel.vue'
   import SettingSlider from './SettingSlider.vue'
   import SettingToggleRow from './SettingToggleRow.vue'
@@ -40,6 +42,7 @@
   const BACKGROUND_KEYS: readonly ResettableSettingKey[] = [
     'dynamicBackground',
     'beatFlash',
+    'beatAnalysisMode',
     'backgroundBlur',
     'backgroundSaturation',
     'beatBrightness',
@@ -107,6 +110,7 @@
 
   const props = defineProps<{
     playModeText: string
+    beatBuild?: BeatBuildStatus
     sleepTimer: SleepTimerState
     capabilities: SettingsCapabilities
     songInfo?: SongInfoState
@@ -175,6 +179,7 @@
     openLyricsWindow: []
     installPwa: []
     showIosInstallGuide: []
+    beatBuildRetry: []
   }>()
 </script>
 
@@ -424,6 +429,7 @@
       />
       <!-- 同上:闪光关掉后亮度 / 频率 / 延迟都无处生效 -->
       <Collapse :expanded="settings.beatFlash">
+        <BeatAnalysisSettings :status="beatBuild" @retry="emit('beatBuildRetry')" />
         <SettingSlider
           v-model="settings.beatBrightness"
           label="节奏亮度"

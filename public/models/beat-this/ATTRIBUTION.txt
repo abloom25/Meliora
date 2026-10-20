@@ -1,0 +1,9 @@
+Beat This! by Francesco Foscarin, Jan Schlüter and Gerhard Widmer.
+Copyright (c) 2024 Institute of Computational Perception, JKU Linz, Austria.
+Code and official pretrained weights: MIT (see LICENSE).
+Source: https://github.com/CPJKU/beat_this/tree/b95c8ab0c58c2d9fcfd40508ae8dffbc05ac4f5c
+Reference package: beat-this 1.1.0.
+Conversion: scripts/export-beat-this.py; no retraining or quantization.
+Official small0 / final0 checkpoints; source and converted hashes in manifest.json.
+Attention is divided only across independent batch/head axes, keeping full 30s context.
+No affiliation with or endorsement by the original authors is implied.

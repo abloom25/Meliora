@@ -136,9 +136,24 @@ export function predictPreloadTrack(
 ): Track | null {
   if (!state.queue.length) return null
 
+  // 单曲自动续播不能被反向切歌留下的缓存改变。
+  if (
+    direction === 'next' &&
+    state.playMode === 'single' &&
+    !options.manual &&
+    state.currentIndex >= 0
+  ) {
+    const current = state.queue[state.currentIndex]
+    return current && !options.isFailed(current.id) ? current : null
+  }
+
   // 槽位里已经准备好的那首优先复用,免得每次都重新预测
-  if (isUsableCache(options.cachedTrack, currentTrackId, options.isFailed)) {
-    return options.cachedTrack
+  const cached = options.cachedTrack
+  const queuedCache =
+    cached &&
+    state.queue.find((track) => track.id === cached.id && track.audioUrl === cached.audioUrl)
+  if (queuedCache && isUsableCache(queuedCache, currentTrackId, options.isFailed)) {
+    return queuedCache
   }
 
   const predicted =

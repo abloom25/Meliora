@@ -62,6 +62,15 @@ describe('track failure log', () => {
 })
 
 describe('preload prediction', () => {
+  it('ignores the reverse slot cache when automatically repeating a single track', () => {
+    expect(
+      predictPreloadTrack(state(0, 'single'), 't0', 'next', {
+        manual: false,
+        isFailed: never,
+        cachedTrack: makeQueue(5)[1],
+      })?.id,
+    ).toBe('t0')
+  })
   it('follows the same rules the real track change will follow', () => {
     expect(
       predictPreloadTrack(state(1, 'loop'), 't1', 'next', { manual: false, isFailed: never })?.id,
@@ -145,6 +154,12 @@ describe('preload prediction', () => {
       isFailed: (id) => id === 't0',
     })
     expect(picked?.id).toBe('t1')
+    expect(
+      predictPreloadTrack(state(-1, 'single'), null, 'next', {
+        manual: false,
+        isFailed: (id) => id === 't0',
+      })?.id,
+    ).toBe('t1')
   })
 
   it('has nothing to predict from an empty queue', () => {
