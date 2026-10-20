@@ -1,10 +1,17 @@
 <script setup lang="ts">
-  import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+  import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
   import { storeToRefs } from 'pinia'
   import { usePlayerStore } from '../stores/player'
   import { wordEdgeSoftness, wordFillProgress } from '../core/lyrics'
-  import { createLyricTimeline, harmonyParentsOf, isLyricHarmonyOpen } from '../core/lyrics'
+  import {
+    createLyricTimeline,
+    createLyricWaitingTimeline,
+    harmonyParentsOf,
+    isLyricHarmonyOpen,
+  } from '../core/lyrics'
   import type { LyricsSnapshot } from '../core/types'
+  import { listenMediaQuery } from '../platform/web/media-query'
+  import LyricsWaitingIndicator from './LyricsWaitingIndicator.vue'
 
   /** 气泡里的一个音节。fill / edge 是预览时刻的静态扫光快照 */
   interface PreviewWord {
@@ -50,6 +57,16 @@
   const previewVisible = ref(false)
   const previewScrollDirection = ref<'forward' | 'backward' | 'idle'>('idle')
   const previewBubble = ref<HTMLElement | null>(null)
+  const waitingIndicator = ref<InstanceType<typeof LyricsWaitingIndicator>>()
+  const reducedMotionQuery =
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-reduced-motion: reduce)')
+      : null
+  const prefersReducedMotion = ref(reducedMotionQuery?.matches ?? false)
+  const previewAnimated = computed(
+    () => settings.value.lyricAnimation && !prefersReducedMotion.value,
+  )
+  let stopReducedMotionListener: (() => void) | undefined
   const previewHover = ref<{
     track: HTMLElement
     clientX: number
@@ -63,6 +80,16 @@
   const previewTimeline = computed(() =>
     createLyricTimeline(previewLines.value, previewHarmonyParents.value),
   )
+  const previewWaitingTimeline = computed(() =>
+    createLyricWaitingTimeline(previewLines.value, previewHarmonyParents.value),
+  )
+  const previewWaiting = computed(() => {
+    if (previewTime.value === null || props.lyricPreview?.status !== 'ready') return null
+    return previewWaitingTimeline.value.read(previewTime.value)?.interval ?? null
+  })
+  const previewWaitingSecondary = computed(
+    () => previewLines.value[previewWaiting.value?.nextAnchor ?? -1]?.agent === 'secondary',
+  )
   // 预览与面板共用同一套场景解析:对唱双声部同时亮、和声按自己的时间轴、
   // 间奏保留上一句。旧实现是"最后一个开始的行",和声会把主句挤掉,
   // 唱完的句子也会一直显示成正在唱
@@ -74,7 +101,7 @@
   const previewRows = computed<PreviewRow[]>(() => {
     const scene = previewScene.value
     const time = previewTime.value
-    if (!scene || time === null) return []
+    if (!scene || time === null || previewWaiting.value) return []
     const shown = new Set(scene.active)
     // 和声只在它所属的主句被唱到时跟着出现。这里必须按"有主句"过滤:
     // 找不到主句的和声在面板里是常驻的,气泡只显示当前这一句,不能把它也带上
@@ -105,8 +132,11 @@
         }
       })
   })
-  // 间奏:这一句其实已经唱完了,只是保留着高亮。整体压暗以示区别
-  const previewHeld = computed(() => previewScene.value?.held ?? false)
+  const hasPreviewContent = computed(() =>
+    Boolean(previewWaiting.value || previewRows.value.length),
+  )
+  // 短停顿保留上一句；有明确前奏/长间奏时改为等待点。
+  const previewHeld = computed(() => !previewWaiting.value && (previewScene.value?.held ?? false))
   const previewStyle = computed(() => ({
     translate: `${previewX.value}px ${previewY.value}px`,
     width: previewWidth.value === null ? undefined : `${previewWidth.value}px`,
@@ -115,16 +145,32 @@
   // 只在"显示哪几行"变化时才换 key:逐字进度每帧都在变,拿它当 key 会让
   // 气泡每帧重新播一次进出场动画
   const previewContentKey = computed(() => {
+    const waiting = previewWaiting.value
+    if (waiting) return `waiting:${waiting.start}:${waiting.end}:${waiting.nextAnchor}`
     const rows = previewRows.value
     if (!rows.length) return 'empty'
     return `${previewHeld.value ? 'held' : 'sung'}:${rows.map((row) => row.index).join(',')}`
   })
+  function readPreviewTime(): number {
+    return previewTime.value ?? 0
+  }
+
+  // 预览是指针时刻的快照，停在同一位置不会自行计时。沿用指针 RAF 的更新，
+  // 区间内移动只写现有三点，不重挂载或重播气泡过渡。
+  watch(
+    previewTime,
+    (time) => {
+      if (time !== null) waitingIndicator.value?.write(time)
+    },
+    { flush: 'post' },
+  )
   let progressDragTarget: HTMLElement | null = null
   let progressDragPointerId: number | null = null
   // 拖动开始时锁定的时长:拖动全程用它换算指针位置,
   // 避免拖动中切歌导致松手时按新时长 seek 到错误位置
   let dragLockedDuration: number | null = null
   let lastPreviewTime: number | null = null
+  let previewTrackRect: DOMRect | null = null
   let previewFrame = 0
   let pendingPreviewEvent: {
     track: HTMLElement
@@ -320,6 +366,12 @@
 
     if (measuredWidth > 0) previewWidth.value = measuredWidth
     if (measuredHeight > 0) previewHeight.value = measuredHeight
+    // 三点换成长句时，指针可能已经停住。新宽度必须立即重新夹紧位置，
+    // 继续复用最近一次指针帧的轨道快照，避免额外强制布局。
+    const hover = previewHover.value
+    if (previewVisible.value && hover && previewTrackRect) {
+      updatePreviewPosition(hover.clientX, hover.clientY, previewTrackRect)
+    }
   }
 
   function updatePreviewPosition(clientX: number, clientY: number, rect: DOMRect) {
@@ -389,6 +441,7 @@
     // 同一帧的时间换算与气泡定位共用几何快照,避免写入样式后再次强制布局。
     // 每次指针更新都重新读取,窗口缩放或轨道移动后不会沿用过期位置。
     const rect = track.getBoundingClientRect()
+    previewTrackRect = rect
     const nextTime = getProgressTime(track, clientX, rect)
     if (nextTime === null) {
       hideLyricPreview()
@@ -411,6 +464,7 @@
     previewTime.value = null
     previewWidth.value = null
     previewHeight.value = null
+    previewTrackRect = null
     previewScrollDirection.value = 'idle'
     pendingPreviewDirection = 'idle'
     lastPreviewTime = null
@@ -433,11 +487,12 @@
       return
     }
     const rect = hover.track.getBoundingClientRect()
+    previewTrackRect = rect
     const nextTime = getProgressTime(hover.track, hover.clientX, rect)
     if (nextTime === null) return
     updatePreviewScrollDirection(nextTime)
     previewTime.value = nextTime
-    if (!previewRows.value.length) return
+    if (!hasPreviewContent.value) return
     previewVisible.value = true
     updatePreviewPosition(hover.clientX, hover.clientY, rect)
     void nextTick(() => {
@@ -450,7 +505,7 @@
     () => props.lyricPreview,
     () => {
       restoreLyricPreviewFromHover()
-      if (!previewRows.value.length) {
+      if (!hasPreviewContent.value) {
         hideLyricPreview()
       }
     },
@@ -479,7 +534,7 @@
     // 方向 class 只影响歌词文本切换的进出场方向,仅在真正换行(内容 key 变化)时应用,
     // pointermove 期间只累积 pending 值,避免每帧触发气泡重渲染
     previewScrollDirection.value = pendingPreviewDirection
-    if (!previewVisible.value || !previewRows.value.length) return
+    if (!previewVisible.value || !hasPreviewContent.value) return
     void nextTick(updatePreviewSize)
   })
 
@@ -496,7 +551,16 @@
     pendingPreviewDirection = delta > 0 ? 'forward' : 'backward'
   }
 
+  onMounted(() => {
+    if (reducedMotionQuery) {
+      stopReducedMotionListener = listenMediaQuery(reducedMotionQuery, (event) => {
+        prefersReducedMotion.value = event.matches
+      })
+    }
+  })
+
   onBeforeUnmount(() => {
+    stopReducedMotionListener?.()
     finishProgressDrag(null, { seek: false })
     removeGlobalProgressListeners()
     cancelPendingPreviewFrame()
@@ -539,7 +603,7 @@
   <Teleport to="body">
     <Transition name="lyric-preview">
       <div
-        v-if="previewVisible && previewRows.length"
+        v-if="previewVisible && hasPreviewContent"
         ref="previewBubble"
         class="lyric-preview-bubble"
         :class="[`scroll-${previewScrollDirection}`, { held: previewHeld }]"
@@ -550,6 +614,20 @@
           <span class="lyric-preview-time">{{ formatTime(previewTime ?? 0) }}</span>
           <Transition name="lyric-preview-content">
             <div :key="previewContentKey" class="lyric-preview-text">
+              <div
+                v-if="previewWaiting"
+                class="lyric-preview-waiting"
+                :class="{ secondary: previewWaitingSecondary }"
+              >
+                <LyricsWaitingIndicator
+                  ref="waitingIndicator"
+                  :interval="previewWaiting"
+                  :animated="previewAnimated"
+                  :secondary="previewWaitingSecondary"
+                  :get-time="readPreviewTime"
+                  paused
+                />
+              </div>
               <div
                 v-for="row in previewRows"
                 :key="row.index"
@@ -713,12 +791,25 @@
 
   .lyric-preview-text,
   .lyric-preview-content strong,
-  .lyric-preview-content span {
+  .lyric-preview-time,
+  .lyric-preview-roman,
+  .lyric-preview-translation {
     display: block;
   }
 
-  /* 音节必须留在行内。选择器要压过上面那条把 span 一律设为 block 的兜底规则,
-     否则每个音节各占一行,气泡会被撑成又窄又高的一条 */
+  .lyric-preview-waiting {
+    display: flex;
+    align-items: center;
+    min-width: 3em;
+    min-height: 1.3em;
+    font-size: 1rem;
+
+    &.secondary {
+      justify-content: flex-end;
+    }
+  }
+
+  /* 音节与真实空白留在行内，保留英文的自然换行机会。 */
   .lyric-preview-content .lyric-preview-word,
   .lyric-preview-content .lyric-preview-gap {
     display: inline;

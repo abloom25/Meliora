@@ -2,7 +2,7 @@ import { mount } from '@vue/test-utils'
 import { defineComponent, nextTick, reactive, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLyricsWindow } from '../platform/web/useLyricsWindow'
-import type { LyricsSnapshot, Track } from '../core/types'
+import type { LyricLine, LyricsSnapshot, Track } from '../core/types'
 import type { LyricPlaybackState } from '../core/lyrics/render-schedule'
 import { supportsDocumentPictureInPicture } from '../platform/web/browser'
 
@@ -95,15 +95,16 @@ function runPopupFrames(popup: Window, count: number, stepMs = 16) {
   }
 }
 
-async function mountScrollingHarness() {
-  const harness = mountLyricsWindowHarness()
-  const { api, popup } = harness
-  await api.toggleLyricsWindow()
-  const lines = Array.from({ length: 100 }, (_, index) => ({
+async function mountScrollingHarness(
+  lines: LyricLine[] = Array.from({ length: 100 }, (_, index) => ({
     time: index,
     text: `Line ${index}`,
     words: [{ time: index, duration: 1, text: `Line ${index}` }],
-  }))
+  })),
+) {
+  const harness = mountLyricsWindowHarness()
+  const { api, popup } = harness
+  await api.toggleLyricsWindow()
   const show = (activeIndex: number, tempoScale = 1) =>
     api.setSnapshot({ status: 'ready', activeIndex, tempoScale, lines })
   show(1)
@@ -445,6 +446,150 @@ describe('useLyricsWindow', () => {
     wrapper.unmount()
   })
 
+  it('refreshes hidden track and lyric changes immediately on visibility restoration while paused', async () => {
+    const { api, popup, track, wrapper, currentTime } = mountLyricsWindowHarness()
+    try {
+      await api.toggleLyricsWindow()
+      currentTime.value = 2
+      await nextTick()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        activeIndices: [0],
+        lines: [{ time: 0, endTime: 5, text: 'Old line' }],
+      })
+      Object.defineProperty(popup.document, 'hidden', { configurable: true, value: true })
+      popup.document.dispatchEvent(new Event('visibilitychange'))
+      Object.assign(track, { id: 'track-2', title: 'New song', artist: 'New artist' })
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        activeIndices: [0],
+        lines: [
+          {
+            time: 0,
+            endTime: 5,
+            text: 'New line',
+            words: [{ time: 0, duration: 5, text: 'New line' }],
+          },
+        ],
+      })
+      await nextTick()
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('Old line')
+      Object.defineProperty(popup.document, 'hidden', { configurable: true, value: false })
+      popup.document.dispatchEvent(new Event('visibilitychange'))
+      expect(popup.document.querySelector('h1')?.textContent).toBe('New song')
+      expect(popup.document.querySelector('header p')?.textContent).toBe('New artist')
+      expect(popup.document.querySelector('.line.active .main')?.textContent).toBe('New line')
+      expect(
+        Number(
+          popup.document
+            .querySelector<HTMLElement>('.line.active .word')!
+            .style.getPropertyValue('--w'),
+        ),
+      ).toBeGreaterThan(0)
+
+      Object.defineProperty(popup.document, 'hidden', { configurable: true, value: true })
+      popup.document.dispatchEvent(new Event('visibilitychange'))
+      api.setSnapshot({ status: 'error', activeIndex: -1, lines: [] })
+      Object.defineProperty(popup.document, 'hidden', { configurable: true, value: false })
+      popup.document.dispatchEvent(new Event('visibilitychange'))
+      expect(popup.document.querySelector('.state')?.textContent).toBe('歌词载入失败')
+      expect(popup.document.querySelectorAll('.line')).toHaveLength(0)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('renders, updates and removes romanization between original lyrics and translation', async () => {
+    const { api, popup, wrapper } = mountLyricsWindowHarness()
+    try {
+      await api.toggleLyricsWindow()
+      const show = (roman?: string) =>
+        api.setSnapshot({
+          status: 'ready',
+          activeIndex: 0,
+          lines: [{ time: 0, text: '原文', translation: 'Translation', roman }],
+        })
+      show()
+      show('genbun')
+      const line = popup.document.querySelector('.line')!
+      expect([...line.children].map((node) => node.className)).toEqual([
+        'main',
+        'roman',
+        'translation',
+      ])
+      const romanNode = line.querySelector('.roman')!
+      expect(romanNode.textContent).toBe('genbun')
+      show('gen bun')
+      expect(line.querySelector('.roman')).toBe(romanNode)
+      expect(romanNode.textContent).toBe('gen bun')
+      show()
+      expect(line.querySelector('.roman')).toBeNull()
+      expect(line.querySelector('.translation')?.textContent).toBe('Translation')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('keeps romanization bound to the correct lyric when popup slots are reused in either direction', async () => {
+    const { api, popup, wrapper } = mountLyricsWindowHarness()
+    try {
+      await api.toggleLyricsWindow()
+      const lines = Array.from({ length: 12 }, (_, index) => ({
+        time: index,
+        text: `Line ${index}`,
+        roman: index % 2 ? `Roman ${index}` : undefined,
+        translation: `Translation ${index}`,
+      }))
+      for (const activeIndex of [0, 3, 8, 1, 11]) {
+        api.setSnapshot({ status: 'ready', activeIndex, lines })
+        for (const node of popup.document.querySelectorAll<HTMLElement>('.line')) {
+          const index = Number(node.dataset.index)
+          expect(node.querySelector('.main')?.textContent).toBe(`Line ${index}`)
+          expect(node.querySelector('.roman')?.textContent).toBe(
+            index % 2 ? `Roman ${index}` : undefined,
+          )
+          expect(node.querySelector('.translation')?.textContent).toBe(`Translation ${index}`)
+        }
+      }
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('treats track metadata, syllables, romanization and translations as text', async () => {
+    const { api, popup, track, wrapper } = mountLyricsWindowHarness()
+    try {
+      const markup = '<img src=x onerror="alert(1)"><script>alert(2)</script>'
+      Object.assign(track, { title: markup, artist: markup })
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        lines: [
+          {
+            time: 0,
+            text: markup,
+            roman: markup,
+            translation: markup,
+            words: [{ time: 0, duration: 1, text: markup }],
+          },
+        ],
+      })
+      expect(popup.document.querySelector('h1')?.textContent).toBe(markup)
+      expect(popup.document.querySelector('header p')?.textContent).toBe(markup)
+      for (const selector of ['.word', '.roman', '.translation']) {
+        expect(popup.document.querySelector(selector)?.textContent).toBe(markup)
+      }
+      expect(
+        popup.document.querySelector('h1 img,header p img,.lyrics-lines img,script'),
+      ).toBeNull()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('closes a popup that is still opening when the composable unmounts', async () => {
     const popup = createPopupWindow('loading')
     const { api, wrapper, debugEnabled } = mountLyricsWindowHarness(popup)
@@ -623,6 +768,81 @@ describe('useLyricsWindow', () => {
     ).toBe(true)
   })
 
+  it.each([
+    'starts a harmony',
+    'ends a harmony',
+    'upgrades lyrics',
+    'coalesces same-frame updates',
+  ])('continues from the visible position when the same anchor %s mid-scroll', async (change) => {
+    const lines: LyricLine[] = Array.from({ length: 100 }, (_, index) => ({
+      time: index,
+      endTime: index + 1,
+      text: `Line ${index}`,
+      words: [{ time: index, duration: 1, text: `Line ${index}` }],
+    }))
+    lines[2] = {
+      ...lines[2]!,
+      endTime: 4,
+      words: [{ time: 2, duration: 2, text: 'Line 2' }],
+    }
+    lines[3] = {
+      ...lines[3]!,
+      time: 2.1,
+      endTime: 2.3,
+      background: true,
+      words: [{ time: 2.1, duration: 0.2, text: 'Line 3' }],
+    }
+    const { api, popup, animate, setDrift, wrapper } = await mountScrollingHarness(lines)
+    try {
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 2,
+        activeIndices: change === 'ends a harmony' ? [2, 3] : [2],
+        lines,
+      })
+      runPopupFrames(popup, 1)
+      setDrift(20)
+      animate.mockClear()
+
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 2,
+        activeIndices:
+          change === 'starts a harmony' || change === 'coalesces same-frame updates' ? [2, 3] : [2],
+        lines:
+          change === 'upgrades lyrics'
+            ? lines.map((line) => ({ ...line, translation: 'Translation' }))
+            : lines,
+      })
+      if (change === 'coalesces same-frame updates') {
+        const translated = lines.map((line) => ({ ...line, translation: 'Translation' }))
+        api.setSnapshot({
+          status: 'ready',
+          activeIndex: 2,
+          activeIndices: [2, 3],
+          lines: translated,
+        })
+        api.setSnapshot({
+          status: 'ready',
+          activeIndex: 2,
+          activeIndices: [2],
+          lines: translated,
+        })
+      }
+      expect(animate).not.toHaveBeenCalled()
+      runPopupFrames(popup, 1)
+
+      expect(animate).toHaveBeenCalledTimes(1)
+      expect(animate).toHaveBeenCalledWith(
+        [{ transform: 'translateY(20px)' }, { transform: 'translateY(0)' }],
+        { duration: 420, easing: 'cubic-bezier(.16,1,.3,1)' },
+      )
+      expect(popup.document.querySelector('.line.active')?.getAttribute('data-index')).toBe('2')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('does not restart scrolling or lose karaoke bindings for an unchanged snapshot', async () => {
     const {
       api,
@@ -776,6 +996,8 @@ describe('useLyricsWindow', () => {
     expect(popup.document.querySelectorAll('.line.active .gap')).toHaveLength(1)
     expect(words[0]?.style.getPropertyValue('--w')).toBe('0.500')
     expect(words[1]?.style.getPropertyValue('--w')).toBe('0.000')
+    expect(words[0]?.style.getPropertyValue('--lyric-word-rise')).toBe('0.875')
+    expect(words[1]?.style.getPropertyValue('--lyric-word-rise')).toBe('0.000')
 
     // 非当前行不写内联值,CSS 的 var() 兜底把它们渲染成已唱完
     const idle = popup.document.querySelector<HTMLElement>('.line:not(.active) .word')
@@ -815,10 +1037,53 @@ describe('useLyricsWindow', () => {
     // 释放内联值后由样式里的 var(--w,1) 兜底成"已唱完",整行一次性高亮
     expect(word.style.getPropertyValue('--w')).toBe('')
     expect(word.style.getPropertyValue('--e')).toBe('')
+    expect(word.style.getPropertyValue('--lyric-word-rise')).toBe('')
 
     lyricAnimation.value = true
     await nextTick()
     expect(word.style.getPropertyValue('--w')).toBe('0.500')
+    expect(word.style.getPropertyValue('--lyric-word-rise')).toBe('0.875')
+  })
+
+  it('continues independent word rise through a short held gap and releases it when the next phrase starts', async () => {
+    let mediaSeconds = 0.1
+    const { api, popup, wrapper, isPlaying } = mountLyricsWindowHarness(
+      createPopupWindow(),
+      () => mediaSeconds,
+    )
+    try {
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        lines: [
+          {
+            time: 0,
+            endTime: 0.25,
+            text: 'Short',
+            words: [{ time: 0, duration: 0.25, text: 'Short' }],
+          },
+          { time: 3, endTime: 4, text: 'Next' },
+        ],
+      })
+      isPlaying.value = true
+      await nextTick()
+      const word = popup.document.querySelector<HTMLElement>('.line.active .word')!
+      mediaSeconds = 0.3
+      runPopupFrames(popup, 1)
+      expect(word.closest('.line')?.classList.contains('active')).toBe(true)
+      expect(word.style.getPropertyValue('--w')).toBe('1.000')
+      expect(word.style.getPropertyValue('--lyric-word-rise')).toBe('0.657')
+      mediaSeconds = 0.7
+      runPopupFrames(popup, 1)
+      expect(word.style.getPropertyValue('--lyric-word-rise')).toBe('0.973')
+      mediaSeconds = 3.1
+      runPopupFrames(popup, 1)
+      expect(word.style.getPropertyValue('--lyric-word-rise')).toBe('')
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('Next')
+    } finally {
+      wrapper.unmount()
+    }
   })
 
   it('drives the fill from its own frame loop while playing', async () => {
@@ -894,6 +1159,124 @@ describe('useLyricsWindow', () => {
     }
   })
 
+  it('keeps short-gap lyrics highlighted, dims the final boundary, and restores them after seeking back', async () => {
+    let mediaSeconds = 0.25
+    const { api, popup, wrapper, currentTime } = mountLyricsWindowHarness(
+      createPopupWindow(),
+      () => mediaSeconds,
+    )
+    try {
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        lines: [
+          { time: 0, endTime: 1, text: 'First' },
+          { time: 3, endTime: 4, text: 'Last' },
+        ],
+      })
+      const seek = async (time: number) => {
+        mediaSeconds = time
+        currentTime.value = time
+        await nextTick()
+      }
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('First')
+      await seek(1)
+      expect(popup.document.querySelector('.line.active.focused')?.textContent).toBe('First')
+      expect(popup.document.querySelector('.line.after')?.textContent).toBe('Last')
+      await seek(3.5)
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('Last')
+      await seek(4)
+      expect(popup.document.querySelectorAll('.line.before')).toHaveLength(2)
+      expect(popup.document.querySelector('.line.before.focused')?.textContent).toBe('Last')
+      const viewport = popup.document.querySelector<HTMLElement>('.lyrics')!
+      const container = popup.document.querySelector<HTMLElement>('.lyrics-lines')!
+      Object.defineProperty(viewport, 'clientHeight', { value: 40 })
+      Object.defineProperty(container, 'offsetHeight', { value: 80 })
+      for (const node of container.children)
+        Object.defineProperty(node, 'offsetHeight', { value: 40 })
+      runPopupFrames(popup, 1)
+      expect(container.querySelector<HTMLElement>('.focused')?.hidden).toBe(false)
+      expect(container.querySelector<HTMLElement>('[data-index="0"]')?.hidden).toBe(true)
+      await seek(0.5)
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('First')
+      expect(popup.document.querySelector('.line.after')?.textContent).toBe('Last')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('retains the finished duet beside its singing lead while completed harmonies and future rows stay distinct', async () => {
+    let mediaSeconds = 1.25
+    const { api, popup, wrapper, currentTime } = mountLyricsWindowHarness(
+      createPopupWindow(),
+      () => mediaSeconds,
+    )
+    try {
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 2,
+        lines: [
+          { time: 8, endTime: 9, text: 'Future' },
+          { time: 0, endTime: 4, text: 'Lead' },
+          { time: 0, endTime: 2, text: 'Duet', agent: 'secondary' },
+          { time: 1, endTime: 1.5, text: 'Harmony', background: true },
+        ],
+      })
+      mediaSeconds = 2.25
+      currentTime.value = mediaSeconds
+      await nextTick()
+      expect(
+        [...popup.document.querySelectorAll('.line.active')].map((node) => node.textContent),
+      ).toEqual(['Lead', 'Duet'])
+      expect(popup.document.querySelector('.line.after')?.textContent).toBe('Future')
+      expect(
+        [...popup.document.querySelectorAll('.line.before')].map((node) => node.textContent),
+      ).toEqual(['Harmony'])
+      mediaSeconds = 1.25
+      currentTime.value = mediaSeconds
+      await nextTick()
+      expect(popup.document.querySelectorAll('.line.before')).toHaveLength(0)
+      expect(popup.document.querySelectorAll('.line.active')).toHaveLength(3)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('updates word progress without rerendering the completed-state layout inside one timing interval', async () => {
+    let mediaSeconds = 0.25
+    const { api, popup, wrapper, isPlaying } = mountLyricsWindowHarness(
+      createPopupWindow(),
+      () => mediaSeconds,
+    )
+    try {
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        lines: [
+          { time: 0, endTime: 5, text: 'Long', words: [{ time: 0, duration: 5, text: 'Long' }] },
+          { time: 6, endTime: 7, text: 'Next' },
+        ],
+      })
+      isPlaying.value = true
+      await nextTick()
+      runPopupFrames(popup, 1)
+      const coverReads = vi.spyOn(popup.document.querySelector('.cover')!, 'getAttribute')
+      const word = popup.document.querySelector<HTMLElement>('.line.active .word')!
+      const initialFill = Number(word.style.getPropertyValue('--w'))
+      for (let frame = 0; frame < 30; frame += 1) {
+        mediaSeconds += 0.016
+        runPopupFrames(popup, 1)
+      }
+      expect(Number(word.style.getPropertyValue('--w'))).toBeGreaterThan(initialFill)
+      expect(coverReads).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('keeps independently timed duet and harmony groups together across seeks and source upgrades', async () => {
     let mediaSeconds = 0
     const { api, popup, wrapper, isPlaying } = mountLyricsWindowHarness(
@@ -931,6 +1314,335 @@ describe('useLyricsWindow', () => {
       await vi.advanceTimersByTimeAsync(1000)
       runPopupFrames(popup, 2)
       expect(popup.document.querySelector('.line.active .main')?.textContent).toBe('Intro')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('shows intro and interlude dots from media time, including paused starts and reverse seeks', async () => {
+    const state: LyricPlaybackState = {
+      timeSeconds: 0,
+      playing: false,
+      playbackRate: 1,
+      seeking: false,
+    }
+    const listeners = new Set<() => void>()
+    const { api, popup, wrapper, currentTime } = mountLyricsWindowHarness(
+      createPopupWindow(),
+      undefined,
+      {
+        getLyricsPlaybackState: () => state,
+        subscribeLyricsPlayback: (listener) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+      },
+    )
+    const seek = (time: number) => {
+      state.timeSeconds = time
+      state.seeking = true
+      listeners.forEach((listener) => listener())
+      state.seeking = false
+      listeners.forEach((listener) => listener())
+    }
+    const waiting = () => popup.document.querySelector<HTMLElement>('.waiting-row')
+    try {
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: -1,
+        lines: [
+          { time: 4, endTime: 5, text: 'First' },
+          { time: 14, endTime: 15, text: 'Last', agent: 'secondary' },
+        ],
+      })
+      expect(waiting()?.getAttribute('aria-label')).toBe('前奏')
+      expect(waiting()?.style.visibility).toBe('hidden')
+      runPopupFrames(popup, 1)
+      expect(waiting()?.style.visibility).toBe('visible')
+      expect(
+        waiting()?.querySelector<HTMLElement>('.lyrics-waiting-indicator')?.style.opacity,
+      ).toBe('1')
+      expect(
+        [...waiting()!.querySelectorAll<HTMLElement>('.waiting-dot')].map(
+          (dot) => dot.style.opacity,
+        ),
+      ).toEqual(['0.65', '0.65', '0.65'])
+      expect(waiting()?.nextElementSibling?.textContent).toBe('First')
+      seek(4)
+      expect(waiting()).toBeNull()
+      expect(popup.document.querySelector('.active')?.textContent).toBe('First')
+      seek(5)
+      expect(waiting()?.getAttribute('aria-label')).toBe('间奏')
+      expect(waiting()?.classList.contains('secondary')).toBe(true)
+      expect(waiting()?.nextElementSibling?.textContent).toBe('Last')
+      expect(popup.document.querySelectorAll('.active')).toHaveLength(0)
+      const row = waiting()
+      seek(9)
+      expect(waiting()).toBe(row)
+      seek(14)
+      expect(waiting()).toBeNull()
+      expect(popup.document.querySelector('.active')?.textContent).toBe('Last')
+      seek(15)
+      expect(waiting()).toBeNull()
+      expect(popup.document.querySelectorAll('.active')).toHaveLength(0)
+      seek(2)
+      expect(waiting()?.getAttribute('aria-label')).toBe('前奏')
+      expect(currentTime.value).toBe(0)
+      api.setSnapshot({ status: 'loading', activeIndex: -1, lines: [] })
+      expect(waiting()).toBeNull()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('advances waiting styles without rebuilding or measuring rows, then freezes and restores on visibility changes', async () => {
+    const state: LyricPlaybackState = {
+      timeSeconds: 1,
+      playing: true,
+      playbackRate: 1,
+      seeking: false,
+    }
+    const getState = vi.fn(() => state)
+    const listeners = new Set<() => void>()
+    const { api, popup, wrapper, currentTime } = mountLyricsWindowHarness(
+      createPopupWindow(),
+      undefined,
+      {
+        getLyricsPlaybackState: getState,
+        subscribeLyricsPlayback: (listener) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+      },
+    )
+    const notify = () => listeners.forEach((listener) => listener())
+    try {
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: -1,
+        lines: [{ time: 12, endTime: 13, text: 'First' }],
+      })
+      runPopupFrames(popup, 1)
+      const container = popup.document.querySelector<HTMLElement>('.lyrics-lines')!
+      const indicator = container.querySelector<HTMLElement>('.lyrics-waiting-indicator')!
+      const firstDot = indicator.firstElementChild as HTMLElement
+      const initialOpacity = firstDot.style.opacity
+      const line = container.querySelector<HTMLElement>('.line')!
+      const geometry = vi.spyOn(line, 'getBoundingClientRect')
+      const insertions = vi.spyOn(container, 'insertBefore')
+      const coverReads = vi.spyOn(popup.document.querySelector('.cover')!, 'getAttribute')
+      for (let frame = 0; frame < 30; frame += 1) {
+        state.timeSeconds += 0.016
+        runPopupFrames(popup, 1)
+      }
+      expect(Number(firstDot.style.opacity)).toBeGreaterThan(Number(initialOpacity))
+      expect(container.querySelector('.line')).toBe(line)
+      expect(geometry).not.toHaveBeenCalled()
+      expect(insertions).not.toHaveBeenCalled()
+      expect(coverReads).not.toHaveBeenCalled()
+      const viewport = container.parentElement!
+      const beforeDetach = indicator.outerHTML
+      container.remove()
+      state.timeSeconds += 0.1
+      runPopupFrames(popup, 1)
+      expect(indicator.outerHTML).toBe(beforeDetach)
+      viewport.append(container)
+      state.timeSeconds += 0.1
+      runPopupFrames(popup, 1)
+      expect(indicator.outerHTML).not.toBe(beforeDetach)
+      state.playing = false
+      notify()
+      runPopupFrames(popup, 1)
+      const frozen = indicator.outerHTML
+      getState.mockClear()
+      vi.mocked(popup.requestAnimationFrame).mockClear()
+      runPopupFrames(popup, 20)
+      expect(getState).not.toHaveBeenCalled()
+      expect(popup.requestAnimationFrame).not.toHaveBeenCalled()
+      expect(indicator.outerHTML).toBe(frozen)
+      Object.defineProperty(popup.document, 'hidden', { configurable: true, value: true })
+      popup.document.dispatchEvent(new Event('visibilitychange'))
+      state.timeSeconds = 8
+      notify()
+      expect(indicator.outerHTML).toBe(frozen)
+      Object.defineProperty(popup.document, 'hidden', { configurable: true, value: false })
+      popup.document.dispatchEvent(new Event('visibilitychange'))
+      expect(indicator.outerHTML).not.toBe(frozen)
+      expect(currentTime.value).toBe(0)
+      state.playing = true
+      notify()
+      state.timeSeconds = 12
+      runPopupFrames(popup, 1)
+      expect(container.querySelector('.waiting-row')).toBeNull()
+      expect(container.querySelector('.active')?.textContent).toBe('First')
+    } finally {
+      wrapper.unmount()
+    }
+    expect(listeners.size).toBe(0)
+  })
+
+  it.each(['disabled', 'reduced'] as const)(
+    'uses static waiting dots and boundary timers when motion is %s',
+    async (mode) => {
+      let mediaSeconds = 0
+      const popup = createPopupWindow()
+      if (mode === 'reduced') {
+        popup.matchMedia = vi.fn(() => ({ ...window.matchMedia(''), matches: true }))
+      }
+      const { api, wrapper, isPlaying, lyricAnimation } = mountLyricsWindowHarness(
+        popup,
+        () => mediaSeconds,
+      )
+      try {
+        lyricAnimation.value = mode !== 'disabled'
+        isPlaying.value = true
+        await nextTick()
+        await api.toggleLyricsWindow()
+        api.setSnapshot({
+          status: 'ready',
+          activeIndex: -1,
+          lines: [
+            { time: 4, endTime: 5, text: 'First' },
+            { time: 14, endTime: 15, text: 'Last' },
+          ],
+        })
+        runPopupFrames(popup, 1)
+        const dots = () =>
+          [...popup.document.querySelectorAll<HTMLElement>('.waiting-dot')].map(
+            (dot) => dot.style.opacity,
+          )
+        expect(dots()).toEqual(['0.65', '0.65', '0.65'])
+        vi.mocked(popup.requestAnimationFrame).mockClear()
+        mediaSeconds = 1
+        await vi.advanceTimersByTimeAsync(1000)
+        expect(popup.requestAnimationFrame).not.toHaveBeenCalled()
+        expect(dots()).toEqual(['0.65', '0.65', '0.65'])
+        mediaSeconds = 4
+        await vi.advanceTimersByTimeAsync(1000)
+        runPopupFrames(popup, 1)
+        expect(popup.document.querySelector('.waiting-row')).toBeNull()
+        mediaSeconds = 5
+        await vi.advanceTimersByTimeAsync(1000)
+        runPopupFrames(popup, 1)
+        expect(popup.document.querySelector('.waiting-row')?.getAttribute('aria-label')).toBe(
+          '间奏',
+        )
+        expect(dots()).toEqual(['0.65', '0.65', '0.65'])
+        if (mode === 'disabled') {
+          mediaSeconds = 7
+          lyricAnimation.value = true
+          await nextTick()
+          const animatedDots = dots()
+          expect(animatedDots).not.toEqual(['0.65', '0.65', '0.65'])
+          mediaSeconds = 8
+          runPopupFrames(popup, 1)
+          expect(dots()).not.toEqual(animatedDots)
+          lyricAnimation.value = false
+          await nextTick()
+          expect(dots()).toEqual(['0.65', '0.65', '0.65'])
+        }
+      } finally {
+        wrapper.unmount()
+      }
+    },
+  )
+
+  it('shares the lyric group FLIP when waiting enters or exits without changing the scene anchor', async () => {
+    let mediaSeconds = 0.5
+    const { api, popup, wrapper, currentTime } = mountLyricsWindowHarness(
+      createPopupWindow(),
+      () => mediaSeconds,
+    )
+    try {
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        lines: [
+          { time: 0, endTime: 1, text: 'First' },
+          { time: 10, endTime: 11, text: 'Next' },
+          { time: 12, endTime: 13, text: 'Last' },
+        ],
+      })
+      const container = popup.document.querySelector<HTMLElement>('.lyrics-lines')!
+      runPopupFrames(popup, 1)
+      const animate = vi.fn(() => ({ cancel: vi.fn(), onfinish: null }) as unknown as Animation)
+      container.animate = animate
+      for (const node of container.querySelectorAll<HTMLElement>('.line')) {
+        vi.spyOn(node, 'getBoundingClientRect').mockImplementation(() => {
+          const siblings = [...container.children]
+          return new DOMRect(0, siblings.indexOf(node) * 60 - siblings.length * 30, 300, 60)
+        })
+      }
+      mediaSeconds = 1
+      currentTime.value = 1
+      await nextTick()
+      const waiting = container.querySelector<HTMLElement>('.waiting-row')!
+      expect(waiting.style.visibility).toBe('hidden')
+      expect(waiting.nextElementSibling?.classList.contains('focused')).toBe(true)
+      expect(animate).not.toHaveBeenCalled()
+      runPopupFrames(popup, 1)
+      expect(waiting.style.visibility).toBe('visible')
+      expect(animate).toHaveBeenCalledTimes(1)
+      expect(animate).toHaveBeenLastCalledWith(
+        [{ transform: 'translateY(-30px)' }, { transform: 'translateY(0)' }],
+        { duration: 420, easing: 'cubic-bezier(.16,1,.3,1)' },
+      )
+      mediaSeconds = 2
+      currentTime.value = 2
+      await nextTick()
+      runPopupFrames(popup, 1)
+      expect(container.querySelector('.waiting-row')).toBe(waiting)
+      expect(animate).toHaveBeenCalledTimes(1)
+      mediaSeconds = 0.5
+      currentTime.value = 0.5
+      await nextTick()
+      expect(waiting.parentNode).toBeNull()
+      runPopupFrames(popup, 1)
+      expect(animate).toHaveBeenCalledTimes(2)
+      expect(container.querySelector('.active')?.textContent).toBe('First')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('keeps the waiting row and upcoming lyric together when the popup is too short for context', async () => {
+    const { api, popup, wrapper } = mountLyricsWindowHarness(createPopupWindow(), () => 5)
+    try {
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        lines: [
+          { time: 0, endTime: 1, text: 'Previous' },
+          { time: 10, endTime: 11, text: 'Next' },
+          { time: 12, endTime: 13, text: 'Later' },
+        ],
+      })
+      const viewport = popup.document.querySelector<HTMLElement>('.lyrics')!
+      const container = popup.document.querySelector<HTMLElement>('.lyrics-lines')!
+      Object.defineProperty(viewport, 'clientHeight', { value: 70 })
+      for (const node of container.children) {
+        Object.defineProperty(node, 'offsetHeight', {
+          value: node.classList.contains('waiting-row') ? 20 : 50,
+        })
+      }
+      Object.defineProperty(container, 'offsetHeight', {
+        get: () =>
+          [...container.children].reduce(
+            (height, node) =>
+              height + ((node as HTMLElement).hidden ? 0 : (node as HTMLElement).offsetHeight),
+            0,
+          ),
+      })
+      runPopupFrames(popup, 1)
+      const visible = [...container.children].filter((node) => !(node as HTMLElement).hidden)
+      expect(visible).toHaveLength(2)
+      expect(visible[0]?.classList.contains('waiting-row')).toBe(true)
+      expect((visible[0] as HTMLElement).style.visibility).toBe('visible')
+      expect(visible[1]?.textContent).toBe('Next')
     } finally {
       wrapper.unmount()
     }

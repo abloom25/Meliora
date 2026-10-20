@@ -43,9 +43,26 @@ export { looksLikeWordTimedLyrics, parseWordTimedLyrics } from './yrc'
 export { createLyricClock, type LyricClock, type LyricClockOptions } from './clock'
 
 export {
+  createLyricWaitingTimeline,
+  type LyricWaitingInterval,
+  type LyricWaitingState,
+  type LyricWaitingTimeline,
+} from './interlude'
+
+export { resolveLyricWaitingMotion, type LyricWaitingMotion } from './waiting-motion'
+
+export {
+  lyricCharacterEmphasis,
+  lyricWordCharacters,
+  lyricWordMotionEnd,
+  lyricWordRise,
+} from './word-motion'
+
+export {
   createLyricTimeline,
   harmonyParentsOf,
   isLyricHarmonyOpen,
+  isLyricLineCompleted,
   layoutLyricLines,
   lyricFocusOffset,
   lyricTempoScale,

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   createLyricTimeline,
   harmonyParentsOf,
+  isLyricLineCompleted,
   layoutLyricLines,
   lyricFocusOffset,
   lyricTempoScale,
@@ -20,10 +21,11 @@ const duetLines: LyricLine[] = [
 ]
 
 describe('resolveLyricScene', () => {
-  it('lights both voices of a duet and anchors on the last primary line', () => {
+  it('lights both voices of a duet and anchors on the earliest highlighted primary group', () => {
     const scene = resolveLyricScene(duetLines, 1)
     expect(scene.active).toEqual([0, 1])
-    expect(scene.anchor).toBe(1)
+    expect(scene.highlighted).toEqual([0, 1])
+    expect(scene.anchor).toBe(0)
     expect(scene.held).toBe(false)
   })
 
@@ -38,13 +40,14 @@ describe('resolveLyricScene', () => {
   it('lights the harmony on its own timeline while keeping the parent as anchor', () => {
     const scene = resolveLyricScene(duetLines, 3.5)
     expect(scene.active).toEqual([0, 1, 2])
-    expect(scene.anchor).toBe(1)
+    expect(scene.anchor).toBe(0)
   })
 
-  it('keeps the last primary line lit through an instrumental gap and closes its harmony', () => {
+  it('keeps the preceding duet lit through a short gap and closes its harmony', () => {
     const scene = resolveLyricScene(duetLines, 7)
     expect(scene.held).toBe(true)
-    expect(scene.anchor).toBe(1)
+    expect(scene.highlighted).toEqual([0, 1])
+    expect(scene.anchor).toBe(0)
     expect(scene.harmonyOpen[2]).toBe(false)
   })
 
@@ -53,7 +56,8 @@ describe('resolveLyricScene', () => {
     const scene = resolveLyricScene(duetLines, 11)
     expect(scene.active).toEqual([4])
     expect(scene.harmonyOpen[4]).toBe(true)
-    expect(scene.anchor).toBe(4)
+    expect(scene.highlighted).toEqual([3, 4])
+    expect(scene.anchor).toBe(3)
   })
 
   it('shows an orphan harmony line permanently instead of never', () => {
@@ -102,6 +106,172 @@ describe('resolveLyricScene', () => {
   })
 })
 
+describe('isLyricLineCompleted', () => {
+  it('marks the held focus complete at its exact end, through gaps and the final outro', () => {
+    const lines: LyricLine[] = [
+      { time: 1, endTime: 3, text: 'First' },
+      { time: 5, endTime: 7, text: 'Last' },
+    ]
+    const timeline = createLyricTimeline(lines)
+    const completed = (time: number) =>
+      lines.map((line, index) => isLyricLineCompleted(line, index, time, timeline.read(time)))
+    expect(completed(0)).toEqual([false, false])
+    expect(completed(2.999)).toEqual([false, false])
+    expect(completed(3)).toEqual([true, false])
+    expect(timeline.read(3)).toMatchObject({ anchor: 0, held: true })
+    expect(completed(6.999)).toEqual([true, false])
+    expect(completed(7)).toEqual([true, true])
+    expect(completed(20)).toEqual([true, true])
+    expect(completed(2)).toEqual([false, false])
+  })
+
+  it('uses independent end times for unordered duet and harmony rows instead of anchor order', () => {
+    const lines: LyricLine[] = [
+      { time: 8, endTime: 9, text: 'Future' },
+      { time: 0, endTime: 6, text: 'Long lead' },
+      { time: 0, endTime: 2, text: 'Short duet', agent: 'secondary' },
+      { time: 1, endTime: 3, text: 'Harmony', background: true },
+    ]
+    const timeline = createLyricTimeline(lines)
+    const completed = (time: number) =>
+      lines.map((line, index) => isLyricLineCompleted(line, index, time, timeline.read(time)))
+    expect(completed(1.5)).toEqual([false, false, false, false])
+    expect(completed(2)).toEqual([false, false, true, false])
+    expect(completed(3)).toEqual([false, false, true, true])
+    expect(completed(1.5)).toEqual([false, false, false, false])
+  })
+
+  it('lets untimed ends yield together at the next primary start without inventing a final end', () => {
+    const lines: LyricLine[] = [
+      { time: 0, text: 'Lead' },
+      { time: 0, text: 'Duet', agent: 'secondary' },
+      { time: 3, text: 'Last' },
+    ]
+    const timeline = createLyricTimeline(lines)
+    const completed = (time: number) =>
+      lines.map((line, index) => isLyricLineCompleted(line, index, time, timeline.read(time)))
+    expect(completed(2)).toEqual([false, false, false])
+    expect(completed(3)).toEqual([true, true, false])
+    expect(completed(100)).toEqual([true, true, false])
+    expect(completed(1)).toEqual([false, false, false])
+    expect(isLyricLineCompleted(lines[0]!, 0, 1, { active: [0], held: true })).toBe(true)
+  })
+
+  it('keeps plain text and invalid clocks or timestamps out of the completed state', () => {
+    const scene = { active: [], held: true }
+    for (const time of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(isLyricLineCompleted({ time: 0, endTime: 1, text: 'Line' }, 0, time, scene)).toBe(
+        false,
+      )
+      expect(isLyricLineCompleted({ time, text: 'Invalid start' }, 0, 10, scene)).toBe(false)
+      expect(
+        isLyricLineCompleted({ time: 0, endTime: time, text: 'Invalid end' }, 0, 10, scene),
+      ).toBe(false)
+    }
+    expect(isLyricLineCompleted({ time: null, text: 'Plain text' }, 0, 10, scene)).toBe(false)
+    expect(isLyricLineCompleted({ time: 5, endTime: 3, text: 'Inverted' }, 0, 4, scene)).toBe(false)
+  })
+})
+
+describe('lyric highlight lifecycle', () => {
+  it('keeps a finished phrase highlighted through a short gap without calling it singing', () => {
+    const lines: LyricLine[] = [
+      { time: 0, endTime: 1, text: 'First' },
+      { time: 3, endTime: 4, text: 'Second' },
+    ]
+    const timeline = createLyricTimeline(lines)
+    expect(timeline.read(1)).toMatchObject({
+      active: [0],
+      highlighted: [0],
+      held: true,
+      anchor: 0,
+    })
+    expect(isLyricLineCompleted(lines[0]!, 0, 1, timeline.read(1))).toBe(true)
+    expect(timeline.read(3).highlighted).toEqual([1])
+    expect(timeline.read(4)).toMatchObject({ highlighted: [], anchor: 1, held: true })
+    expect(timeline.read(100).highlighted).toEqual([])
+    expect(timeline.read(1.5).highlighted).toEqual([0])
+  })
+
+  it('clears highlighting at the beginning of a gap of seven seconds, not seven seconds into it', () => {
+    for (const gap of [6.999, 7, 12]) {
+      const lines: LyricLine[] = [
+        { time: 0, endTime: 1, text: 'First' },
+        { time: 1 + gap, endTime: 3 + gap, text: 'Next' },
+      ]
+      const timeline = createLyricTimeline(lines)
+      expect(timeline.read(0.999).highlighted).toEqual([0])
+      expect(timeline.read(1).highlighted).toEqual(gap < 7 ? [0] : [])
+      expect(timeline.read(1 + gap).highlighted).toEqual([1])
+      expect(timeline.read(3 + gap).highlighted).toEqual([])
+    }
+  })
+
+  it('retains overlapping voices until a new phrase takes over and never scrolls past a singing lead', () => {
+    const lines: LyricLine[] = [
+      { time: 0, endTime: 5, text: 'Long lead' },
+      { time: 1, endTime: 2, text: 'Short response', agent: 'secondary' },
+      { time: 4, endTime: 6, text: 'Next response', agent: 'secondary' },
+      { time: 8, endTime: 9, text: 'Next phrase' },
+    ]
+    const timeline = createLyricTimeline(lines)
+    expect(timeline.read(3)).toMatchObject({ active: [0], highlighted: [0, 1], anchor: 0 })
+    expect(timeline.read(4)).toMatchObject({ active: [0, 2], highlighted: [0, 2], anchor: 0 })
+    expect(timeline.read(5)).toMatchObject({ active: [2], highlighted: [0, 2], anchor: 0 })
+    expect(timeline.read(7)).toMatchObject({ highlighted: [0, 2], held: true, anchor: 0 })
+    expect(timeline.read(8)).toMatchObject({ highlighted: [3], anchor: 3 })
+  })
+
+  it('uses a harmony group end for silence detection and keeps its primary as the anchor', () => {
+    const lines: LyricLine[] = [
+      { time: 0, endTime: 2, text: 'Lead' },
+      { time: 1, endTime: 8, text: 'Long harmony', background: true },
+      { time: 10, endTime: 11, text: 'Next' },
+    ]
+    const timeline = createLyricTimeline(lines)
+    expect(timeline.read(7)).toMatchObject({ active: [1], highlighted: [0, 1], anchor: 0 })
+    expect(timeline.read(8)).toMatchObject({
+      active: [0],
+      highlighted: [0],
+      held: true,
+      anchor: 0,
+      openHarmonies: [],
+    })
+    expect(timeline.read(10).highlighted).toEqual([2])
+  })
+
+  it('derives identical highlights for direct seeks and forward or backward playback', () => {
+    const lines: LyricLine[] = [
+      { time: 0, endTime: 10, text: 'Lead' },
+      { time: 2, endTime: 3, text: 'Response', agent: 'secondary' },
+      { time: 4, endTime: 5, text: 'Harmony', background: true },
+      { time: 18, endTime: 19, text: 'After long silence' },
+    ]
+    const timeline = createLyricTimeline(lines)
+    const expected: Array<[number, number[], number]> = [
+      [0, [0], 0],
+      [2, [0, 1], 0],
+      [4, [0, 1, 2], 0],
+      [5, [0, 1], 0],
+      [9, [0, 1], 0],
+      [10, [], 1],
+      [17, [], 1],
+      [18, [3], 3],
+      [19, [], 3],
+    ]
+    for (const [time, highlighted, anchor] of [...expected, ...[...expected].reverse()]) {
+      const direct = createLyricTimeline(lines).read(time)
+      expect(direct).toMatchObject({ highlighted, anchor })
+      expect(timeline.read(time)).toEqual(direct)
+    }
+  })
+
+  it('includes visual highlights when comparing scenes even with the same singing set and anchor', () => {
+    const base = resolveLyricScene([{ time: 0, endTime: 1, text: 'Phrase' }], 1)
+    expect(sameLyricScene(base, { ...base, highlighted: [0] })).toBe(false)
+  })
+})
+
 describe('createLyricTimeline', () => {
   it('advances long lyrics without rereading timings and keeps sparse snapshots independent', () => {
     let reads = 0
@@ -143,9 +313,19 @@ describe('createLyricTimeline', () => {
     expect(timeline.read(0).active).toEqual([0, 1])
     expect(timeline.read(3).active).toEqual([0, 1, 2])
     expect(timeline.read(5).active).toEqual([0, 1])
-    expect(timeline.read(6)).toMatchObject({ active: [1], held: true, anchor: 1 })
+    expect(timeline.read(6)).toMatchObject({
+      active: [1],
+      highlighted: [0, 1],
+      held: true,
+      anchor: 0,
+    })
     expect(timeline.read(8)).toMatchObject({ active: [3], held: false, anchor: 3 })
-    expect(timeline.read(10)).toMatchObject({ active: [4], held: false, anchor: 4 })
+    expect(timeline.read(10)).toMatchObject({
+      active: [4],
+      highlighted: [3, 4],
+      held: false,
+      anchor: 3,
+    })
     expect(timeline.read(12)).toMatchObject({ active: [3], held: true, anchor: 3 })
   })
 

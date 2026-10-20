@@ -18,9 +18,6 @@ export interface SpringConfig {
   mass?: number
 }
 
-// 单步积分的最大时长。dt 超过该值时拆成多个子步,
-// 避免低帧率(切后台恢复、长任务)下显式积分发散成剧烈震荡
-const MAX_SUB_STEP_SECONDS = 1 / 120
 // dt 超过该值视为"这一帧根本没渲染",直接吸附到目标而不是积分整段时长
 const MAX_INTEGRATION_SECONDS = 0.25
 
@@ -46,17 +43,40 @@ export function stepSpring(
   }
 
   const mass = config.mass ?? 1
-  const stiffness = config.stiffness
-  const damping = config.damping
-  let remaining = dt
+  const frequencySquared = config.stiffness / mass
+  const decayRate = config.damping / (2 * mass)
+  const displacement = state.value - target
+  const velocity = state.velocity
+  const discriminant = decayRate * decayRate - frequencySquared
 
-  // 半隐式欧拉:先更新速度再用新速度更新位置,比显式欧拉稳定得多
-  while (remaining > 0) {
-    const step = Math.min(remaining, MAX_SUB_STEP_SECONDS)
-    remaining -= step
-    const acceleration = (-stiffness * (state.value - target) - damping * state.velocity) / mass
-    state.velocity += acceleration * step
-    state.value += state.velocity * step
+  // 在这一帧内目标与参数不变，直接求阻尼振子的闭式解。
+  // Euler 子步会在不同刷新率下产生不同的额外阻尼，且第一步位移偏大；
+  // 闭式解只依赖真实经过的时间，掉帧或 60/120Hz 切换时仍沿同一条轨迹。
+  if (Math.abs(discriminant) <= frequencySquared * 1e-8) {
+    const decay = Math.exp(-decayRate * dt)
+    const coefficient = velocity + decayRate * displacement
+    state.value = target + decay * (displacement + coefficient * dt)
+    state.velocity = decay * (velocity - decayRate * coefficient * dt)
+  } else if (discriminant < 0) {
+    const frequency = Math.sqrt(-discriminant)
+    const decay = Math.exp(-decayRate * dt)
+    const sine = Math.sin(frequency * dt) / frequency
+    const cosine = Math.cos(frequency * dt)
+    state.value =
+      target + decay * (displacement * cosine + (velocity + decayRate * displacement) * sine)
+    state.velocity =
+      decay * (velocity * cosine - (decayRate * velocity + frequencySquared * displacement) * sine)
+  } else {
+    const root = Math.sqrt(discriminant)
+    // 用乘积关系求慢根，避免高阻尼下两个近似相等的数相减丢失精度。
+    const fastRate = -decayRate - root
+    const slowRate = frequencySquared / fastRate
+    const slow = (velocity - fastRate * displacement) / (slowRate - fastRate)
+    const fast = displacement - slow
+    const slowDecay = slow * Math.exp(slowRate * dt)
+    const fastDecay = fast * Math.exp(fastRate * dt)
+    state.value = target + slowDecay + fastDecay
+    state.velocity = slowRate * slowDecay + fastRate * fastDecay
   }
 
   return state

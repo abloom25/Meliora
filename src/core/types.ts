@@ -62,7 +62,7 @@ export interface LyricsSnapshot {
   lines: LyricLine[]
   /** 当前显示歌词的主来源;翻译/音译补充不会改变此值。 */
   source?: LyricProviderSource
-  /** 锚点行:活跃集合里最靠后的主行,决定居中与前后分段 */
+  /** 锚点行:最前面的高亮主句组,无高亮时保留最近主句位置 */
   activeIndex: number
   /** 当前正在唱的所有行。对唱双声部与背景和声可以同时在唱,缺省视为只有锚点行 */
   activeIndices?: number[]

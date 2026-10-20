@@ -8,8 +8,14 @@ import { isApplePlatform, supportsDocumentPictureInPicture } from './browser'
 import {
   createLyricClock,
   createLyricTimeline,
+  createLyricWaitingTimeline,
+  isLyricLineCompleted,
   lyricTempoScale,
+  lyricWordRise,
+  resolveLyricWaitingMotion,
   wordFillProgress,
+  type LyricScene,
+  type LyricWaitingInterval,
 } from '../../core/lyrics'
 import { listenMediaQuery } from './media-query'
 import { scheduleLyricRender, type LyricPlaybackState } from '../../core/lyrics/render-schedule'
@@ -40,8 +46,12 @@ interface CachedNodes {
   lyricsViewport: HTMLElement
   lyricsContainer: HTMLElement
   state: HTMLElement
+  waitingRow: HTMLDivElement
+  waitingIndicator: HTMLSpanElement
+  waitingDots: HTMLSpanElement[]
   lineNodes: HTMLDivElement[]
   mainNodes: HTMLSpanElement[]
+  romanNodes: (HTMLSpanElement | null)[]
   translationNodes: (HTMLSpanElement | null)[]
   /** 每个槽位的音节节点,逐字扫光每帧只写这里 */
   wordNodes: HTMLElement[][]
@@ -70,23 +80,31 @@ const popupStyles = `
   .lyrics-lines:empty { display: none; }
   .lyrics.scrolling { overflow: hidden; }
   .line { --lyric-fill: rgba(255,255,255,.27); --lyric-idle: rgba(255,255,255,.27); flex: none; min-width: 0; overflow-wrap: anywhere; color: var(--lyric-fill); font-size: var(--lyric-size); font-weight: 690; line-height: 1.22; letter-spacing: -.035em; transition: opacity calc(.45s * var(--lyric-tempo,1)) ease,color calc(.45s * var(--lyric-tempo,1)) ease,text-shadow calc(.45s * var(--lyric-tempo,1)) ease; }
+  .line.before { --lyric-fill: rgba(255,255,255,.42); --lyric-idle: rgba(255,255,255,.42); }
   .line.active { --lyric-fill: #fff; --lyric-idle: rgba(255,255,255,.32); text-shadow: 0 0 20px rgba(255,255,255,.18); }
   .main { display: block; }
   .line.secondary { text-align: right; }
   .line.harmony { font-size: .84em; opacity: .82; }
+  /* 等待行置于同一个 flex/FLIP 容器，圆点与下一句始终共享整组位移。 */
+  .waiting-row { display: flex; flex: none; min-height: 1em; align-items: center; padding-block: .15em; visibility: hidden; }
+  .waiting-row.secondary { justify-content: flex-end; }
+  .lyrics-waiting-indicator { display: inline-flex; height: .5em; gap: .18em; align-items: center; line-height: 1; transform-origin: left center; opacity: 0; }
+  .waiting-row.secondary .lyrics-waiting-indicator { transform-origin: right center; }
+  .waiting-dot { flex: none; width: .3em; height: .3em; border-radius: 50%; background: currentColor; opacity: 0; }
   .apple-font .line { font-family: -apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC",sans-serif; font-weight: 700; font-synthesis: weight; }
   /* 逐字扫光。弹窗文档里没有 @property 注册,var() 必须带兜底值,
      否则未写入的音节会让整条 background-image 失效、文字变透明 */
   /* padding 撑开背景绘制盒、负 margin 抵消排版影响:否则 background-clip: text 会把 g/y/p 的降部切掉;
      横向同理——letter-spacing: -.035em 让盒宽比末字字形窄,不留余量字会被左右削掉一道 */
-  .word { display: inline-block; max-width: 100%; padding: .08em .12em .16em; margin: -.08em -.12em -.16em; color: var(--lyric-fill); translate: 0 calc(var(--w,1) * -.05em); }
+  .word { display: inline-block; max-width: 100%; padding: .08em .12em .16em; margin: -.08em -.12em -.16em; color: var(--lyric-fill); translate: 0 calc(var(--lyric-word-rise,0) * -.05em); }
   @supports (background-clip: text) or (-webkit-background-clip: text) {
     /* --e 是前沿柔化宽度的缩放,进度为 0 或 1 时收到 0;
        否则未唱词的左边缘会被画出一段亮色渐变 */
     .word { color: transparent; -webkit-background-clip: text; background-clip: text; background-image: linear-gradient(90deg, var(--lyric-fill) 0%, var(--lyric-fill) calc(var(--w,1) * 100%), var(--lyric-idle) calc(var(--w,1) * 100% + .5em * var(--e,0)), var(--lyric-idle) 100%); }
   }
   .gap { white-space: pre-wrap; }
-  .translation { display: block; margin-top: .25em; font-size: max(12px,.68em); line-height: 1.4; letter-spacing: 0; opacity: .72; }
+  .roman,.translation { display: block; margin-top: .25em; font-size: max(12px,.68em); line-height: 1.4; letter-spacing: 0; opacity: .72; }
+  .roman { opacity: .58; }
   .state { margin: auto 0; padding-block: .25em; overflow-wrap: anywhere; color: rgba(255,255,255,.5); font-size: clamp(14px,4vw,18px); font-weight: 620; }
   @media (max-width: 300px) {
     main { padding-inline: max(env(safe-area-inset-left),12px) max(env(safe-area-inset-right),12px); }
@@ -113,8 +131,9 @@ const popupStyles = `
   }
   @media (prefers-contrast: more) {
     .line { --lyric-fill: rgba(255,255,255,.65); --lyric-idle: rgba(255,255,255,.65); }
+    .line.before { --lyric-fill: rgba(255,255,255,.8); --lyric-idle: rgba(255,255,255,.8); }
     .line.active { --lyric-fill: #fff; --lyric-idle: rgba(255,255,255,.65); }
-    .translation,.line.harmony { opacity: 1; }
+    .roman,.translation,.line.harmony { opacity: 1; }
   }
 `
 
@@ -170,7 +189,14 @@ export function useLyricsWindow({
   const clock = createLyricClock()
   let timelineLines: readonly LyricLine[] = []
   let timeline = createLyricTimeline(timelineLines)
+  let waitingTimeline = createLyricWaitingTimeline(timelineLines)
   let timelineHasTiming = false
+  let observedScene: LyricScene | null = null
+  let observedWaiting: LyricWaitingInterval | null = null
+  let renderedWaiting: LyricWaitingInterval | null = null
+  let waitingLastOpacity = ''
+  let waitingLastScale = ''
+  const waitingLastDots = ['', '', '']
 
   function readPlaybackTime(): number {
     const mediaTime = getLyricsPlaybackState?.().timeSeconds ?? getPlaybackSeconds?.()
@@ -194,13 +220,20 @@ export function useLyricsWindow({
     const current = snapshot.value
     if (current.status !== 'ready' || !timelineHasTiming) return
     const next = timeline.read(time)
+    const waiting = waitingTimeline.read(time)?.interval ?? null
     const active = current.activeIndices ?? (current.activeIndex >= 0 ? [current.activeIndex] : [])
     if (
+      next === observedScene &&
+      waiting === observedWaiting &&
       next.anchor === current.activeIndex &&
       next.active.length === active.length &&
       next.active.every((index, position) => index === active[position])
     )
       return
+    // 同一时间区间复用场景引用;只有跨边界时更新完成态,不逐帧重建小窗。
+    // 高亮的延续/退出不一定改变 anchor/active，仍按场景区间引用重绘。
+    observedScene = next
+    observedWaiting = waiting
     snapshot.value = {
       ...current,
       activeIndex: next.anchor,
@@ -217,6 +250,7 @@ export function useLyricsWindow({
   let karaokeWords: LyricWord[] = []
   let karaokeLastFill: string[] = []
   let karaokeLastEdge: string[] = []
+  let karaokeLastRise: string[] = []
   const debugSnapshot = shallowRef<LyricsWindowDebugSnapshot | null>(null)
   let debugTimer = 0
   let debugSampledAt = Number.NEGATIVE_INFINITY
@@ -299,7 +333,10 @@ export function useLyricsWindow({
     if (timelineLines !== value.lines) {
       timelineLines = value.lines
       timeline = createLyricTimeline(timelineLines)
+      waitingTimeline = createLyricWaitingTimeline(timelineLines)
       timelineHasTiming = timelineLines.some((line) => line.time !== null)
+      observedScene = null
+      observedWaiting = null
     }
     snapshot.value = value
     if (
@@ -318,6 +355,10 @@ export function useLyricsWindow({
     renderedTrackId = undefined
     renderedActiveIndex = -1
     lyricsRenderKey = ''
+    renderedWaiting = null
+    waitingLastOpacity = ''
+    waitingLastScale = ''
+    waitingLastDots.fill('')
     reducedMotion = null
     cachedNodes = null
   }
@@ -447,6 +488,18 @@ export function useLyricsWindow({
     const state = target.document.querySelector<HTMLElement>('.state')
 
     if (cover && title && artist && background && lyricsViewport && lyricsContainer && state) {
+      const waitingRow = target.document.createElement('div')
+      waitingRow.className = 'waiting-row'
+      const waitingIndicator = target.document.createElement('span')
+      waitingIndicator.className = 'lyrics-waiting-indicator'
+      waitingIndicator.setAttribute('aria-hidden', 'true')
+      const waitingDots = Array.from({ length: 3 }, () => {
+        const dot = target.document.createElement('span')
+        dot.className = 'waiting-dot'
+        waitingIndicator.append(dot)
+        return dot
+      })
+      waitingRow.append(waitingIndicator)
       cachedNodes = {
         cover,
         title,
@@ -455,8 +508,12 @@ export function useLyricsWindow({
         lyricsViewport,
         lyricsContainer,
         state,
+        waitingRow,
+        waitingIndicator,
+        waitingDots,
         lineNodes: [],
         mainNodes: [],
+        romanNodes: [],
         translationNodes: [],
         wordNodes: [],
         signatures: [],
@@ -510,7 +567,10 @@ export function useLyricsWindow({
     // 整组共享一个位移,行间距始终由 flex 布局保证。逐行 FLIP 在长短句混排、
     // 上下文收起/恢复时起点不同,新行还可能穿过正在移动的旧行。
     const retained = visibleNodes.filter((node) => positions.has(node.dataset.index!))
-    const anchor = retained.find((node) => node.classList.contains('active')) ?? retained[0]
+    const anchor =
+      retained.find((node) => node.classList.contains('active')) ??
+      retained.find((node) => node.classList.contains('focused')) ??
+      retained[0]
     const offset = anchor
       ? positions.get(anchor.dataset.index!)! - anchor.getBoundingClientRect().top
       : Math.min(48, lyricsViewport.clientHeight * 0.25) * scrollDirection
@@ -544,7 +604,9 @@ export function useLyricsWindow({
 
     const availableHeight = lyricsViewport.clientHeight
     if (!availableHeight || !nodes.length) return
-    const activeNodes = nodes.filter((node) => node.classList.contains('active'))
+    const activeNodes = nodes.filter(
+      (node) => node.classList.contains('active') || node.classList.contains('focused'),
+    )
     // 纯文本/前奏至少留第一句;对唱和和声属于同一个活跃组,不能为塞入上下文而隐藏。
     const anchors = activeNodes.length ? activeNodes : nodes.slice(0, 1)
     const distance = (node: HTMLElement): number =>
@@ -583,6 +645,10 @@ export function useLyricsWindow({
       previousPositions = null
       fitLyrics()
       if (positions) animateScroll(positions)
+      // 先完成排版和共享 FLIP 的首帧，再露出新等待行；避免圆点抢先出现在终点。
+      if (cachedNodes && cachedNodes.waitingRow.parentNode === cachedNodes.lyricsContainer) {
+        cachedNodes.waitingRow.style.visibility = 'visible'
+      }
       scheduleDebug()
     })
   }
@@ -594,6 +660,7 @@ export function useLyricsWindow({
     stopScrollAnimations()
     bindKaraoke()
     writeKaraoke(readPlaybackTime())
+    writeWaiting(readPlaybackTime())
     stopKaraoke()
     startKaraoke()
     scheduleLayout()
@@ -611,6 +678,8 @@ export function useLyricsWindow({
         previousPositions = null
       } else {
         handlePlaybackChange()
+        // 隐藏期间只接收快照而没有更新 DOM；暂停或活跃行未变时 advanceScene 不会触发 render。
+        render()
         scheduleLayout()
       }
     }
@@ -642,6 +711,7 @@ export function useLyricsWindow({
     const entries = nodes.lineNodes.map((node, slot) => ({
       node,
       main: nodes.mainNodes[slot]!,
+      roman: nodes.romanNodes[slot] ?? null,
       translation: nodes.translationNodes[slot] ?? null,
       words: nodes.wordNodes[slot]!,
       signature: nodes.signatures[slot]!,
@@ -666,6 +736,7 @@ export function useLyricsWindow({
         ordered.push({
           node,
           main: nodes.mainNodes[slot]!,
+          roman: null,
           translation: null,
           words: [],
           signature: '',
@@ -675,6 +746,7 @@ export function useLyricsWindow({
     for (const { node } of spare) node.remove()
     nodes.lineNodes = ordered.map((entry) => entry.node)
     nodes.mainNodes = ordered.map((entry) => entry.main)
+    nodes.romanNodes = ordered.map((entry) => entry.roman)
     nodes.translationNodes = ordered.map((entry) => entry.translation)
     nodes.wordNodes = ordered.map((entry) => entry.words)
     nodes.signatures = ordered.map((entry) => entry.signature)
@@ -690,6 +762,7 @@ export function useLyricsWindow({
       node.append(main)
       nodes.lineNodes[index] = node
       nodes.mainNodes[index] = main
+      nodes.romanNodes[index] = null
       nodes.translationNodes[index] = null
       nodes.wordNodes[index] = []
       nodes.signatures[index] = ''
@@ -703,6 +776,7 @@ export function useLyricsWindow({
     return JSON.stringify([
       line.words?.map((word) => [word.text, Boolean(word.trailingSpace)]),
       line.text,
+      line.roman ?? '',
       line.translation ?? '',
     ])
   }
@@ -737,6 +811,22 @@ export function useLyricsWindow({
     }
     nodes.wordNodes[slot] = spans
 
+    let romanNode = nodes.romanNodes[slot]
+    if (line.roman) {
+      if (!romanNode) {
+        romanNode = doc.createElement('span')
+        romanNode.className = 'roman'
+        nodes.romanNodes[slot] = romanNode
+      }
+      if (romanNode.textContent !== line.roman) romanNode.textContent = line.roman
+      if (romanNode.parentNode !== node) {
+        const translation = nodes.translationNodes[slot]
+        node.insertBefore(romanNode, translation?.parentNode === node ? translation : null)
+      }
+    } else if (romanNode?.parentNode) {
+      romanNode.remove()
+    }
+
     let translationNode = nodes.translationNodes[slot]
     if (line.translation) {
       if (!translationNode) {
@@ -757,11 +847,13 @@ export function useLyricsWindow({
     for (const span of karaokeSpans) {
       span.style.removeProperty('--w')
       span.style.removeProperty('--e')
+      span.style.removeProperty('--lyric-word-rise')
     }
     karaokeSpans = []
     karaokeWords = []
     karaokeLastFill = []
     karaokeLastEdge = []
+    karaokeLastRise = []
   }
 
   function bindKaraoke() {
@@ -785,9 +877,15 @@ export function useLyricsWindow({
     karaokeWords = words
     karaokeLastFill = words.map(() => '')
     karaokeLastEdge = words.map(() => '')
+    karaokeLastRise = words.map(() => '')
   }
 
   function writeKaraoke(time: number) {
+    if (!lyricAnimation.value || reducedMotion?.matches) {
+      releaseKaraoke()
+      return
+    }
+    if (!Number.isFinite(time)) return
     for (let index = 0; index < karaokeSpans.length; index += 1) {
       const span = karaokeSpans[index]!
       const word = karaokeWords[index]!
@@ -802,13 +900,48 @@ export function useLyricsWindow({
         karaokeLastEdge[index] = edge
         span.style.setProperty('--e', edge)
       }
+      const rise = lyricWordRise(time, word).toFixed(3)
+      if (rise !== karaokeLastRise[index]) {
+        karaokeLastRise[index] = rise
+        span.style.setProperty('--lyric-word-rise', rise)
+      }
     }
   }
 
-  function shouldRunKaraoke(): boolean {
-    return Boolean(
-      lyricsWindow && isPlaying.value && snapshot.value.status === 'ready' && timelineHasTiming,
+  function writeWaiting(time: number) {
+    if (
+      !cachedNodes ||
+      !renderedWaiting ||
+      !cachedNodes.waitingIndicator.isConnected ||
+      cachedNodes.waitingRow.parentNode !== cachedNodes.lyricsContainer
     )
+      return
+    const playback = readPlaybackState()
+    // 起点暂停时给出静态待机标记；其它暂停位置保留媒体时间对应的动画帧。
+    const animated =
+      canAnimateScroll() &&
+      !((!playback.playing || playback.seeking) && time <= renderedWaiting.start)
+    const motion = resolveLyricWaitingMotion(time, renderedWaiting, animated)
+    const opacity = motion.opacity.toFixed(3)
+    if (opacity !== waitingLastOpacity) {
+      cachedNodes.waitingIndicator.style.opacity = opacity
+      waitingLastOpacity = opacity
+    }
+    const scale = motion.scale.toFixed(4)
+    if (scale !== waitingLastScale) {
+      cachedNodes.waitingIndicator.style.transform = `scale(${scale})`
+      waitingLastScale = scale
+    }
+    motion.dotOpacities.forEach((value, index) => {
+      const dotOpacity = value.toFixed(3)
+      if (dotOpacity === waitingLastDots[index]) return
+      cachedNodes!.waitingDots[index]!.style.opacity = dotOpacity
+      waitingLastDots[index] = dotOpacity
+    })
+  }
+
+  function shouldRunKaraoke(): boolean {
+    return Boolean(lyricsWindow && snapshot.value.status === 'ready' && timelineHasTiming)
   }
 
   function karaokeTick() {
@@ -819,6 +952,7 @@ export function useLyricsWindow({
     const time = readPlaybackTime()
     advanceScene(time)
     writeKaraoke(time)
+    writeWaiting(time)
     startKaraoke()
     scheduleDebug()
   }
@@ -828,9 +962,18 @@ export function useLyricsWindow({
     if (karaokeFrame || karaokeTimer || !target || target.document.hidden || !shouldRunKaraoke())
       return
     const playback = readPlaybackState()
+    // 等待动画复用现有帧循环；暂停、隐藏或关闭动画后仍仅在媒体边界唤醒。
+    if (playback.playing && !playback.seeking && renderedWaiting && canAnimateScroll()) {
+      karaokeFrame = target.requestAnimationFrame(karaokeTick)
+      return
+    }
+    const nextBoundary = Math.min(
+      timeline.nextBoundary(playback.timeSeconds) ?? Number.POSITIVE_INFINITY,
+      waitingTimeline.nextBoundary(playback.timeSeconds) ?? Number.POSITIVE_INFINITY,
+    )
     const plan = scheduleLyricRender(
       playback,
-      timeline.nextBoundary(playback.timeSeconds),
+      Number.isFinite(nextBoundary) ? nextBoundary : null,
       karaokeWords,
       lyricAnimation.value && !reducedMotion?.matches,
     )
@@ -855,6 +998,7 @@ export function useLyricsWindow({
     const time = readPlaybackTime()
     advanceScene(time)
     writeKaraoke(time)
+    writeWaiting(time)
     startKaraoke()
   }
 
@@ -902,6 +1046,8 @@ export function useLyricsWindow({
       stopKaraoke()
       releaseKaraoke()
       activeSlots = []
+      renderedWaiting = null
+      cachedNodes.waitingRow.remove()
       for (let i = 0; i < lineNodes.length; i += 1) {
         const node = lineNodes[i]
         if (node && node.parentNode) node.remove()
@@ -933,40 +1079,64 @@ export function useLyricsWindow({
       : hasActiveLine
         ? [active]
         : []
-    const activeSet = new Set(activeIndices)
+    const time = readPlaybackTime()
+    const waiting = waitingTimeline.read(time)?.interval ?? null
+    const focus = waiting?.nextAnchor ?? active
+    const hasFocus = focus >= 0 && focus < lines.length
+    const timingScene = timeline.read(time)
+    const held = timingScene.anchor === active && timingScene.held
+    // 旧调用方可能只提供手动定位的快照；时间轴与快照对齐后使用独立视觉高亮。
+    const highlightedIndices =
+      timingScene.anchor === active ? timingScene.highlighted : activeIndices
+    const highlighted = new Set(highlightedIndices)
     // 可见范围要盖住整个活跃组:对唱的另一声部可能在锚点之前,和声在其后
-    const groupMin = activeIndices.length ? Math.min(...activeIndices, active) : active
-    const groupMax = activeIndices.length ? Math.max(...activeIndices, active) : active
-    const start = hasActiveLine ? Math.max(0, Math.min(active - 1, groupMin)) : 0
-    const end = hasActiveLine
-      ? Math.min(lines.length, Math.max(active + 3, groupMax + 1))
+    const groupMin = waiting ? focus : Math.min(active, ...activeIndices, ...highlightedIndices)
+    const groupMax = waiting ? focus : Math.max(active, ...activeIndices, ...highlightedIndices)
+    const start = hasFocus ? Math.max(0, Math.min(focus - 1, groupMin)) : 0
+    const end = hasFocus
+      ? Math.min(lines.length, Math.max(focus + 3, groupMax + 1))
       : Math.min(lines.length, 4)
     const visibleCount = end - start
+    const completed = new Set<number>()
+    for (let index = start; index < end; index += 1) {
+      if (isLyricLineCompleted(lines[index]!, index, time, { active: activeIndices, held })) {
+        completed.add(index)
+      }
+    }
     const nextRenderKey = JSON.stringify([
       track?.id,
       active,
       activeIndices,
+      highlightedIndices,
+      held,
+      waiting,
+      [...completed],
       tempoScale,
       lines.slice(start, end),
     ])
-    if (lyricsRenderKey === nextRenderKey) return
+    if (lyricsRenderKey === nextRenderKey) {
+      renderedWaiting = waiting
+      writeWaiting(time)
+      return
+    }
     lyricsRenderKey = nextRenderKey
     const sameTrack = renderedTrackId === track?.id
-    if (
-      sameTrack &&
-      renderedActiveIndex >= 0 &&
-      active >= 0 &&
-      renderedActiveIndex !== active &&
-      canAnimateScroll()
-    ) {
+    if (sameTrack && canAnimateScroll()) {
+      // 和声进出或内容升级也会改版面，不能因锚点没变就取消到终点。
+      // 首次更新读取正在播放的位移；同一布局帧前的后续更新沿用这次可见位置，
+      // 不把取消动画后的临时终点当成新的起点。
       previousPositions ??= capturePositions()
-      scrollDirection = active > renderedActiveIndex ? 1 : -1
+      if (active !== renderedActiveIndex) {
+        scrollDirection = active > renderedActiveIndex ? 1 : -1
+      }
     } else {
       previousPositions = null
     }
     stopScrollAnimations()
     renderedTrackId = track?.id
     renderedActiveIndex = active
+    renderedWaiting = waiting
+    cachedNodes.waitingRow.remove()
     activeSlots = []
     reuseLineNodes(start, end)
 
@@ -975,22 +1145,20 @@ export function useLyricsWindow({
       const line = lines[lineIndex]!
       const node = ensureLineNode(slot, doc)
 
-      const positionClass = !hasActiveLine
-        ? 'after'
-        : activeSet.has(lineIndex)
-          ? 'active'
-          : lineIndex < active
-            ? 'before'
-            : 'after'
+      const positionClass = highlighted.has(lineIndex)
+        ? 'active'
+        : completed.has(lineIndex)
+          ? 'before'
+          : 'after'
       // 对唱的第二声部靠右,背景和声更小更淡 —— 和主面板同一套语义
       const roleClass = `${line.agent === 'secondary' ? ' secondary' : ''}${line.background ? ' harmony' : ''}`
-      const desiredClass = `line ${positionClass}${roleClass}`
+      const desiredClass = `line ${positionClass}${lineIndex === focus ? ' focused' : ''}${roleClass}`
       if (node.className !== desiredClass) node.className = desiredClass
       const indexStr = String(lineIndex)
       if (node.dataset.index !== indexStr) node.dataset.index = indexStr
 
       renderLineContent(doc, slot, line)
-      if (activeSet.has(lineIndex) && line.words?.length) {
+      if (highlighted.has(lineIndex) && line.words?.length) {
         activeSlots.push({ slot, words: line.words })
       }
 
@@ -1004,9 +1172,22 @@ export function useLyricsWindow({
       }
     }
 
+    if (waiting) {
+      const waitingRow = cachedNodes.waitingRow
+      waitingRow.className = `waiting-row${lines[waiting.nextAnchor]?.agent === 'secondary' ? ' secondary' : ''}`
+      waitingRow.setAttribute('aria-label', waiting.kind === 'intro' ? '前奏' : '间奏')
+      waitingRow.dataset.nextAnchor = String(waiting.nextAnchor)
+      waitingRow.style.visibility = 'hidden'
+      lyricsContainer.insertBefore(
+        waitingRow,
+        cachedNodes.lineNodes[waiting.nextAnchor - start] ?? null,
+      )
+    }
+
     // 行内容重建后旧的音节节点已失效,每轮 render 结束都重新绑定扫光目标
     bindKaraoke()
-    writeKaraoke(readPlaybackTime())
+    writeKaraoke(time)
+    writeWaiting(time)
     stopKaraoke()
     startKaraoke()
     scheduleLayout()
@@ -1131,11 +1312,13 @@ export function useLyricsWindow({
         if (lyricsWindow && !lyricsWindow.document.hidden) {
           advanceScene(readPlaybackTime())
           writeKaraoke(readPlaybackTime())
+          writeWaiting(readPlaybackTime())
         }
         return
       }
       // 暂停期间锚点持续老化,恢复播放必须重锚,否则首帧会跳到未来位置
       clock.resume(currentTime.value, performance.now())
+      writeWaiting(readPlaybackTime())
       startKaraoke()
     },
     { immediate: true },
@@ -1149,6 +1332,7 @@ export function useLyricsWindow({
     // 开关切换后立刻接管/交还当前行,不必等到下一次换行
     bindKaraoke()
     writeKaraoke(readPlaybackTime())
+    writeWaiting(readPlaybackTime())
     stopKaraoke()
     startKaraoke()
   })

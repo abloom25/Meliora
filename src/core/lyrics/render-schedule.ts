@@ -1,4 +1,5 @@
 import type { LyricWord } from '../types'
+import { lyricWordMotionEnd } from './word-motion'
 
 /** Actual media state, independent of DOM and of the player's requested play state. */
 export interface LyricPlaybackState {
@@ -27,7 +28,11 @@ export function scheduleLyricRender(
   if (animated) {
     for (const word of words) {
       if (!Number.isFinite(word.time) || !Number.isFinite(word.duration)) continue
-      if (word.duration > 0 && time >= word.time && time < word.time + word.duration)
+      if (
+        word.duration > 0 &&
+        time >= word.time &&
+        time < Math.max(word.time + word.duration, lyricWordMotionEnd(word))
+      )
         return { kind: 'frame' }
       if (word.time > time) next = Math.min(next, word.time)
     }

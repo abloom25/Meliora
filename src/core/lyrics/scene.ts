@@ -1,17 +1,20 @@
 import type { LyricLine } from '../types'
 import { findActiveLyricIndices } from './lyrics'
 import { createLyricTimeIndex } from './time-index'
+import { createLyricGroupTimings, LYRIC_INTERLUDE_GAP_SECONDS } from './group-timing'
 
 // 歌词面板的纯逻辑层:给定歌词与播放位置,算出"此刻该亮哪些行、锚点是谁、
 // 哪些和声行该露出来";给定各行高度,算出每一行在版面里的纵坐标。
 // 这里不碰 DOM,弹簧与渲染在 useLyricsEngine 里。
 
 export interface LyricScene {
-  /** 正在唱的所有行(对唱双声部、背景和声可以同时在唱) */
+  /** 正在唱的所有行；held 时仍兼容返回最近主句，不能把它当作正在发声。 */
   active: number[]
-  /** true 表示间奏里保留的高亮,而不是真的有行在唱 */
+  /** 视觉高亮，与发声分开；短句间保留主句高亮，和声只在自己的时间内高亮。 */
+  highlighted: number[]
+  /** true 表示没有实际发声的歌词，active 仅保留最近主句。 */
   held: boolean
-  /** 锚点行:活跃集合里最靠后的主行。高亮距离、居中、节奏压缩都以它为准 */
+  /** 最早仍高亮的主句组；无高亮时保留最近主句位置，和声不单独抢焦点。 */
   anchor: number
   /** 各行的和声展开状态。非和声行恒为 false */
   harmonyOpen: boolean[]
@@ -37,14 +40,74 @@ export function harmonyParentsOf(lines: readonly LyricLine[]): Map<number, numbe
   return parents
 }
 
-// 锚点:活跃集合里最靠后的主行。背景和声属于它前面那一句,让和声当锚会让
-// 画面在主行与和声之间来回拉;但和声自己的高亮不受影响,它按自己的时间轴亮
-function anchorOf(lines: readonly LyricLine[], indices: readonly number[]): number {
-  for (let cursor = indices.length - 1; cursor >= 0; cursor -= 1) {
-    const index = indices[cursor]
-    if (index !== undefined && !lines[index]?.background) return index
+function lowerBound(values: readonly number[], time: number): number {
+  let low = 0
+  let high = values.length
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2)
+    if (values[middle]! < time) low = middle + 1
+    else high = middle
   }
-  return indices.length ? (indices[indices.length - 1] ?? -1) : -1
+  return low
+}
+
+/**
+ * 高亮生命周期以主句与所属和声为一组，不能被一句内部的和声起音截断。
+ * 预先把“唱完后等下一句”转换成区间，所以直接 seek 与顺播具有相同结果。
+ * 长空隙按所有重叠组的最晚结束计算，避免短声部结束时误判整首歌进入间奏。
+ */
+function createHighlightIndex(lines: readonly LyricLine[], parents: ReadonlyMap<number, number>) {
+  const ordered = createLyricGroupTimings(lines, parents)
+  const starts = [...new Set(ordered.map((group) => group.start))]
+  const interludeStarts: number[] = []
+  let songEnd = Number.NEGATIVE_INFINITY
+  for (const group of ordered) {
+    if (Number.isFinite(songEnd) && group.start - songEnd >= LYRIC_INTERLUDE_GAP_SECONDS)
+      interludeStarts.push(songEnd)
+    songEnd = Math.max(songEnd, group.end)
+  }
+  const highlightedLines: LyricLine[] = ordered.map((group) => ({
+    time: group.start,
+    endTime: Math.min(
+      starts[lowerBound(starts, group.end)] ?? songEnd,
+      interludeStarts[lowerBound(interludeStarts, group.end)] ?? songEnd,
+      songEnd,
+    ),
+    text: '',
+  }))
+  const index = createLyricTimeIndex(highlightedLines)
+  return {
+    nextBoundary: index.nextBoundary,
+    read(time: number): number[] {
+      if (!Number.isFinite(time)) return []
+      const state = index.read(time)
+      return state.held
+        ? []
+        : state.indices.map((row) => ordered[row]!.row).sort((left, right) => left - right)
+    },
+  }
+}
+
+function highlightedRows(
+  lines: readonly LyricLine[],
+  groups: readonly number[],
+  active: readonly number[],
+  held: boolean,
+): number[] {
+  const highlighted = new Set(groups.filter((index) => !lines[index]?.background))
+  // 主句延续高亮不应让已经唱完、收起的和声重新点亮。
+  if (!held) for (const index of active) if (lines[index]?.background) highlighted.add(index)
+  return [...highlighted].sort((left, right) => left - right)
+}
+
+function anchorOf(
+  groups: readonly number[],
+  active: readonly number[],
+  parents: ReadonlyMap<number, number>,
+): number {
+  if (groups.length) return groups[0]!
+  const fallback = active[active.length - 1]
+  return fallback === undefined ? -1 : (parents.get(fallback) ?? fallback)
 }
 
 /**
@@ -59,17 +122,20 @@ export function resolveLyricScene(
 ): LyricScene {
   // 找不到所属主句的和声(文件本身异常)一律常驻显示,不然它永远出不来
   const harmonyOpen = lines.map((line, index) => Boolean(line.background) && !parents.has(index))
-  if (!lines.length) return { active: [], held: false, anchor: -1, harmonyOpen, openHarmonies: [] }
+  if (!lines.length)
+    return { active: [], highlighted: [], held: false, anchor: -1, harmonyOpen, openHarmonies: [] }
 
   const next = findActiveLyricIndices(lines as LyricLine[], time)
+  const groups = createHighlightIndex(lines, parents).read(time)
   const activeSet = new Set(next.indices)
   for (const [index, parent] of parents) {
     harmonyOpen[index] = activeSet.has(index) || (!next.held && activeSet.has(parent))
   }
   return {
     active: next.indices,
+    highlighted: highlightedRows(lines, groups, next.indices, next.held),
     held: next.held,
-    anchor: anchorOf(lines, next.indices),
+    anchor: anchorOf(groups, next.indices, parents),
     harmonyOpen,
     openHarmonies: harmonyOpen.flatMap((open, index) => (open ? [index] : [])),
   }
@@ -92,6 +158,7 @@ export function createLyricTimeline(
   parents: ReadonlyMap<number, number> = harmonyParentsOf(lines),
 ): LyricTimeline {
   const index = createLyricTimeIndex(lines)
+  const highlightIndex = createHighlightIndex(lines, parents)
   const children = new Map<number, number[]>()
   const orphans: number[] = []
   for (let row = 0; row < lines.length; row += 1) {
@@ -119,6 +186,7 @@ export function createLyricTimeline(
     if (!index.supported) cached = resolveLyricScene(lines, time, parents)
     else {
       const next = index.read(time)
+      const groups = highlightIndex.read(time)
       const open = new Set(orphans)
       for (const row of next.indices) {
         if (lines[row]?.background) open.add(row)
@@ -128,8 +196,9 @@ export function createLyricTimeline(
       let dense: boolean[] | null = null
       cached = {
         active: next.indices,
+        highlighted: highlightedRows(lines, groups, next.indices, next.held),
         held: next.held,
-        anchor: anchorOf(lines, next.indices),
+        anchor: anchorOf(groups, next.indices, parents),
         get harmonyOpen() {
           if (!dense) {
             dense = new Array<boolean>(lines.length).fill(false)
@@ -143,7 +212,15 @@ export function createLyricTimeline(
     return cached
   }
 
-  return { read, nextBoundary: index.nextBoundary }
+  return {
+    read,
+    nextBoundary(time) {
+      const next = index.nextBoundary(time)
+      const highlight = highlightIndex.nextBoundary(time)
+      if (next === null) return highlight
+      return highlight === null ? next : Math.min(next, highlight)
+    },
+  }
 }
 
 export function isLyricHarmonyOpen(scene: LyricScene, index: number): boolean {
@@ -152,11 +229,36 @@ export function isLyricHarmonyOpen(scene: LyricScene, index: number): boolean {
     : Boolean(scene.harmonyOpen[index])
 }
 
+/** 已唱完与滚动焦点分开:间奏保留上一句的位置,但它已经不在演唱。 */
+export function isLyricLineCompleted(
+  line: LyricLine,
+  index: number,
+  time: number,
+  scene: Pick<LyricScene, 'active' | 'held'>,
+): boolean {
+  if (
+    !Number.isFinite(time) ||
+    line.time === null ||
+    !Number.isFinite(line.time) ||
+    time < line.time
+  )
+    return false
+  if (line.endTime !== undefined) {
+    return Number.isFinite(line.endTime) && time >= line.endTime
+  }
+  // 只给行首时间的歌词沿用时间轴的让位规则,不能用行号比较破坏对唱。
+  return scene.held || !scene.active.includes(index)
+}
+
 export function sameLyricScene(left: LyricScene, right: LyricScene): boolean {
   if (left === right) return true
   if (left.held !== right.held || left.anchor !== right.anchor) return false
   if (left.active.length !== right.active.length) return false
-  return left.active.every((value, position) => value === right.active[position])
+  if (left.highlighted.length !== right.highlighted.length) return false
+  return (
+    left.active.every((value, position) => value === right.active[position]) &&
+    left.highlighted.every((value, position) => value === right.highlighted[position])
+  )
 }
 
 /** 下一句主行的起始时间。背景和声属于当前这一句,不算"下一句" */

@@ -26,10 +26,30 @@ describe('lyric render scheduling', () => {
       kind: 'frame',
     })
     expect(scheduleLyricRender({ ...playing, timeSeconds: 2.5 }, 5, words, true)).toEqual({
-      kind: 'timer',
-      delayMs: 500,
+      kind: 'frame',
     })
     expect(scheduleLyricRender({ ...playing, timeSeconds: 2.25 }, 5, words, false)).toEqual({
+      kind: 'timer',
+      delayMs: 1000,
+    })
+  })
+
+  it('keeps rendering a short word rise after the wipe and sleeps once it settles', () => {
+    const brief = [{ time: 2, duration: 0.15, text: 'you' }]
+    expect(scheduleLyricRender({ ...playing, timeSeconds: 2.5 }, 5, brief, true)).toEqual({
+      kind: 'frame',
+    })
+    expect(scheduleLyricRender({ ...playing, timeSeconds: 3 }, 5, brief, true)).toEqual({
+      kind: 'timer',
+      delayMs: 1000,
+    })
+    expect(
+      scheduleLyricRender({ ...playing, timeSeconds: 2.5, playing: false }, 5, brief, true),
+    ).toEqual({ kind: 'idle' })
+    expect(
+      scheduleLyricRender({ ...playing, timeSeconds: 2.5, seeking: true }, 5, brief, true),
+    ).toEqual({ kind: 'idle' })
+    expect(scheduleLyricRender({ ...playing, timeSeconds: 2.5 }, 5, brief, false)).toEqual({
       kind: 'timer',
       delayMs: 1000,
     })
@@ -48,5 +68,36 @@ describe('lyric render scheduling', () => {
     const frozen = { ...playing, timeSeconds: 2.5 }
     for (let wake = 0; wake < 10; wake += 1)
       expect(scheduleLyricRender(frozen, 3, [], false)).toEqual({ kind: 'timer', delayMs: 500 })
+  })
+
+  it('keeps frames running for an overlapping harmony after the lead word has finished', () => {
+    const overlap = [
+      { time: 0, duration: 1, text: 'lead' },
+      { time: 0.5, duration: 2, text: 'harmony' },
+      { time: 3, duration: 1, text: 'next' },
+    ]
+    expect(scheduleLyricRender({ ...playing, timeSeconds: 1.5 }, 4, overlap, true)).toEqual({
+      kind: 'frame',
+    })
+    expect(scheduleLyricRender({ ...playing, timeSeconds: 2.5 }, 4, overlap, true)).toEqual({
+      kind: 'timer',
+      delayMs: 500,
+    })
+    expect(scheduleLyricRender({ ...playing, timeSeconds: 0.25 }, 4, overlap, true)).toEqual({
+      kind: 'frame',
+    })
+  })
+
+  it('wakes for an instant word without scheduling endless frames and handles rewind', () => {
+    const instant = [{ time: 2, duration: 0, text: 'instant' }]
+    expect(scheduleLyricRender({ ...playing, timeSeconds: 1.9 }, null, instant, true)).toEqual({
+      kind: 'timer',
+      delayMs: expect.closeTo(100, 6),
+    })
+    expect(scheduleLyricRender(playing, null, instant, true)).toEqual({ kind: 'idle' })
+    expect(scheduleLyricRender({ ...playing, timeSeconds: 1.5 }, null, instant, true)).toEqual({
+      kind: 'timer',
+      delayMs: 500,
+    })
   })
 })

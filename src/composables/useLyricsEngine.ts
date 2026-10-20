@@ -18,17 +18,19 @@ import { VirtualLyricLayout } from '../core/lyrics/virtual-layout'
 // 会出现速度突变;和声行展开/收起时它下面的行被弹开/收拢,也只是目标变了而已,
 // 不需要任何版面快照与补偿。
 //
-// 牵引感(Apple Music 的那种"被拽过去")来自逐行错峰起步:沿运动方向最靠前的行先动,
-// 往后每一行多等一个固定间隔。所有行同时起步只是整片匀速平移。
+// 牵引感来自整个可见区域逐行错峰起步:内容上移时由上向下,反向时镜像,
+// 唱过的行也参与牵引。按可见行数压缩间隔,限制当前行和整道波的等待时间。
 // 错峰会让相邻行在运动中短暂靠近,位移越大靠得越近;间隔按本次位移收窄,
 // 保证靠近量不超过一个行距,相邻行不会叠在一起。
 //
-// 跳转(拖进度条、点击很远的一行)不会拖着整首歌飞过去:行程封顶在半屏出头,
-// 新位置的行从视口边缘之外级联进场,离开的行直接就位(它们早已在视口之外)。
+// 主动跳转(拖进度条、点击歌词)同时用柔和弹簧追赶,不再逐行等待;远跳行程封顶在
+// 半屏出头,离开的行直接就位(它们早已在视口之外)。尺寸重排则不截断当前位置。
 
 export interface LyricsEngineOptions {
   getViewport: () => HTMLElement | null | undefined
   getLineElements: () => readonly (HTMLElement | null | undefined)[]
+  /** 等待点外层，data-waiting-anchor 必须标明其所属的下一句索引。 */
+  getWaitingElement?: () => HTMLElement | null | undefined
   /** Virtual hosts supply global row indices in data-lyric-index. */
   getLineCount?: () => number
   getEstimatedHeight?: (index: number) => number
@@ -54,10 +56,14 @@ export interface LyricsSceneInput {
   /** 锚点行,-1 表示还没开始唱 */
   focus: number
   active?: readonly number[]
+  /** 暂停时所有主行恢复原始大小；省略表示正在播放。 */
+  playing?: boolean
+  /** 在下一句前预留等待点的位置，跟随时让空隙中心落在歌词锚点。 */
+  waiting?: { nextAnchor: number }
 }
 
-/** spring:带错峰的弹簧位移;none:瞬时就位(尺寸变化、关闭动效、切歌) */
-export type LyricsTransition = 'spring' | 'none'
+/** spring:正常逐行牵引;seek:同时柔和追赶;none:首次排版、关闭动效或切歌直接就位。 */
+export type LyricsTransition = 'spring' | 'seek' | 'none'
 
 export interface SetSceneOptions {
   /**
@@ -66,8 +72,8 @@ export interface SetSceneOptions {
    */
   follow?: boolean
   /**
-   * 距离下一次换行还剩多少毫秒。快段落(说唱、滚动字幕)里整道牵引波必须压进
-   * 这段时间的一半,否则下一行到来时上一道波还没起步,活跃行永远追不到锚点
+   * 距离下一次换行还剩多少毫秒。快段落缩短错峰并适度提速；
+   * 不强迫弹簧在极短预算内停住，下一句沿用当前位置和速度继续牵引。
    */
   budgetMs?: number
 }
@@ -77,21 +83,39 @@ export interface BrowseOptions {
   snap?: boolean
 }
 
+export interface LyricsMeasureOptions {
+  /** 歌词升级/补测只改变目标，保留视觉位置、速度、剩余错峰和和声开合。 */
+  preserveMotion?: boolean
+  /** 尺寸、字体或翻译变化：从当前视觉位置同时追向新布局，不重新错峰。 */
+  transition?: 'reflow'
+}
+
 // 锚点行的中线落在视口这个比例处。Apple Music 把当前行放在偏上一点的位置,
 // 下方留给接下来要唱的几句
 export const LYRIC_ANCHOR_RATIO = 0.42
-// 跟随模式的弹簧:自然频率 10 rad/s、阻尼比 0.75,约半秒到位,有一点点过冲
-const FOLLOW_STIFFNESS = 100
-const FOLLOW_DAMPING_RATIO = 0.75
+// 自然频率 12 rad/s、阻尼比 0.85：主要行程在约半秒内完成，理论过冲小于 0.7%。
+// 留下轻微弹性，但避免到锚点后继续上下漂动。
+const FOLLOW_STIFFNESS = 144
+const FOLLOW_DAMPING_RATIO = 0.85
+// 极短歌词只适度提速，不能因剩余预算变成 1ms 就把弹簧拉硬几十倍。
+const MAX_BUDGET_FREQUENCY_BOOST = 1.35
+// 非法/过大的外部刚度配置仍需有界，避免一帧内完成几乎全部行程。
+const MAX_FOLLOW_FREQUENCY = 60
+const SEEK_STIFFNESS = 100
+const SEEK_DAMPING_RATIO = 1
+const INACTIVE_LINE_SCALE = 0.97
+const SCALE_POSITION_EPSILON = 0.0001
+const SCALE_VELOCITY_EPSILON = 0.001
 // 浏览模式(滚轮)的弹簧:临界阻尼、更硬,滚轮的阶跃被平滑掉但不拖沓
 const BROWSE_STIFFNESS = 420
 const BROWSE_DAMPING_RATIO = 1
-// 逐行错峰的间隔,以及参与错峰的最大行数
-const DELAY_STEP_MS = 48
-const MAX_DELAY_ORDER = 10
-// 阶跃响应的峰值速度与 ω·位移 的比值(ζ = 0.75 时约 0.44)。
+// 逐行错峰的最长间隔,当前句与整道可见牵引波的最大等待时间。
+const DELAY_STEP_MS = 50
+const MAX_FOCUS_DELAY_MS = 160
+const MAX_WAVE_DELAY_MS = 420
+// 阶跃响应的峰值速度与 ω·位移 的比值(ζ = 0.85 时约 0.409，向上取整留余量)。
 // 相邻行的最大靠近量 ≈ 峰值速度 × 起步间隔,用它反推允许的间隔
-const PEAK_SPEED_RATIO = 0.44
+const PEAK_SPEED_RATIO = 0.42
 // 视口上下各留这么多像素:落在这个范围里的行参与动画并保持渲染,之外的行隐藏
 const STAGE_MARGIN_PX = 160
 // 单次位移的动画行程上限(视口高度的倍数)。超出的部分直接就位,只牵引最后这一段
@@ -112,6 +136,12 @@ interface LineMotion {
   moving: boolean
   onstage: boolean
   lastWritten: string
+  /** 主行缩放与位移分别保存位置和速度，共享初次起步错峰。 */
+  scale: SpringState
+  scaleTarget: number
+  /** 初次与位移共用错峰；缩放已在运动时不能为新的位移等待而停住。 */
+  scaleDelayMs: number
+  lastScaleWritten: string
   /**
    * 和声行的展开程度(0…1)与目标。版面按它连续变化,下面的行 1:1 跟随;
    * 同一个值写到 --lyric-harmony 上驱动裁切 / 淡出 / 模糊,视觉与占位永远同步
@@ -121,12 +151,22 @@ interface LineMotion {
   lastOpenWritten: string
 }
 
+interface BrowseAnchor {
+  index: number
+  top: number
+}
+
 // 和声开合的弹簧:临界阻尼(裁切一旦过冲就会露出不该露的一截),约 0.35s 完成
 const HARMONY_STIFFNESS = 180
 const HARMONY_DAMPING_RATIO = 1
 const HARMONY_CONFIG: SpringConfig = {
   stiffness: HARMONY_STIFFNESS,
   damping: 2 * HARMONY_DAMPING_RATIO * Math.sqrt(HARMONY_STIFFNESS),
+  mass: 1,
+}
+const SCALE_CONFIG: SpringConfig = {
+  stiffness: FOLLOW_STIFFNESS,
+  damping: 2 * FOLLOW_DAMPING_RATIO * Math.sqrt(FOLLOW_STIFFNESS),
   mass: 1,
 }
 
@@ -140,8 +180,10 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   let heights: number[] = []
   let gaps = { gap: 0, harmonyGap: 0 }
   let viewportHeight = 0
+  let viewportMeasurable = false
   let layout = new VirtualLyricLayout(0)
   let scene: LyricsSceneInput | null = null
+  let activeLines = new Set<number>()
   let openHarmonies = new Set<number>()
   let mode: 'follow' | 'browse' = 'follow'
   /** 当前生效的版面偏移:各行 y = tops[i] − offset */
@@ -151,13 +193,66 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   let flingVelocity = 0
   let config = springConfig(FOLLOW_STIFFNESS, FOLLOW_DAMPING_RATIO, 1)
   let frame = 0
-  let lastFrameAt = 0
+  let lastFrameAt: number | null = null
   let publishedWindow = ''
-  let mountTransition: LyricsTransition = 'none'
+  let mountTransition: LyricsTransition | 'reflow' = 'none'
   let mountDelta = 0
+  // 点与下一句共享行位移；仅对重排改变的间距单独保留位置和速度，避免 resize 先跳半个间距。
+  const waitingHalfExtent = createSpringState(0, 0)
+  let waitingHalfExtentTarget = 0
+  let waitingMotionAnchor: number | null = null
+  let waitingElement: HTMLElement | null = null
+  let waitingTopWritten = ''
+  let waitingVisibilityWritten = ''
 
   function isOpen(index: number): boolean {
     return scene?.openHarmonies ? openHarmonies.has(index) : Boolean(scene?.open?.[index])
+  }
+
+  function scaleFor(index: number): number {
+    return scene?.background[index] ||
+      scene?.playing === false ||
+      mode === 'browse' ||
+      activeLines.has(index)
+      ? 1
+      : INACTIVE_LINE_SCALE
+  }
+
+  function scaleSettled(motion: LineMotion): boolean {
+    return isSpringSettled(
+      motion.scale,
+      motion.scaleTarget,
+      SCALE_POSITION_EPSILON,
+      SCALE_VELOCITY_EPSILON,
+    )
+  }
+
+  function boundedScale(stiffness: number): number {
+    const requested = options.getSpringScale()
+    const scale = Number.isFinite(requested) ? Math.max(0.1, requested) : 1
+    return Math.min(scale, MAX_FOLLOW_FREQUENCY ** 2 / stiffness)
+  }
+
+  function hasMotion(): boolean {
+    return (
+      flingVelocity !== 0 ||
+      !isSpringSettled(waitingHalfExtent, waitingHalfExtentTarget) ||
+      motions.some(
+        (motion) =>
+          motion.delayMs > 0 ||
+          motion.scaleDelayMs > 0 ||
+          !isSpringSettled(motion.spring, motion.target) ||
+          !scaleSettled(motion) ||
+          !isSpringSettled(motion.open, motion.openTarget, 0.004, 0.02),
+      )
+    )
+  }
+
+  function beginReflow(): void {
+    mountTransition = 'reflow'
+    mountDelta = 0
+    config = springConfig(FOLLOW_STIFFNESS, 1, boundedScale(FOLLOW_STIFFNESS))
+    retargetUniform()
   }
 
   function ensureHeights(invalidate = false): void {
@@ -185,13 +280,60 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     }
   }
 
+  function waitingAnchor(): number | null {
+    const index = scene?.waiting?.nextAnchor
+    return index !== undefined && Number.isInteger(index) && index >= 0 && index < heights.length
+      ? index
+      : null
+  }
+
+  function waitingExtent(): number {
+    return waitingAnchor() === null
+      ? 0
+      : Math.min(100, Math.max(52, viewportHeight * 0.16, gaps.gap * 2))
+  }
+
+  function syncWaitingExtent(): void {
+    const anchor = waitingAnchor()
+    waitingHalfExtentTarget = waitingExtent() / 2
+    if (anchor !== waitingMotionAnchor) {
+      waitingMotionAnchor = anchor
+      snapSpring(waitingHalfExtent, waitingHalfExtentTarget)
+    }
+  }
+
+  /** 等待点不是歌词行：在下一句前插入独立空隙，不改变歌词的虚拟索引。 */
+  function rowTop(index: number): number {
+    const waiting = waitingAnchor()
+    return layout.top(index) + (waiting !== null && index >= waiting ? waitingExtent() : 0)
+  }
+
+  function rowWindow(from: number, until: number): number[] {
+    const waiting = waitingAnchor()
+    if (waiting === null) return layout.window(from, until)
+    const start = layout.top(waiting)
+    const extent = waitingExtent()
+    // 查询底层前缀和前去掉虚拟空隙；空隙内部折叠到下一句的原始起点。
+    const baseCoordinate = (value: number) => value - Math.min(extent, Math.max(0, value - start))
+    return layout.window(baseCoordinate(from), baseCoordinate(until))
+  }
+
+  function waitingOffset(): number | null {
+    const waiting = waitingAnchor()
+    return waiting === null
+      ? null
+      : layout.top(waiting) + waitingExtent() / 2 - viewportHeight * LYRIC_ANCHOR_RATIO
+  }
+
   function publishWindow(): void {
     if (!options.onWindowChange || !scene) return
     const margin = STAGE_MARGIN_PX + viewportHeight * (1 + JUMP_TRAVEL_RATIO)
-    const indices = new Set(layout.window(offset - margin, offset + viewportHeight + margin))
+    const indices = new Set(rowWindow(offset - margin, offset + viewportHeight + margin))
     for (const index of scene.active ?? [Math.max(0, scene.focus)]) {
       if (index >= 0 && index < heights.length) indices.add(index)
     }
+    const waiting = waitingAnchor()
+    if (waiting !== null) indices.add(waiting)
     // Retain departing rows until their transition leaves the stage, and never unmount focus.
     for (const motion of motions) {
       if (
@@ -232,7 +374,13 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
         motion.spring.value < viewportHeight
       )
         visibleLineCount += 1
-      if (motion.moving || motion.delayMs > 0 || !isSpringSettled(motion.open, motion.openTarget))
+      if (
+        motion.moving ||
+        motion.delayMs > 0 ||
+        motion.scaleDelayMs > 0 ||
+        !scaleSettled(motion) ||
+        !isSpringSettled(motion.open, motion.openTarget)
+      )
         animatingLineCount += 1
     }
     return {
@@ -268,6 +416,11 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
       motion.lastWritten = value
       motion.element.style.translate = value
     }
+    const scale = motion.scale.value.toFixed(5)
+    if (scale !== motion.lastScaleWritten) {
+      motion.lastScaleWritten = scale
+      motion.element.style.setProperty('--lyric-line-scale', scale)
+    }
     if (scene?.background[index]) {
       const open = motion.open.value.toFixed(3)
       if (open !== motion.lastOpenWritten) {
@@ -279,7 +432,40 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
 
   function writeAll() {
     for (const motion of motions) write(motion, motion.index)
+    syncWaiting()
     reportDebug()
+  }
+
+  /** 挂载后立即写入当前行的视觉位置，不让等待点先出现在最终锚点再等歌词追上。 */
+  function syncWaiting(): void {
+    const element = options.getWaitingElement?.()
+    if (!element?.isConnected) return
+    const anchor = waitingAnchor()
+    // Vue 尚未替换节点时，旧间奏点保留自己的末帧供 Transition 淡出。
+    if (anchor === null || element.dataset.waitingAnchor !== String(anchor)) return
+    if (waitingElement !== element) {
+      waitingElement = element
+      waitingTopWritten = ''
+      waitingVisibilityWritten = ''
+    }
+    const motion = motions.find((entry) => entry.index === anchor)
+    const visible =
+      viewportMeasurable &&
+      viewportHeight > 0 &&
+      options.getViewport()?.isConnected &&
+      motion?.element.isConnected
+    if (visible && motion) {
+      const top = `${(motion.spring.value - waitingHalfExtent.value).toFixed(2)}px`
+      if (top !== waitingTopWritten) {
+        waitingTopWritten = top
+        element.style.top = top
+      }
+    }
+    const visibility = visible ? 'visible' : 'hidden'
+    if (visibility !== waitingVisibilityWritten) {
+      waitingVisibilityWritten = visibility
+      element.style.visibility = visibility
+    }
   }
 
   /** 行节点与弹簧一一对应;节点被 Vue 重建时沿用不了旧弹簧,从目标位置重新开始 */
@@ -293,11 +479,13 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
       if (!Number.isInteger(index) || index < 0 || index >= heights.length) continue
       const existing = previous.get(element)
       previous.delete(element)
-      const target = layout.top(index) - offset
+      const target = rowTop(index) - offset
       const travel = Math.max(viewportHeight * JUMP_TRAVEL_RATIO, 1)
       const start =
         target +
-        (mountTransition === 'spring' ? Math.max(-travel, Math.min(travel, mountDelta)) : 0)
+        (mountTransition === 'spring' || mountTransition === 'seek'
+          ? Math.max(-travel, Math.min(travel, mountDelta))
+          : 0)
       next.push(
         existing ?? {
           index,
@@ -308,6 +496,10 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
           moving: false,
           onstage: true,
           lastWritten: '',
+          scale: createSpringState(scaleFor(index), 0),
+          scaleTarget: scaleFor(index),
+          scaleDelayMs: 0,
+          lastScaleWritten: '',
           open: createSpringState(isOpen(index) ? 1 : 0, 0),
           openTarget: isOpen(index) ? 1 : 0,
           lastOpenWritten: '',
@@ -323,19 +515,20 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
       window.cancelAnimationFrame(frame)
       frame = 0
     }
-    lastFrameAt = 0
+    lastFrameAt = null
   }
 
   function ensureLoop() {
-    if (frame) return
-    lastFrameAt = 0
+    if (frame || !hasMotion()) return
+    // 从请求这一帧的时刻计时。首帧固定推进 1/60s 会让 120Hz 屏幕起步走双倍距离。
+    lastFrameAt = performance.now()
     frame = window.requestAnimationFrame(tick)
   }
 
   function tick() {
     frame = 0
     const now = performance.now()
-    const dt = lastFrameAt ? Math.min((now - lastFrameAt) / 1000, 0.25) : 1 / 60
+    const dt = Math.min(Math.max(0, (now - (lastFrameAt ?? now)) / 1000), 0.25)
     lastFrameAt = now
 
     if (flingVelocity !== 0) {
@@ -349,29 +542,55 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     }
 
     let busy = flingVelocity !== 0
+    if (!isSpringSettled(waitingHalfExtent, waitingHalfExtentTarget)) {
+      if (dt > 0) stepSpring(waitingHalfExtent, waitingHalfExtentTarget, config, dt)
+      if (isSpringSettled(waitingHalfExtent, waitingHalfExtentTarget)) {
+        snapSpring(waitingHalfExtent, waitingHalfExtentTarget)
+      } else busy = true
+    }
     if (stepHarmonies(dt)) busy = true
     for (const motion of motions) {
       const index = motion.index
+      let motionDt = dt
       if (motion.delayMs > 0) {
-        // 还没轮到这一行起步:原地停住,保持它被落在后面的样子
-        motion.delayMs -= dt * 1000
-        busy = true
-        continue
+        // 等待只消耗这一帧的一部分，剩余时间立即推进弹簧。
+        // 否则短预算也会额外停一整帧，挂载同步还能把刚耗尽的等待重新排满。
+        const waiting = Math.min(motion.delayMs / 1000, motionDt)
+        motion.delayMs = Math.max(0, motion.delayMs - waiting * 1000)
+        motionDt -= waiting
+        if (motionDt <= 0) {
+          busy = true
+        }
       }
-      if (isSpringSettled(motion.spring, motion.target)) {
-        motion.moving = false
-        continue
-      }
-      stepSpring(motion.spring, motion.target, config, dt)
-      if (isSpringSettled(motion.spring, motion.target)) {
-        snapSpring(motion.spring, motion.target)
-        motion.moving = false
+      if (!isSpringSettled(motion.spring, motion.target)) {
+        if (motionDt > 0) stepSpring(motion.spring, motion.target, config, motionDt)
+        if (isSpringSettled(motion.spring, motion.target)) {
+          snapSpring(motion.spring, motion.target)
+          motion.moving = false
+        } else {
+          // 相同时间戳/尚未用完等待不代表动画已经结束，也不代表已经起步。
+          if (motionDt > 0) motion.moving = true
+          busy = true
+        }
       } else {
-        motion.moving = true
-        busy = true
+        motion.moving = false
+      }
+      // Y 可以在等待下一道牵引波，但已开始的缩放必须沿自己的速度继续。
+      let scaleDt = dt
+      if (motion.scaleDelayMs > 0) {
+        const waiting = Math.min(motion.scaleDelayMs / 1000, scaleDt)
+        motion.scaleDelayMs = Math.max(0, motion.scaleDelayMs - waiting * 1000)
+        scaleDt -= waiting
+        if (scaleDt <= 0) busy = true
+      }
+      if (!scaleSettled(motion)) {
+        if (scaleDt > 0) stepSpring(motion.scale, motion.scaleTarget, SCALE_CONFIG, scaleDt)
+        if (scaleSettled(motion)) snapSpring(motion.scale, motion.scaleTarget)
+        else busy = true
       }
       write(motion, index)
     }
+    syncWaiting()
 
     if (busy) frame = window.requestAnimationFrame(tick)
     else {
@@ -412,39 +631,69 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   }
 
   function offsetFor(index: number): number {
-    return layout.focus(index, viewportHeight, LYRIC_ANCHOR_RATIO)
+    const target = index >= 0 && index < heights.length ? index : 0
+    return rowTop(target) + layout.height(target) / 2 - viewportHeight * LYRIC_ANCHOR_RATIO
   }
 
   function clampBrowse(value: number): number {
     return Math.max(bounds[0], Math.min(bounds[1], value))
   }
 
+  function captureBrowseAnchor(): BrowseAnchor | null {
+    if (mode !== 'browse' || !scene || viewportHeight <= 0) return null
+    const index = rowWindow(offset, offset + viewportHeight)[0]
+    return index === undefined ? null : { index, top: rowTop(index) - offset }
+  }
+
+  function restoreBrowseAnchor(anchor: BrowseAnchor | null): void {
+    if (anchor && anchor.index < heights.length) {
+      browseOffset = rowTop(anchor.index) - anchor.top
+    }
+  }
+
   /** 重新排版并算出各行的目标坐标。返回偏移量的变化(正 = 内容上移) */
   function computeTargets(): number {
     const previous = offset
     if (!scene) return 0
+    syncWaitingExtent()
     bounds = [offsetFor(0), offsetFor(heights.length - 1)]
     if (bounds[1] < bounds[0]) bounds = [bounds[0], bounds[0]]
+    const waiting = waitingOffset()
+    if (waiting !== null) {
+      bounds = [Math.min(bounds[0], waiting), Math.max(bounds[1], waiting)]
+    }
     if (mode === 'follow') {
-      offset = offsetFor(scene.focus)
+      offset = waiting ?? offsetFor(scene.focus)
     } else {
       browseOffset = clampBrowse(browseOffset)
       offset = browseOffset
     }
     for (const motion of motions) {
-      motion.target = layout.top(motion.index) - offset
+      motion.target = rowTop(motion.index) - offset
     }
     publishWindow()
     return offset - previous
   }
 
   function snapAll() {
+    snapSpring(waitingHalfExtent, waitingHalfExtentTarget)
     for (const motion of motions) {
       snapSpring(motion.spring, motion.target)
+      snapSpring(motion.scale, motion.scaleTarget)
       motion.delayMs = 0
+      motion.scaleDelayMs = 0
       motion.moving = false
     }
     writeAll()
+  }
+
+  function assignScaleTargets(animated: boolean): void {
+    for (const motion of motions) {
+      motion.scaleTarget = scaleFor(motion.index)
+      if (!animated) snapSpring(motion.scale, motion.scaleTarget)
+      if (!animated || scene?.playing === false || mode === 'browse' || scaleSettled(motion))
+        motion.scaleDelayMs = 0
+    }
   }
 
   /** 把场景里的和声开合状态交给弹簧;瞬时模式下直接就位并重新排版 */
@@ -463,12 +712,19 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   }
 
   function retargetUniform() {
-    for (const motion of motions) motion.delayMs = 0
+    for (const motion of motions) {
+      motion.delayMs = 0
+      motion.scaleDelayMs = 0
+    }
     writeAll()
     ensureLoop()
   }
 
-  function retargetStaggered(delta: number, budgetMs = Number.POSITIVE_INFINITY) {
+  function retargetRows(
+    delta: number,
+    budgetMs = Number.POSITIVE_INFINITY,
+    retained?: ReadonlySet<LineMotion>,
+  ) {
     const travel = Math.max(viewportHeight * JUMP_TRAVEL_RATIO, 1)
     const animated: Array<{ motion: LineMotion; fresh: boolean; ordered: boolean }> = []
     let maxShift = 0
@@ -483,7 +739,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
       // 先封顶再分类 —— 正在离开的可见行封顶后已经在舞台外,不该再占错峰的序号
       const shift = motion.spring.value - motion.target
       let fresh = false
-      if (Math.abs(shift) > travel) {
+      if (!retained?.has(motion) && Math.abs(shift) > travel) {
         motion.spring.value = motion.target + Math.sign(shift) * travel
         motion.spring.velocity = 0
         motion.moving = false
@@ -500,19 +756,32 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
       // 若边缘外的行直接就位,进场的行会从它们身上穿过去 —— 平时在视口外看不见,
       // 但动画没完就滚滚轮会把那片推进视口。这一圈行不参与错峰排序,跟相邻的可见行同步起步
       if (!staged && !onstage(motion.target, height, travel)) {
-        snapSpring(motion.spring, motion.target)
-        motion.delayMs = 0
-        motion.moving = false
+        if (!retained?.has(motion)) {
+          snapSpring(motion.spring, motion.target)
+          motion.delayMs = 0
+          motion.scaleDelayMs = 0
+          motion.moving = false
+        }
         continue
       }
       const remaining = Math.abs(start - motion.target)
-      if (remaining < 0.5 && !motion.moving && motion.delayMs <= 0) {
-        snapSpring(motion.spring, motion.target)
+      if (remaining < 0.5 && !motion.moving && motion.delayMs <= 0 && scaleSettled(motion)) {
+        if (!retained?.has(motion)) snapSpring(motion.spring, motion.target)
         continue
       }
       maxShift = Math.max(maxShift, remaining)
       animated.push({ motion, fresh, ordered })
     }
+
+    // 整个可见区域保持连续相位,不能把当前句之前的行全部归零成同步移动的一块。
+    // 隐藏的舞台边缘行不占序号；focus 尚未挂载时也按它的插入位置限制等待。
+    const topFirst = delta >= 0
+    const ordered = animated.filter((entry) => entry.ordered)
+    const focus = Math.max(0, scene?.focus ?? 0)
+    const focusOrder = ordered.filter(({ motion }) =>
+      topFirst ? motion.index < focus : motion.index > focus,
+    ).length
+    const lastOrder = Math.max(0, ordered.length - 1)
 
     // 错峰间隔:相邻行的最大靠近量 ≈ 峰值速度 × 间隔,不得超过一个行距
     const omega = Math.sqrt(config.stiffness / (config.mass ?? 1))
@@ -520,19 +789,18 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     const allowance = Math.max(gaps.gap, 8)
     let stepMs =
       peakSpeed > 0 ? Math.min(DELAY_STEP_MS, (allowance / peakSpeed) * 1000) : DELAY_STEP_MS
-    // 整道波(最多 MAX_DELAY_ORDER 级)要在下一次换行之前的一半时间内全部起步
+    if (focusOrder > 0) stepMs = Math.min(stepMs, MAX_FOCUS_DELAY_MS / focusOrder)
+    if (lastOrder > 0) stepMs = Math.min(stepMs, MAX_WAVE_DELAY_MS / lastOrder)
+    // 快句继续压缩整道波,在下一次换行之前的一半时间内全部起步。
     if (Number.isFinite(budgetMs) && budgetMs > 0) {
-      stepMs = Math.min(stepMs, (budgetMs * 0.5) / MAX_DELAY_ORDER)
+      stepMs = Math.min(stepMs, (budgetMs * 0.5) / Math.max(1, lastOrder))
     }
+    if (mountTransition === 'seek') stepMs = 0
 
-    // 内容上移(delta ≥ 0,包括和声展开把下面的行往下顶)时最上面的行先动;
-    // 内容下移时最下面的行先动。animated 本身就是版面自上而下的顺序
-    const topFirst = delta >= 0
-    const ordered = animated.filter((entry) => entry.ordered)
     const delays = new Map<LineMotion, number>()
     for (const [position, entry] of ordered.entries()) {
-      const order = topFirst ? position : ordered.length - 1 - position
-      delays.set(entry.motion, Math.min(order, MAX_DELAY_ORDER) * stepMs)
+      const order = topFirst ? position : lastOrder - position
+      delays.set(entry.motion, order * stepMs)
     }
     // 舞台外那一圈:上方的跟最上面的可见行,下方的跟最下面的可见行
     const firstDelay = ordered.length ? delays.get(ordered[0]!.motion)! : 0
@@ -540,40 +808,80 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     let passedOrdered = false
     for (const entry of animated) {
       if (entry.ordered) passedOrdered = true
+      // 虚拟窗口更新只让新行加入动画；旧行的速度和剩余等待不重新编排。
+      if (retained?.has(entry.motion)) continue
       const delayMs = delays.get(entry.motion) ?? (passedOrdered ? lastDelay : firstDelay)
       // 已经起步的行保持起步:连续换行时再把它按住,它会卡在半空。
       // 还在等的行按本批次的顺序重新排延迟,一批之内等待时间严格随行序递增
-      if (!entry.fresh && entry.motion.moving) continue
-      // 还在等的行只会等得更短:连续换行时每次都重排满延迟,它会被无限期推迟,
-      // 表现就是活跃行一直追不到锚点
-      entry.motion.delayMs =
-        entry.fresh || entry.motion.delayMs <= 0 ? delayMs : Math.min(entry.motion.delayMs, delayMs)
+      if (!entry.fresh && entry.motion.moving) {
+        entry.motion.delayMs = 0
+      } else {
+        // 还在等的行只会等得更短，不能在连续换句时无限期重新排满。
+        entry.motion.delayMs =
+          entry.fresh || entry.motion.delayMs <= 0
+            ? delayMs
+            : Math.min(entry.motion.delayMs, delayMs)
+      }
+      if (
+        scaleSettled(entry.motion) ||
+        Math.abs(entry.motion.scale.velocity) > SCALE_VELOCITY_EPSILON
+      ) {
+        entry.motion.scaleDelayMs = 0
+      } else {
+        // 新的缩放跟随该行的初次位移等待；已经在动的缩放不豁免 Y 的新错峰。
+        entry.motion.scaleDelayMs =
+          entry.motion.scaleDelayMs > 0
+            ? Math.min(entry.motion.scaleDelayMs, entry.motion.delayMs)
+            : entry.motion.delayMs
+      }
     }
 
     writeAll()
     if (animated.length) ensureLoop()
   }
 
-  function apply(transition: LyricsTransition, budgetMs = Number.POSITIVE_INFINITY) {
-    mountTransition = transition
+  function apply(
+    transition: LyricsTransition,
+    budgetMs = Number.POSITIVE_INFINITY,
+    redirect = true,
+  ) {
     const animated = transition !== 'none' && options.isAnimated()
     const delta = computeTargets()
-    mountDelta = delta
     assignHarmonyTargets(animated)
+    assignScaleTargets(animated)
     if (!animated) {
+      mountTransition = 'none'
+      mountDelta = 0
       snapAll()
       return
     }
-    // 快段落里弹簧本身也要跟得上:收敛时间(约 4 / (ζω))不能超过到下一行的间隔,
-    // 否则每行只走到一半就被下一行接管,活跃行永远停在锚点下方追不上来
-    let scale = options.getSpringScale()
-    if (Number.isFinite(budgetMs) && budgetMs > 0) {
-      const omega = Math.sqrt(FOLLOW_STIFFNESS * scale)
-      const needed = 4 / (FOLLOW_DAMPING_RATIO * (budgetMs / 1000))
-      if (needed > omega) scale *= (needed / omega) ** 2
+    // active / 和声状态变化不等于换行；浏览期间的播放推进也不能接管滚轮弹簧。
+    // 保留上一道牵引波的刚度、方向和延迟，只推进可能变化的和声开合。
+    if ((!redirect && transition !== 'seek') || mode === 'browse') {
+      ensureLoop()
+      return
     }
+    mountTransition = transition
+    mountDelta = delta
+    if (transition === 'seek') {
+      config = springConfig(SEEK_STIFFNESS, SEEK_DAMPING_RATIO, boundedScale(SEEK_STIFFNESS))
+      retargetRows(delta)
+      ensureLoop()
+      return
+    }
+    // 快段落只温和缩短响应；时间戳密集或较晚采样不代表应该突然改变手感。
+    // 尚未走完的行程由下一句连同当前速度接管，而不是为赶预算一帧跳到终点。
+    const requestedScale = options.getSpringScale()
+    let frequency = Math.sqrt(
+      FOLLOW_STIFFNESS * (Number.isFinite(requestedScale) ? Math.max(0.1, requestedScale) : 1),
+    )
+    if (Number.isFinite(budgetMs) && budgetMs > 0) {
+      const needed = 4 / (FOLLOW_DAMPING_RATIO * (budgetMs / 1000))
+      frequency = Math.min(Math.max(frequency, needed), frequency * MAX_BUDGET_FREQUENCY_BOOST)
+    }
+    const scale = Math.min(frequency, MAX_FOLLOW_FREQUENCY) ** 2 / FOLLOW_STIFFNESS
     config = springConfig(FOLLOW_STIFFNESS, FOLLOW_DAMPING_RATIO, scale)
-    retargetStaggered(delta, budgetMs)
+    retargetRows(delta, budgetMs)
     ensureLoop()
   }
 
@@ -585,6 +893,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     }
     browseOffset = clampBrowse(browseOffset + delta)
     mountDelta = computeTargets()
+    assignScaleTargets(!browseOptions.snap && options.isAnimated())
     if (browseOptions.snap || !options.isAnimated()) {
       snapAll()
       return
@@ -595,41 +904,100 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
 
   // ---- 对外接口 ----
 
-  /** 重新测量视口与各行高度、读取间距,然后按当前场景瞬时就位 */
-  function remeasure(invalidate = false) {
+  /** 首次/恢复时瞬时排版；常规尺寸更新可以保留已开始的动画。 */
+  function remeasure(invalidate = false, measureOptions: LyricsMeasureOptions = {}) {
     const viewport = options.getViewport()
-    if (!viewport) return
+    if (!viewport) {
+      viewportMeasurable = false
+      syncWaiting()
+      return
+    }
+    const measuredViewportHeight = viewport.clientHeight
+    viewportMeasurable = measuredViewportHeight > 0
+    // 隐藏时保留已有布局；首次零高仍要发布估计窗口，引导虚拟行挂载后再测量。
+    if (measuredViewportHeight <= 0 && viewportHeight > 0) {
+      syncWaiting()
+      return
+    }
+    const browseAnchor = captureBrowseAnchor()
     ensureHeights(invalidate)
     syncMotions()
-    viewportHeight = viewport.clientHeight
+    const beforeTargets = motions.map((motion) => motion.target)
+    const beforeWaitingExtent = waitingHalfExtentTarget
+    const preserveMotion =
+      (measureOptions.preserveMotion || measureOptions.transition === 'reflow') &&
+      options.isAnimated()
+    viewportHeight = measuredViewportHeight
     gaps = options.getGaps()
     for (const motion of motions) {
       const measured = motion.element.offsetHeight
       if (measured > 0) heights[motion.index] = measured
+      if (scene) {
+        motion.openTarget = scene.background[motion.index] && isOpen(motion.index) ? 1 : 0
+        // 瞬时重排必须先完成和声，再恢复浏览锚点，避免随后 apply('none') 二次挤动。
+        if (!preserveMotion) snapSpring(motion.open, motion.openTarget)
+      }
     }
     rebuildLayout()
-    if (scene) apply('none')
+    restoreBrowseAnchor(browseAnchor)
+    if (!scene) return
+    if (!preserveMotion) {
+      apply('none')
+      return
+    }
+    // 更新目标而不平移当前位置：字体/换行变化不应把整行先瞬移 targetDelta。
+    // 补测保留已有速度和等待；主动重排让所有行同时从当前视觉位置追新布局。
+    computeTargets()
+    assignScaleTargets(true)
+    const targetsChanged = motions.some(
+      (motion, slot) => Math.abs(motion.target - beforeTargets[slot]!) > 0.001,
+    )
+    if (
+      measureOptions.transition === 'reflow' &&
+      (targetsChanged || beforeWaitingExtent !== waitingHalfExtentTarget)
+    ) {
+      beginReflow()
+      return
+    }
+    writeAll()
+    if (hasMotion()) {
+      if (mountTransition === 'none') {
+        mountTransition = 'reflow'
+        mountDelta = 0
+      }
+      ensureLoop()
+    }
   }
 
   /** Newly mounted rows are measured in one read batch without stopping existing springs. */
   function syncMounted(): void {
     ensureHeights()
+    const retained = new Set(motions)
     syncMotions()
-    const beforeTargets = motions.map((motion) => motion.target)
     const anchor = motions.find((motion) => motion.target + layout.height(motion.index) > 0)
-    const beforeAnchor = anchor ? layout.top(anchor.index) : 0
+    const beforeAnchor = anchor ? rowTop(anchor.index) : 0
     const measurements = motions.map((motion) => motion.element.offsetHeight)
     for (const [slot, motion] of motions.entries()) {
       if (measurements[slot]! > 0) heights[motion.index] = measurements[slot]!
       setLayoutRow(motion.index, motion.open.value)
     }
-    if (mode === 'browse' && anchor) browseOffset += layout.top(anchor.index) - beforeAnchor
+    if (mode === 'browse' && anchor) browseOffset += rowTop(anchor.index) - beforeAnchor
     computeTargets()
-    for (const [slot, motion] of motions.entries()) {
-      motion.spring.value += motion.target - beforeTargets[slot]!
-    }
-    if (mountTransition === 'spring' && options.isAnimated()) retargetStaggered(mountDelta)
-    else snapAll()
+    assignScaleTargets(options.isAnimated())
+    if (options.isAnimated() && retained.size > 0) {
+      if (
+        mode === 'follow' &&
+        (mountTransition === 'spring' || mountTransition === 'seek') &&
+        motions.some((motion) => !retained.has(motion))
+      ) {
+        retargetRows(mountDelta, Number.POSITIVE_INFINITY, retained)
+      } else if (mountTransition === 'none' && hasMotion()) {
+        beginReflow()
+      } else {
+        writeAll()
+        if (hasMotion()) ensureLoop()
+      }
+    } else snapAll()
     publishWindow()
   }
 
@@ -640,7 +1008,11 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   ) {
     const previous = scene
     const previousOpen = openHarmonies
+    const wasBrowsing = mode === 'browse'
+    const waitingChanged = previous?.waiting?.nextAnchor !== next.waiting?.nextAnchor
+    const browseAnchor = waitingChanged ? captureBrowseAnchor() : null
     scene = next
+    activeLines = new Set(next.active ?? [next.focus])
     openHarmonies = new Set(next.openHarmonies)
     ensureHeights()
     if (sceneOptions.follow) {
@@ -666,12 +1038,24 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
         if (!previousOpen.has(index) && !mounted.has(index)) setLayoutRow(index, 1)
       }
     }
+    if (mode === 'browse') restoreBrowseAnchor(browseAnchor)
     // 还没量过(第一次就绪)或行数对不上(列表重建):先补一次测量,这一次瞬时就位
     if (!viewportHeight) {
       remeasure()
       return
     }
-    apply(transition, sceneOptions.budgetMs)
+    if (waitingChanged && transition === 'spring' && options.isAnimated()) {
+      // 等待空间开合是布局变化，保留当前位置和速度；不把它当作新句级联或远跳。
+      apply(transition, sceneOptions.budgetMs, false)
+      if (mode === 'follow') beginReflow()
+      else retargetUniform()
+      return
+    }
+    apply(
+      transition,
+      sceneOptions.budgetMs,
+      previous?.focus !== next.focus || (wasBrowsing && mode === 'follow'),
+    )
   }
 
   /** 退出浏览模式,锚点行回到视口锚点位置 */
@@ -712,7 +1096,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
    */
   function reveal(index: number): boolean {
     if (index < 0 || index >= heights.length || !scene) return false
-    const target = layout.top(index) - offset
+    const target = rowTop(index) - offset
     const height = layout.height(index)
     const top = viewportHeight * 0.12
     const bottom = viewportHeight * 0.88
@@ -733,10 +1117,13 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
       setLayoutRow(motion.index, motion.openTarget)
     }
     if (scene) computeTargets()
+    snapSpring(waitingHalfExtent, waitingHalfExtentTarget)
     for (const motion of motions) {
       if (!motion.element.isConnected) continue
       snapSpring(motion.spring, motion.target)
+      snapSpring(motion.scale, motion.scaleTarget)
       motion.delayMs = 0
+      motion.scaleDelayMs = 0
       motion.moving = false
     }
     writeAll()
@@ -752,7 +1139,11 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     motions = []
     heights = []
     layout = new VirtualLyricLayout(0)
+    viewportHeight = 0
+    viewportMeasurable = false
+    bounds = [0, 0]
     scene = null
+    activeLines.clear()
     openHarmonies.clear()
     mode = 'follow'
     offset = 0
@@ -760,12 +1151,29 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     publishedWindow = ''
     mountTransition = 'none'
     mountDelta = 0
+    waitingMotionAnchor = null
+    waitingHalfExtentTarget = 0
+    snapSpring(waitingHalfExtent, 0)
+    for (const element of [waitingElement, options.getWaitingElement?.()]) {
+      if (element?.isConnected) element.style.visibility = 'hidden'
+    }
+    waitingElement = null
+    waitingTopWritten = ''
+    waitingVisibilityWritten = ''
     options.onWindowChange?.([])
     reportDebug()
   }
 
   function isBrowsing(): boolean {
     return mode === 'browse'
+  }
+
+  /** 真实视口可见性，按当前动画位置计算；不把 overscan 当作已经进入视口。 */
+  function isRowVisible(index: number): boolean {
+    const motion = motions.find((entry) => entry.index === index)
+    if (!motion || viewportHeight <= 0) return false
+    const height = layout.height(index)
+    return height > 0 && motion.spring.value + height > 0 && motion.spring.value < viewportHeight
   }
 
   /** 当前各行的目标纵坐标(测试与调试用) */
@@ -780,6 +1188,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   return {
     remeasure,
     syncMounted,
+    syncWaiting,
     setScene,
     follow,
     browseBy,
@@ -788,6 +1197,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     cancel,
     reset,
     isBrowsing,
+    isRowVisible,
     targets,
     readDebugSnapshot,
   }

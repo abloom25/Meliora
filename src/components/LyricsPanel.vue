@@ -7,13 +7,17 @@
   import type { LyricsDebugSnapshot } from '../core/diagnostics/lyrics-debug'
   import { listenMediaQuery } from '../platform/web/media-query'
   import { isApplePlatform } from '../platform/web/browser'
+  import LyricsWaitingIndicator from './LyricsWaitingIndicator.vue'
   import {
     createLyricTimeline,
+    createLyricWaitingTimeline,
     isLyricHarmonyOpen,
+    isLyricLineCompleted,
     lyricTempoScale,
-    nextPrimaryTime,
+    lyricWordCharacters,
     sameLyricScene,
     type LyricScene,
+    type LyricWaitingInterval,
   } from '../core/lyrics'
   import { useLyricsEngine, type LyricsTransition } from '../composables/useLyricsEngine'
   import { useLyricsKaraoke } from '../composables/useLyricsKaraoke'
@@ -47,7 +51,7 @@
     },
   )
 
-  // 用户手动滚动后多久交还给自动跟随
+  // 最后一次翻阅后留出阅读时间，再平滑恢复播放跟随。
   const BROWSE_IDLE_MS = 3200
   // 滚轮 deltaMode 为"行"时每行折算的像素
   const WHEEL_LINE_PX = 40
@@ -63,7 +67,7 @@
   const { currentTrack, currentTrackVersion, currentTime, isPlaying, settings } = storeToRefs(store)
 
   function emptyScene(): LyricScene {
-    return { active: [], held: false, anchor: -1, harmonyOpen: [] }
+    return { active: [], highlighted: [], held: false, anchor: -1, harmonyOpen: [] }
   }
 
   // timeupdate 只有约 4Hz,逐字扫光需要每帧的播放位置,这里统一走外推时钟
@@ -80,11 +84,18 @@
   let estimatedCharactersPerRow = 30
   // 场景按时间区间整体替换,保留快照引用即可跳过逐帧的活跃行集合比较。
   const scene = shallowRef<LyricScene>(emptyScene())
+  // 只在时间轴区间变化时更新，完成态不需要逐帧进入 Vue 响应式。
+  const sceneTime = ref(0)
+  const waitingInterval = shallowRef<LyricWaitingInterval | null>(null)
+  const waitingElement = ref<HTMLElement>()
+  const waitingIndicator = ref<InstanceType<typeof LyricsWaitingIndicator>>()
+  const playbackRunning = ref(false)
   const status = ref<LyricStatus>('idle')
   const lyricTempo = ref(1)
   const viewport = ref<HTMLElement>()
   const lyricsContent = ref<HTMLElement>()
   const userBrowsing = ref(false)
+  let browseTimer = 0
   const keyboardIndex = ref<number | null>(null)
   // 行节点直接从 DOM 读:它们在 Transition 的插槽里,由 Transition 自己渲染,
   // 面板自身重渲染时插槽不一定跟着跑,靠 ref 收集会在 onBeforeUpdate 清空后拿不回来
@@ -93,11 +104,11 @@
     return content ? (Array.from(content.children) as HTMLElement[]) : []
   }
   let isPanelMounted = false
-  let browseTimer = 0
   let measureRaf = 0
   let requestId = 0
   let renderFrame = 0
   let renderTimer = 0
+  let previousPlayback: { state: LyricPlaybackState; sampledAt: number } | null = null
   let stopPlaybackSubscription: (() => void) | undefined
   let lyricsController: AbortController | null = null
   let resizeObserver: ResizeObserver | null = null
@@ -110,7 +121,7 @@
     typeof window !== 'undefined' && typeof window.matchMedia === 'function'
       ? window.matchMedia('(prefers-reduced-motion: reduce)')
       : null
-  let prefersReducedMotion = reducedMotionQuery?.matches ?? false
+  const prefersReducedMotion = ref(reducedMotionQuery?.matches ?? false)
   let debugTimer = 0
   let debugSampledAt = Number.NEGATIVE_INFINITY
   // 源时间轴换新时才统计；关闭诊断后没有读取者，也不会遍历歌词。
@@ -174,7 +185,7 @@
         animationEnabled: animationEnabled(),
         translationEnabled: settings.value.lyricTranslation,
         documentHidden: document.hidden,
-        reducedMotion: prefersReducedMotion,
+        reducedMotion: prefersReducedMotion.value,
         renderLoopRunning: renderFrame !== 0,
         renderSchedule: renderFrame ? 'frame' : renderTimer ? 'timer' : 'idle',
         userBrowsing: userBrowsing.value,
@@ -197,7 +208,7 @@
   }
 
   function animationEnabled(): boolean {
-    return settings.value.lyricAnimation && !prefersReducedMotion
+    return settings.value.lyricAnimation && !prefersReducedMotion.value
   }
 
   const displayedLines = computed(() => {
@@ -211,8 +222,32 @@
     })
   })
   const timeline = computed(() => createLyricTimeline(lines.value))
+  const waitingTimeline = computed(() => createLyricWaitingTimeline(lines.value))
   const backgroundFlags = computed(() => lines.value.map((line) => Boolean(line.background)))
-  const activeSet = computed(() => new Set(scene.value.active))
+  const activeSet = computed(() => new Set(scene.value.highlighted))
+  const wordCharacters = computed(() =>
+    displayedLines.value.map((line) => line.words?.map(lyricWordCharacters) ?? []),
+  )
+  // 英文长音里的字母只是动画节点，不能因此成为新的换行点。
+  // 中文和含空格的短句仍保留原来的自然断行规则。
+  const unbrokenWords = computed(() =>
+    displayedLines.value.map(
+      (line) =>
+        line.words?.map((word) =>
+          /^(?:\p{Script=Latin}|\p{Number}|\p{Mark}|\p{Punctuation})+$/u.test(word.text),
+        ) ?? [],
+    ),
+  )
+  const completedSet = computed(
+    () =>
+      new Set(
+        renderedLines.value
+          .filter(({ line, index }) =>
+            isLyricLineCompleted(line, index, sceneTime.value, scene.value),
+          )
+          .map(({ index }) => index),
+      ),
+  )
 
   // roving tabindex:仅当前激活行(无激活行时退回第一个可 seek 的行)是 Tab 停靠点,
   // 避免数百行歌词全部进入 Tab 序列
@@ -244,6 +279,7 @@
   const engine = useLyricsEngine({
     getViewport: () => viewport.value,
     getLineElements: lineElements,
+    getWaitingElement: () => waitingElement.value,
     getLineCount: () => lines.value.length,
     getEstimatedHeight: (index) => {
       const line = displayedLines.value[index]
@@ -319,7 +355,11 @@
         openHarmonies: scene.value.openHarmonies,
         ...(scene.value.openHarmonies ? {} : { open: scene.value.harmonyOpen }),
         focus: scene.value.anchor,
-        active: scene.value.active,
+        active: scene.value.highlighted,
+        playing: readPlaybackState().playing,
+        waiting: waitingInterval.value
+          ? { nextAnchor: waitingInterval.value.nextAnchor }
+          : undefined,
       },
       transition,
       { follow: !userBrowsing.value, budgetMs: scrollBudgetMs() },
@@ -330,9 +370,14 @@
   function scrollBudgetMs(): number {
     const anchor = scene.value.anchor
     if (anchor < 0) return Number.POSITIVE_INFINITY
-    const next = nextPrimaryTime(lines.value, anchor)
-    if (next === null) return Number.POSITIVE_INFINITY
-    return (next - readClock()) * 1000
+    const time = readClock()
+    for (let index = anchor + 1; index < lines.value.length; index += 1) {
+      const line = lines.value[index]!
+      if (!line.background && line.time !== null && line.time > time) {
+        return (line.time - time) * 1000
+      }
+    }
+    return Number.POSITIVE_INFINITY
   }
 
   /**
@@ -341,9 +386,15 @@
    */
   function syncScene(time: number, transition: LyricsTransition = 'spring', force = false) {
     const next = timeline.value.read(time)
+    const waiting = waitingTimeline.value.read(time)?.interval ?? null
+    const waitingChanged = waiting !== waitingInterval.value
+    if (waitingChanged) waitingInterval.value = waiting
     const changed = !sameLyricScene(next, scene.value)
-    if (!changed && !force) return
-    scene.value = next
+    if (next !== scene.value || force) {
+      sceneTime.value = time
+      scene.value = next
+    }
+    if (!changed && !waitingChanged && !force) return
     lyricTempo.value = next.anchor < 0 ? 1 : lyricTempoScale(lines.value, next.anchor)
     if (changed) emitSnapshot()
     applyScene(transition)
@@ -368,17 +419,21 @@
         updateStatus('empty')
         return
       }
+      const upgrading = status.value === 'ready' && lines.value.length > 0
       lines.value = parsedLines
       clock.anchor(currentTime.value, performance.now())
       if (isPlaying.value) clock.resume(currentTime.value, performance.now())
-      scene.value = timeline.value.read(readClock())
+      sceneTime.value = readClock()
+      scene.value = timeline.value.read(sceneTime.value)
+      waitingInterval.value = waitingTimeline.value.read(sceneTime.value)?.interval ?? null
+      playbackRunning.value = readPlaybackState().playing
       lyricTempo.value =
         scene.value.anchor < 0 ? 1 : lyricTempoScale(lines.value, scene.value.anchor)
       // 行节点要等舞台切换过渡结束才会挂上来,排版由 lyricsContent 的 watcher 接手
       updateStatus('ready')
       startRenderLoop()
       void nextTick(() => {
-        if (id === requestId) relayout()
+        if (id === requestId) relayout(upgrading)
       })
     }
     try {
@@ -401,16 +456,20 @@
     window.cancelAnimationFrame(measureRaf)
     measureRaf = 0
     engine.reset()
+    previousPlayback = null
     karaoke.release()
     lyricTempo.value = 1
     lines.value = []
     keyboardIndex.value = null
     scene.value = emptyScene()
+    sceneTime.value = 0
+    waitingInterval.value = null
+    playbackRunning.value = false
     status.value = 'idle'
   }
 
-  /** 行节点刚挂上来 / 尺寸变化 / 内容重排后:重新测量并瞬时就位 */
-  function relayout() {
+  /** 首次显示立即定位；播放中的重测保留当前位移、速度与和声展开进度。 */
+  function relayout(preserveMotion = false, reflow = false) {
     if (!isPanelMounted || status.value !== 'ready' || !props.active || document.hidden) return
     const firstLine = lineElements()[0]
     if (firstLine) {
@@ -425,10 +484,16 @@
         )
       }
     }
-    engine.remeasure(true)
-    applyScene('none')
-    karaoke.bind(scene.value.active)
+    if (preserveMotion) {
+      applyScene('spring')
+      engine.remeasure(true, reflow ? { transition: 'reflow' } : { preserveMotion: true })
+    } else {
+      engine.remeasure(true)
+      applyScene('none')
+    }
+    karaoke.bind(scene.value.highlighted)
     karaoke.write(readClock())
+    waitingIndicator.value?.write(readClock())
     stopRenderLoop()
     startRenderLoop()
   }
@@ -437,7 +502,7 @@
     window.cancelAnimationFrame(measureRaf)
     measureRaf = window.requestAnimationFrame(() => {
       measureRaf = 0
-      relayout()
+      relayout(true, true)
     })
   }
 
@@ -446,10 +511,29 @@
   function renderOnce() {
     scheduleDebug()
     if (!isPanelMounted || status.value !== 'ready' || !props.active || document.hidden) return
-    const time = readClock()
-    syncScene(time)
-    karaoke.ensure(scene.value.active)
+    const playback = readPlaybackState()
+    playbackRunning.value = playback.playing && !playback.seeking
+    const time = playback.timeSeconds
+    const now = performance.now()
+    const previous = previousPlayback
+    const expected = previous
+      ? previous.state.timeSeconds +
+        (previous.state.playing && !previous.state.seeking
+          ? ((now - previous.sampledAt) / 1000) * previous.state.playbackRate
+          : 0)
+      : time
+    const jumped =
+      previous !== null &&
+      (playback.seeking ||
+        previous.state.seeking ||
+        time < previous.state.timeSeconds - 0.05 ||
+        Math.abs(time - expected) > 0.6)
+    const playingChanged = previous !== null && playback.playing !== previous.state.playing
+    previousPlayback = { state: { ...playback }, sampledAt: now }
+    syncScene(time, jumped ? 'seek' : 'spring', playingChanged || jumped)
+    karaoke.ensure(scene.value.highlighted)
     karaoke.write(time)
+    waitingIndicator.value?.write(time)
   }
 
   function renderTick() {
@@ -474,9 +558,23 @@
   function startRenderLoop() {
     if (renderFrame || renderTimer || !shouldRunRenderLoop()) return
     const playback = readPlaybackState()
+    if (
+      playback.playing &&
+      !playback.seeking &&
+      waitingInterval.value &&
+      !userBrowsing.value &&
+      animationEnabled()
+    ) {
+      renderFrame = window.requestAnimationFrame(renderTick)
+      return
+    }
+    const boundaries = [
+      timeline.value.nextBoundary(playback.timeSeconds),
+      waitingTimeline.value.nextBoundary(playback.timeSeconds),
+    ].filter((boundary): boundary is number => boundary !== null)
     const plan = scheduleLyricRender(
       playback,
-      timeline.value.nextBoundary(playback.timeSeconds),
+      boundaries.length ? Math.min(...boundaries) : null,
       karaoke.getWords(),
       animationEnabled(),
     )
@@ -503,15 +601,21 @@
   function markBrowsing() {
     userBrowsing.value = true
     window.clearTimeout(browseTimer)
-    browseTimer = window.setTimeout(() => {
-      userBrowsing.value = false
-      engine.follow('spring')
-    }, BROWSE_IDLE_MS)
+    browseTimer = touch
+      ? 0
+      : window.setTimeout(() => {
+          browseTimer = 0
+          if (!isPanelMounted || !props.active || document.hidden) return
+          stopBrowsing()
+          engine.follow('seek')
+        }, BROWSE_IDLE_MS)
   }
 
   function stopBrowsing() {
     window.clearTimeout(browseTimer)
+    browseTimer = 0
     userBrowsing.value = false
+    keyboardIndex.value = null
   }
 
   function handleWheel(event: WheelEvent) {
@@ -537,7 +641,7 @@
 
   function handleTouchStart(event: TouchEvent) {
     if (status.value !== 'ready' || event.touches.length !== 1) {
-      touch = null
+      handleTouchCancel()
       return
     }
     const point = event.touches[0]!
@@ -546,12 +650,18 @@
       moved: false,
       samples: [{ at: performance.now(), y: point.clientY }],
     }
+    window.clearTimeout(browseTimer)
+    browseTimer = 0
     // 手指按下时刹住正在进行的惯性
     engine.fling(0)
   }
 
   function handleTouchMove(event: TouchEvent) {
-    if (!touch || event.touches.length !== 1) return
+    if (event.touches.length !== 1) {
+      handleTouchCancel()
+      return
+    }
+    if (!touch) return
     const point = event.touches[0]!
     const dy = point.clientY - touch.y
     if (!touch.moved && Math.abs(dy) < TAP_SLOP_PX) return
@@ -568,17 +678,30 @@
   }
 
   function handleTouchEnd() {
-    if (!touch) return
+    if (!touch) {
+      if (userBrowsing.value) markBrowsing()
+      return
+    }
     const { samples, moved } = touch
     touch = null
-    if (!moved) return
+    if (!moved) {
+      if (userBrowsing.value) markBrowsing()
+      return
+    }
+    markBrowsing()
     const now = performance.now()
     const recent = samples.filter((sample) => now - sample.at <= FLING_SAMPLE_MS)
     const first = recent[0]
     const last = recent[recent.length - 1]
     if (!first || !last || last.at === first.at) return
-    markBrowsing()
     engine.fling((-(last.y - first.y) / (last.at - first.at)) * 1000)
+  }
+
+  function handleTouchCancel() {
+    // 系统接管手势不代表用户甩动松手，保留当前位置。
+    touch = null
+    engine.fling(0)
+    if (userBrowsing.value) markBrowsing()
   }
 
   async function handleKeydown(event: KeyboardEvent) {
@@ -657,7 +780,7 @@
     // seek 的处理方会同步写 currentTime;这里立刻按新位置同步场景,
     // 点击的那一行马上开始牵引,不用等下一次 timeupdate
     clock.anchor(currentTime.value, performance.now())
-    syncScene(readClock(), 'spring', true)
+    syncScene(readClock(), 'seek', true)
   }
 
   // ---- 环境事件 ----
@@ -669,25 +792,42 @@
   function handleVisibilityChange() {
     scheduleDebug()
     if (document.hidden) {
-      stopRenderLoop()
-      engine.cancel()
+      suspendRendering()
       return
     }
     // 后台期间 rAF 停转,时钟锚点已经过期,恢复时先重锚再继续
     if (isPlaying.value) clock.resume(currentTime.value, performance.now())
-    renderOnce()
-    startRenderLoop()
+    restoreRendering()
+  }
+
+  function suspendRendering() {
+    stopRenderLoop()
+    stopBrowsing()
+    touch = null
+    window.cancelAnimationFrame(measureRaf)
+    measureRaf = 0
+    engine.cancel()
+  }
+
+  function restoreRendering() {
+    if (!props.active || document.hidden) return
+    playbackRunning.value = readPlaybackState().playing
+    // 先取得最新场景，再重测和绑定扫光。暂停时没有下一帧来修正旧行绑定。
+    syncScene(readClock(), 'none', true)
+    // 隐藏期间的 ResizeObserver 回调会被跳过；恢复时必须补测，
+    // 同时让被中断的弹簧落到正确位置，即使当前仍然是同一句。
+    relayout()
   }
 
   function handleReducedMotionChange(event: MediaQueryListEvent | MediaQueryList) {
-    prefersReducedMotion = event.matches
+    prefersReducedMotion.value = event.matches
     handleAnimationToggle()
   }
 
   function handleAnimationToggle() {
     if (!animationEnabled()) engine.cancel()
     // 开关切换后立刻接管/交还当前行的扫光,不必等下一次换行
-    karaoke.bind(scene.value.active)
+    karaoke.bind(scene.value.highlighted)
     renderOnce()
     applyScene('none')
     stopRenderLoop()
@@ -719,7 +859,7 @@
     isPanelMounted = false
     clearDebug()
     stopRenderLoop()
-    window.clearTimeout(browseTimer)
+    stopBrowsing()
     window.cancelAnimationFrame(measureRaf)
     lyricsController?.abort()
     resizeObserver?.disconnect()
@@ -743,7 +883,15 @@
       }
     },
   )
-  watch(userBrowsing, scheduleDebug)
+  watch(
+    userBrowsing,
+    () => {
+      scheduleDebug()
+      stopRenderLoop()
+      startRenderLoop()
+    },
+    { flush: 'post' },
+  )
 
   watch(
     () => [currentTrack.value?.id, currentTrackVersion.value] as const,
@@ -754,12 +902,14 @@
   watch(lyricsContent, (content) => {
     if (content) relayout()
   })
+  // 新等待节点在场景更新后才挂载；暂停时也必须立即取得同一帧的歌词弹簧位置。
+  watch(waitingElement, () => engine.syncWaiting(), { flush: 'post' })
   watch(
     renderedIndices,
     () => {
       if (!isPanelMounted || status.value !== 'ready' || !props.active || document.hidden) return
       engine.syncMounted()
-      karaoke.bind(scene.value.active)
+      karaoke.ensure(scene.value.highlighted)
       karaoke.write(readClock())
       stopRenderLoop()
       startRenderLoop()
@@ -791,7 +941,7 @@
   )
   watch(
     () => settings.value.lyricScale,
-    () => void nextTick(relayout),
+    () => void nextTick(() => relayout(true, true)),
   )
   watch(
     () => settings.value.lyricAnimation,
@@ -801,7 +951,7 @@
     () => settings.value.lyricTranslation,
     () => {
       emitSnapshot()
-      void nextTick(relayout)
+      void nextTick(() => relayout(true, true))
     },
   )
   watch(
@@ -809,20 +959,16 @@
     (active) => {
       scheduleDebug()
       if (!active) {
-        stopRenderLoop()
-        stopBrowsing()
-        engine.cancel()
+        suspendRendering()
         return
       }
-      // 隐藏期间尺寸可能变了,回来先整体重排,再从当前位置继续
-      relayout()
-      syncScene(readClock(), 'none', true)
-      startRenderLoop()
+      restoreRendering()
     },
+    { flush: 'post' },
   )
 
   function lineDistanceClass(index: number): string {
-    const anchor = scene.value.anchor
+    const anchor = waitingInterval.value?.nextAnchor ?? scene.value.anchor
     const distance = anchor < 0 ? 0 : Math.min(Math.abs(index - anchor), 5)
     return `distance-${distance}`
   }
@@ -839,6 +985,8 @@
       browsing: userBrowsing,
       'animation-disabled': !settings.lyricAnimation,
       'apple-font': applePlatform,
+      paused: !playbackRunning,
+      waiting: Boolean(waitingInterval),
     }"
     :style="lyricPanelStyle"
     aria-label="歌词"
@@ -850,17 +998,39 @@
       @touchstart.passive="handleTouchStart"
       @touchmove.passive="handleTouchMove"
       @touchend.passive="handleTouchEnd"
-      @touchcancel.passive="handleTouchEnd"
+      @touchcancel.passive="handleTouchCancel"
       @keydown="handleKeydown"
       @focusin="handleFocusIn"
     >
       <Transition name="lyric-state-change" mode="out-in">
         <div v-if="status !== 'ready'" key="empty" class="lyric-stage" />
         <div v-else key="lyrics" class="lyric-stage">
+          <Transition name="lyric-waiting">
+            <div
+              v-if="waitingInterval && !userBrowsing"
+              :key="waitingInterval.start"
+              ref="waitingElement"
+              :data-waiting-anchor="waitingInterval.nextAnchor"
+              class="lyric-waiting"
+              :class="{
+                secondary: displayedLines[waitingInterval.nextAnchor]?.agent === 'secondary',
+              }"
+              :aria-label="waitingInterval.kind === 'intro' ? '前奏' : '间奏'"
+            >
+              <LyricsWaitingIndicator
+                ref="waitingIndicator"
+                :interval="waitingInterval"
+                :animated="settings.lyricAnimation && !prefersReducedMotion"
+                :paused="!playbackRunning"
+                :get-time="readClock"
+                :secondary="displayedLines[waitingInterval.nextAnchor]?.agent === 'secondary'"
+              />
+            </div>
+          </Transition>
           <div ref="lyricsContent" class="lyrics-content">
             <button
               v-for="{ line, index } in renderedLines"
-              :key="`${line.time}-${index}`"
+              :key="`${index}-${line.text}`"
               :data-lyric-index="index"
               :aria-label="`${index + 1} / ${displayedLines.length} ${[line.text, line.roman, line.translation].filter(Boolean).join(' ')}`"
               class="lyric-line"
@@ -868,6 +1038,7 @@
                 lineDistanceClass(index),
                 {
                   active: activeSet.has(index),
+                  completed: completedSet.has(index) && !activeSet.has(index),
                   timed: line.time !== null,
                   secondary: line.agent === 'secondary',
                   background: line.background,
@@ -886,7 +1057,25 @@
               <span class="lyric-original">
                 <template v-if="line.words?.length">
                   <template v-for="(word, wordIndex) in line.words" :key="wordIndex">
-                    <span class="lyric-word">{{ word.text }}</span>
+                    <span
+                      class="lyric-word"
+                      :class="{
+                        emphasized: Boolean(wordCharacters[index]?.[wordIndex]),
+                        unbroken:
+                          Boolean(wordCharacters[index]?.[wordIndex]) &&
+                          unbrokenWords[index]?.[wordIndex],
+                      }"
+                    >
+                      <template v-if="wordCharacters[index]?.[wordIndex]">
+                        <span
+                          v-for="(character, characterIndex) in wordCharacters[index]?.[wordIndex]"
+                          :key="characterIndex"
+                          class="lyric-char"
+                          >{{ character }}</span
+                        >
+                      </template>
+                      <template v-else>{{ word.text }}</template>
+                    </span>
                     <span v-if="word.trailingSpace" class="lyric-gap">{{ ' ' }}</span>
                   </template>
                 </template>
@@ -950,7 +1139,8 @@
     transform: translateY(-12px);
   }
 
-  .lyrics-content {
+  .lyrics-content,
+  .lyric-waiting {
     --lyric-responsive-size: clamp(24px, min(3.2vw, 4.8dvh), 34px);
     --lyric-responsive-gap: clamp(18px, min(2.5vw, 3.5dvh), 28px);
     // 宿主只覆盖基准值，用户倍率最后乘入，避免紧凑布局的 clamp 吃掉缩放范围。
@@ -958,8 +1148,39 @@
     --lyric-harmony-gap: calc(var(--lyric-gap) * 0.3);
 
     position: absolute;
-    inset: 0 7% 0 3%;
     font-size: calc(var(--lyric-base-size, var(--lyric-responsive-size)) * var(--lyric-scale, 1));
+  }
+
+  .lyric-waiting {
+    top: 0;
+    right: 7%;
+    left: 3%;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    height: 1em;
+    // 等引擎提供当前视觉坐标再显示，不能提前出现在最终锚点。
+    visibility: hidden;
+    translate: 0 -50%;
+    pointer-events: none;
+
+    &.secondary {
+      justify-content: flex-end;
+    }
+  }
+
+  .lyric-waiting-enter-active,
+  .lyric-waiting-leave-active {
+    transition: opacity 240ms ease-out;
+  }
+
+  .lyric-waiting-enter-from,
+  .lyric-waiting-leave-to {
+    opacity: 0;
+  }
+
+  .lyrics-content {
+    inset: 0 7% 0 3%;
     /* 只是把行距变量算成像素给引擎读(getComputedStyle 的 rowGap / columnGap),
        块级元素上的 gap 没有版面效果 */
     row-gap: var(--lyric-gap);
@@ -971,8 +1192,9 @@
     /* 未激活行整行按 idle 色渲染:扫光进度恒为 1,只有激活行由 JS 每帧写入 */
     --lyric-word-fill: 1;
     --lyric-word-edge: 0;
-    --lyric-fill: rgba(255, 255, 255, 0.3);
-    --lyric-idle: rgba(255, 255, 255, 0.3);
+    --lyric-fill: #fff;
+    --lyric-idle: #fff;
+    --lyric-mask-idle: 0.36;
     /* 扫光前沿的柔化宽度,硬边会显得像进度条而不是"唱到这里" */
     --lyric-edge: 0.55em;
 
@@ -983,7 +1205,8 @@
     padding: 0;
     border: 0;
     background: none;
-    opacity: calc(0.58 - var(--line-distance) * 0.065);
+    // 静息亮度只由这一层控制，避免文字 alpha 与行 opacity 相乘后过暗。
+    opacity: calc(0.3 - var(--line-distance) * 0.025);
     filter: blur(calc(0.35px + var(--line-distance) * 0.78px));
     font-family: inherit;
     font-size: inherit;
@@ -994,9 +1217,6 @@
     overflow-wrap: anywhere;
     cursor: default;
     transform-origin: left center;
-    /* 每一帧都在改 translate,提前提升为合成层;视口外的行被引擎设为 visibility: hidden,
-       不会真的占用位图内存 */
-    will-change: translate;
     transition:
       --lyric-fill calc(560ms * var(--lyric-tempo, 1)) cubic-bezier(0.22, 1, 0.36, 1),
       --lyric-idle calc(560ms * var(--lyric-tempo, 1)) cubic-bezier(0.22, 1, 0.36, 1),
@@ -1039,14 +1259,17 @@
     &.distance-5 {
       --line-distance: 5;
     }
+    // 唱完后保留一层亮度；仍比正在唱的白色弱，不会与未唱的行一起骤暗。
+    &.completed {
+      opacity: calc(0.46 - var(--line-distance) * 0.025);
+    }
     &:hover:not(.active) {
-      --lyric-fill: rgba(255, 255, 255, 0.48);
-      --lyric-idle: rgba(255, 255, 255, 0.48);
+      opacity: 0.56;
     }
 
     &.active {
       --lyric-fill: #fff;
-      --lyric-idle: rgba(255, 255, 255, 0.34);
+      --lyric-idle: rgba(255, 255, 255, 0.36);
 
       opacity: 1;
       filter: blur(0);
@@ -1082,15 +1305,8 @@
     z-index: 1;
     display: block;
     color: var(--lyric-fill);
-    scale: 1;
+    scale: var(--lyric-line-scale, 1);
     transform-origin: inherit;
-    transition: scale calc(560ms * var(--lyric-tempo, 1)) cubic-bezier(0.16, 1, 0.3, 1);
-  }
-
-  .lyric-line.active .lyric-original,
-  .lyric-line.active .lyric-translation,
-  .lyric-line.active .lyric-roman {
-    scale: 1.012;
   }
 
   /* 逐字扫光:每个音节是一个独立的行内块,用背景渐变裁到文字上。
@@ -1115,10 +1331,8 @@
     /* 不支持 background-clip: text 时保持普通文字颜色。
        没有这层兜底,color: transparent 会让整屏歌词直接消失 */
     color: var(--lyric-fill);
-    /* 上浮直接由演唱进度推导:唱到哪抬到哪,唱完保持抬起,不再弹回。
-       用脉冲包络的话每个词都会"上去再掉下来",那不是 Apple Music 的做法。
-       未激活行的进度恒为 1,整行统一抬起,视觉上等同于没有位移 */
-    translate: 0 calc(var(--lyric-word-fill) * -0.05em);
+    // 扫光和上浮各自计时，短音节唱完后仍能自然完成抬起。
+    translate: 0 calc(var(--lyric-word-rise, 0) * -0.05em);
   }
 
   @supports (background-clip: text) or (-webkit-background-clip: text) {
@@ -1140,20 +1354,78 @@
     }
   }
 
-  /* 唱过的部分更亮:纯白已经到顶,再要"更亮"只能靠光晕,随演唱进度渐强。
-     只挂在当前行上——未激活行的进度恒为 1,不加限定会让整屏歌词一起发光。
-     底部深色投影沿用行级的那一层,否则亮底封面上会看不清 */
-  .lyric-line.active .lyric-word {
+  // 字符会独立变换，用父词遮罩覆盖其绘制结果，避免 background-clip 裁掉浮动字形。
+  .lyric-word.emphasized {
+    color: var(--lyric-fill);
+    background-image: none;
+
+    &.unbroken {
+      // 字符 inline-block 的默认断行机会会令 Ohhh 在词内部折行。
+      // 只锁定短英文长音；中文、真实空格及普通超长词仍能正常折行。
+      max-width: none;
+      white-space: nowrap;
+      overflow-wrap: normal;
+    }
+  }
+
+  @supports (mask-image: linear-gradient(#000, #000)) or
+    (-webkit-mask-image: linear-gradient(#000, #000)) {
+    .lyric-word.emphasized {
+      --lyric-word-mask: linear-gradient(
+        90deg,
+        #000 0%,
+        #000 calc(var(--lyric-word-fill) * 100%),
+        rgba(0, 0, 0, var(--lyric-mask-idle))
+          calc(var(--lyric-word-fill) * 100% + var(--lyric-edge) * var(--lyric-word-edge)),
+        rgba(0, 0, 0, var(--lyric-mask-idle)) 100%
+      );
+
+      -webkit-mask-image: var(--lyric-word-mask);
+      mask-image: var(--lyric-word-mask);
+    }
+  }
+
+  .lyric-char {
+    display: inline-block;
+    white-space: pre;
+    translate: 0 calc(var(--lyric-char-emphasis, 0) * -0.035em);
+    scale: calc(1 + var(--lyric-char-emphasis, 0) * 0.045);
+    text-shadow:
+      0 0 0.22em rgba(255, 255, 255, calc(var(--lyric-char-emphasis, 0) * 0.3)),
+      0 8px 34px rgba(0, 0, 0, 0.3);
+  }
+
+  // 已唱词保留持续辉光，长音在这一层之上增加轻微强调。
+  .lyric-line.active .lyric-word,
+  .lyric-line.active .lyric-char {
     text-shadow:
       0 0 calc(var(--lyric-word-fill) * 0.34em)
-        rgba(255, 255, 255, calc(var(--lyric-word-fill) * 0.42)),
+        rgba(
+          255,
+          255,
+          255,
+          calc(var(--lyric-word-fill) * 0.42 + var(--lyric-char-emphasis, 0) * 0.18)
+        ),
       0 0 calc(var(--lyric-word-fill) * 0.9em)
         rgba(255, 255, 255, calc(var(--lyric-word-fill) * 0.16)),
       0 8px 34px rgba(0, 0, 0, 0.3);
   }
 
+  .lyric-line.background .lyric-word {
+    translate: 0 calc(var(--lyric-word-rise, 0) * -0.08em);
+  }
+
+  .lyric-line:not(.active) .lyric-word,
+  .lyric-line:not(.active) .lyric-char {
+    transition:
+      translate 320ms ease-out,
+      scale 320ms ease-out,
+      text-shadow 320ms ease-out;
+  }
+
   /* 浏览态下整行压平,发光也一并关掉 */
-  .lyrics-panel.browsing .lyric-line.active .lyric-word {
+  .lyrics-panel.browsing .lyric-line.active .lyric-word,
+  .lyrics-panel.browsing .lyric-line.active .lyric-char {
     text-shadow: none;
   }
 
@@ -1199,6 +1471,12 @@
     translate: none;
   }
 
+  .lyrics-panel.browsing .lyric-char {
+    translate: none;
+    scale: 1;
+    text-shadow: none;
+  }
+
   .lyrics-panel.browsing .lyric-line {
     opacity: 0.72;
     filter: blur(0);
@@ -1210,14 +1488,8 @@
     }
 
     &.active {
-      --lyric-fill: rgba(255, 255, 255, 0.84);
-      --lyric-idle: rgba(255, 255, 255, 0.84);
-
-      .lyric-original,
-      .lyric-translation,
-      .lyric-roman {
-        scale: 1;
-      }
+      --lyric-idle: #fff;
+      --lyric-mask-idle: 1;
     }
   }
 
@@ -1238,6 +1510,8 @@
     transform-origin: left top;
     scale: calc(0.94 + 0.06 * var(--lyric-harmony));
     filter: blur(calc((1 - var(--lyric-harmony)) * 6px));
+    // 展开进度已经由弹簧逐帧推进，不能再让 CSS scale 过渡滞后于占位与裁切。
+    transition: none;
   }
 
   .lyric-line.background.secondary .lyric-original,
@@ -1262,7 +1536,25 @@
     pointer-events: none;
   }
 
+  // 停下来后回到清晰的阅读状态，沿用有限的亮度/模糊过渡，不启动待机循环。
+  .lyrics-panel.paused:not(.browsing) .lyric-line {
+    opacity: calc(0.5 - var(--line-distance) * 0.035);
+    filter: blur(calc(var(--line-distance) * 0.3px));
+
+    &.active {
+      opacity: 0.86;
+      filter: none;
+    }
+  }
+
+  .lyrics-panel.waiting:not(.browsing) .lyric-line.distance-0:not(.active) {
+    opacity: 0.52;
+    filter: none;
+  }
+
   .lyrics-panel.animation-disabled {
+    .lyric-waiting-enter-active,
+    .lyric-waiting-leave-active,
     .lyric-state-change-enter-active,
     .lyric-state-change-leave-active,
     .lyric-line,
@@ -1273,8 +1565,12 @@
       animation-duration: 0ms;
     }
 
-    .lyric-word {
+    .lyric-word,
+    .lyric-char {
       translate: none;
+      scale: 1;
+      text-shadow: none;
+      transition: none;
     }
 
     .lyric-line.active .lyric-original,
@@ -1285,6 +1581,8 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .lyric-waiting-enter-active,
+    .lyric-waiting-leave-active,
     .lyric-state-change-enter-active,
     .lyric-state-change-leave-active,
     .lyric-line,
@@ -1294,17 +1592,22 @@
       transition-duration: 0ms;
     }
 
-    .lyric-word {
+    .lyric-word,
+    .lyric-char {
       translate: none;
+      scale: 1;
+      text-shadow: none;
+      transition: none;
     }
   }
 
   @media (max-width: 720px) {
-    .lyrics-content {
+    .lyrics-content,
+    .lyric-waiting {
       --lyric-responsive-size: clamp(22px, 6.75vw, 30px);
       --lyric-responsive-gap: clamp(18px, 5.5vw, 26px);
 
-      inset: 0 7% 0 7%;
+      left: 7%;
     }
 
     .lyric-line {
@@ -1318,13 +1621,15 @@
       container-type: size;
     }
 
-    .lyrics-content {
+    .lyrics-content,
+    .lyric-waiting {
       --lyric-responsive-size: clamp(24px, min(6cqw, 6cqh), 34px);
       --lyric-responsive-gap: clamp(18px, min(5cqw, 5cqh), 28px);
     }
 
     @media (max-width: 720px) {
-      .lyrics-content {
+      .lyrics-content,
+      .lyric-waiting {
         --lyric-responsive-size: clamp(22px, min(6.75cqw, 8cqh), 30px);
         --lyric-responsive-gap: clamp(18px, min(5.5cqw, 6cqh), 26px);
       }
@@ -1333,12 +1638,16 @@
 
   @media (prefers-contrast: more) {
     .lyric-line {
-      --lyric-idle: rgba(255, 255, 255, 0.55);
-
-      opacity: 0.55;
+      --lyric-mask-idle: 0.62;
+      opacity: 0.65;
       filter: blur(0);
 
+      &.completed {
+        opacity: 0.8;
+      }
+
       &.active {
+        --lyric-fill: #fff;
         --lyric-idle: rgba(255, 255, 255, 0.62);
 
         opacity: 1;
@@ -1347,6 +1656,12 @@
 
     .lyrics-panel.browsing .lyric-line {
       opacity: 0.72;
+    }
+
+    .lyrics-panel.paused:not(.browsing) .lyric-line,
+    .lyrics-panel.waiting:not(.browsing) .lyric-line.distance-0:not(.active) {
+      opacity: 0.8;
+      filter: none;
     }
   }
 </style>

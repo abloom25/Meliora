@@ -38,11 +38,46 @@ describe('spring', () => {
     expect(Math.sign(state.velocity)).toBe(Math.sign(movingVelocity))
   })
 
+  it.each([0.75, 1, 1.4])(
+    'follows the same trajectory across frame partitions at damping ratio %s',
+    (dampingRatio) => {
+      const config = springFromDuration(0.5, dampingRatio)
+      const reference = createSpringState(120, -35)
+      stepSpring(reference, 10, config, 0.2)
+
+      // 200ms at 30 / 60 / 120Hz must end at the same position and velocity.
+      for (const frames of [6, 12, 24]) {
+        const sampled = createSpringState(120, -35)
+        for (let frame = 0; frame < frames; frame += 1) {
+          stepSpring(sampled, 10, config, 0.2 / frames)
+        }
+        expect(sampled.value).toBeCloseTo(reference.value, 9)
+        expect(sampled.velocity).toBeCloseTo(reference.velocity, 9)
+      }
+    },
+  )
+
+  it('matches the critically damped solution with initial velocity and non-unit mass', () => {
+    const state = createSpringState(80, -25)
+    const target = 10
+    const time = 0.12
+    const frequency = 10
+    const decay = Math.exp(-frequency * time)
+    const coefficient = state.velocity + frequency * (state.value - target)
+    const position = target + decay * (state.value - target + coefficient * time)
+    const velocity = decay * (state.velocity - frequency * coefficient * time)
+
+    stepSpring(state, target, { stiffness: 200, damping: 40, mass: 2 }, time)
+
+    expect(state.value).toBeCloseTo(position, 9)
+    expect(state.velocity).toBeCloseTo(velocity, 9)
+  })
+
   it('stays stable when a frame is dropped instead of exploding', () => {
     const config = springFromDuration(0.4, 0.9)
     const state = createSpringState(200)
 
-    // 单帧 120ms(掉帧):显式积分在这种步长下会发散,子步积分不会
+    // 单帧 120ms(掉帧):闭式解直接沿原轨迹推进，不会因步长过大而发散。
     stepSpring(state, 0, config, 0.12)
     expect(Number.isFinite(state.value)).toBe(true)
     expect(Math.abs(state.value)).toBeLessThanOrEqual(200)
