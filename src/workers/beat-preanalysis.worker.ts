@@ -204,7 +204,11 @@ async function build(request: BeatPreanalysisBuildRequest, current: number): Pro
       }
     }
     if (!active()) return
-    const audio = { channels: request.channels, sampleRate: request.sampleRate }
+    const audio = {
+      channels: request.channels,
+      sampleRate: request.sampleRate,
+      identity: request.audioIdentity,
+    }
     const audioBuffers = request.channels.map((channel) => channel.buffer as ArrayBuffer)
     if (completed.size < ranges.length) {
       const saved = checkpoint()

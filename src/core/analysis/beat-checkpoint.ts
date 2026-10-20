@@ -29,6 +29,7 @@ export interface BeatAnalysisCheckpoint {
 export interface BeatCheckpointAudio {
   channels: Float32Array[]
   sampleRate: number
+  identity?: string
 }
 
 export function cloneBeatSeam(seam: BeatThisSeamCheckpoint): BeatThisSeamCheckpoint {

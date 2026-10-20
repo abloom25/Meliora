@@ -1,9 +1,11 @@
 // Frontend used by CPJKU/beat_this (MIT): beat_this/preprocessing.py.
 // Periodic Hann, centered reflection, magnitude / sqrt(n_fft), Slaney mel, log1p.
+import { createBeatFeatureCache, type BeatFeatureCache } from './beat-feature-cache'
 export const BEAT_THIS_SAMPLE_RATE = 22050
 export const BEAT_THIS_HOP_SIZE = 441
 export const BEAT_THIS_BANDS = 128
 export const BEAT_THIS_FPS = 50
+export const BEAT_THIS_CHUNK_FRAMES = 1500
 const FFT_SIZE = 1024
 const FFT_BINS = FFT_SIZE / 2 + 1
 const RESAMPLE_PHASES = 512
@@ -17,14 +19,16 @@ export interface BeatThisFeaturesBuilder {
   /** Total frame count, known without processing the full song. */
   readonly frames: number
   readonly processedFrames: number
-  process(maxFrames: number): number
+  readonly reusedFrames: number
+  /** Allocated frequency pages, including readiness flags; excludes PCM, FFT scratch and chunks. */
+  readonly residentBytes: number
+  readonly peakResidentBytes: number
   /** Computes only the requested absolute frame range; already cached frames are skipped. */
   processRange(startFrame: number, endFrame: number, maxFrames: number): number
+  /** Current resident fraction, which can decrease when a seek evicts an unfinished window. */
+  rangeProgress(startFrame: number, endFrame: number): number
   /** Copies a fully computed model window, padding beyond physical song boundaries only. */
   chunk(startFrame: number, frameCount: number): Float32Array
-  /** Read-only view of the computed prefix; unbuilt future frames are not exposed. */
-  view(): BeatThisSpectrogram
-  finish(): BeatThisSpectrogram
 }
 
 /** Reflection matches torch.stft(center=True, pad_mode='reflect'). */
@@ -46,7 +50,20 @@ function createMonoSignal(channels: readonly Float32Array[], sampleRate: number)
   const inputLength = channels[0]!.length
   const ratio = sampleRate / BEAT_THIS_SAMPLE_RATE
   const length = Math.max(1, Math.round(inputLength / ratio))
-  const output = new Float32Array(length)
+  // STFT only needs a small neighbourhood. Keep a bounded ring of blocks rather
+  // than allocating a second full-song PCM buffer on every resumed build.
+  const blockSize = 2048
+  const output = new Map<number, Float32Array>()
+  const keep = (block: number, values: Float32Array): void => {
+    if (output.size >= 8) output.delete(output.keys().next().value!)
+    output.set(block, values)
+  }
+  const sample = (index: number): number => {
+    const position = reflect(index, length)
+    const block = output.get(Math.floor(position / blockSize))
+    if (!block) throw new Error('音频窗口尚未准备完成')
+    return block[position % blockSize]!
+  }
   const mix = (index: number): number => {
     let value = 0
     for (const channel of channels) {
@@ -60,11 +77,22 @@ function createMonoSignal(channels: readonly Float32Array[], sampleRate: number)
     return {
       length,
       ensure(firstIndex, lastIndex) {
-        const end = Math.min(length, lastIndex + 1)
-        for (let index = Math.max(0, firstIndex); index < end; index += 1)
-          output[index] = mix(index)
+        const firstBlock = Math.floor(Math.max(0, firstIndex) / blockSize)
+        const lastBlock = Math.floor(Math.min(length - 1, lastIndex) / blockSize)
+        for (let block = firstBlock; block <= lastBlock; block += 1) {
+          const existing = output.get(block)
+          if (existing) {
+            output.delete(block)
+            output.set(block, existing)
+            continue
+          }
+          const first = block * blockSize
+          const values = new Float32Array(Math.min(blockSize, length - first))
+          for (let index = 0; index < values.length; index += 1) values[index] = mix(first + index)
+          keep(block, values)
+        }
       },
-      sample: (index) => output[reflect(index, length)]!,
+      sample,
     }
   }
   const radius = Math.ceil(32 * Math.max(1, ratio))
@@ -92,17 +120,21 @@ function createMonoSignal(channels: readonly Float32Array[], sampleRate: number)
   }
   // Every input sample is averaged just once, even though adjacent sinc windows overlap.
   const ring = new Float32Array(taps + Math.ceil(ratio) + 2)
-  const blockSize = 2048
-  const cached = new Uint8Array(Math.ceil(length / blockSize))
   return {
     length,
     ensure(firstIndex, lastIndex) {
       const firstBlock = Math.floor(Math.max(0, firstIndex) / blockSize)
       const lastBlock = Math.floor(Math.min(length - 1, lastIndex) / blockSize)
       for (let block = firstBlock; block <= lastBlock; block += 1) {
-        if (cached[block]) continue
+        const existing = output.get(block)
+        if (existing) {
+          output.delete(block)
+          output.set(block, existing)
+          continue
+        }
         const first = block * blockSize
         const end = Math.min(length, first + blockSize)
+        const values = new Float32Array(end - first)
         let mixed = Math.max(0, Math.floor(first * ratio) - radius)
         for (let index = first; index < end; index += 1) {
           const position = index * ratio
@@ -123,20 +155,21 @@ function createMonoSignal(channels: readonly Float32Array[], sampleRate: number)
             const b = coefficients[(phase + 1) * taps + tap]!
             value += ring[input % ring.length]! * (a + fraction * (b - a))
           }
-          output[index] = value
+          values[index - first] = value
         }
-        cached[block] = 1
+        keep(block, values)
       }
     },
-    sample: (index) => output[reflect(index, length)]!,
+    sample,
   }
 }
 
-/** Builds all features in bounded batches; the large PCM never leaves its worker. */
+/** Builds only requested windows. The page cache is the sole resident spectrogram storage. */
 export function createBeatThisFeaturesBuilder(
   channels: readonly Float32Array[],
   sampleRate: number,
   filterbank: Float32Array,
+  cache?: BeatFeatureCache,
 ): BeatThisFeaturesBuilder {
   const length = channels[0]?.length ?? 0
   if (
@@ -158,7 +191,8 @@ export function createBeatThisFeaturesBuilder(
   }
   const signal = createMonoSignal(channels, sampleRate)
   const frames = Math.floor(signal.length / BEAT_THIS_HOP_SIZE) + 1
-  const data = new Float32Array(frames * BEAT_THIS_BANDS)
+  const storage = cache ?? createBeatFeatureCache()
+  const frameValues = new Float32Array(BEAT_THIS_BANDS)
   const real = new Float64Array(FFT_SIZE)
   const imaginary = new Float64Array(FFT_SIZE)
   const magnitude = new Float32Array(FFT_BINS)
@@ -194,8 +228,27 @@ export function createBeatThisFeaturesBuilder(
     }
   }
   let processed = 0
-  let prefixFrames = 0
-  const computed = new Uint8Array(frames)
+  let reused = 0
+  // Cumulative accounting is independent of residency. A few merged intervals
+  // replace the full-song bitmap, and an evicted frame never counts twice.
+  const visited: Array<{ start: number; end: number }> = []
+  function completeFrame(frame: number, cached: boolean): void {
+    let index = 0
+    while (index < visited.length && visited[index]!.end < frame) index++
+    const range = visited[index]
+    if (range && range.start <= frame && range.end > frame) return
+    processed++
+    if (cached) reused++
+    if (range?.end === frame) {
+      range.end++
+      const next = visited[index + 1]
+      if (next?.start === range.end) {
+        range.end = next.end
+        visited.splice(index + 1, 1)
+      }
+    } else if (range?.start === frame + 1) range.start = frame
+    else visited.splice(index, 0, { start: frame, end: frame + 1 })
+  }
   function processFrame(frame: number): void {
     const center = frame * BEAT_THIS_HOP_SIZE
     const firstSample = center - FFT_SIZE / 2
@@ -242,26 +295,45 @@ export function createBeatThisFeaturesBuilder(
       for (let index = 0; index < filter.bins.length; index += 1) {
         power += magnitude[filter.bins[index]!]! * filter.weights[index]!
       }
-      data[frame * BEAT_THIS_BANDS + band] = Math.log1p(Math.fround(1000 * Math.fround(power)))
+      frameValues[band] = Math.log1p(Math.fround(1000 * Math.fround(power)))
     }
-    computed[frame] = 1
-    processed += 1
-    while (prefixFrames < frames && computed[prefixFrames]) prefixFrames += 1
+    storage.write(frame, frameValues, 0)
+    completeFrame(frame, false)
+  }
+  function physicalRange(startFrame: number, endFrame: number): { first: number; end: number } {
+    if (
+      !Number.isSafeInteger(startFrame) ||
+      !Number.isSafeInteger(endFrame) ||
+      endFrame <= startFrame ||
+      endFrame - startFrame > BEAT_THIS_CHUNK_FRAMES
+    )
+      throw new Error('节拍分析窗口无效')
+    return {
+      first: Math.min(frames, Math.max(0, startFrame)),
+      end: Math.min(frames, Math.max(0, endFrame)),
+    }
+  }
+  function rangeProgress(startFrame: number, endFrame: number): number {
+    const { first, end } = physicalRange(startFrame, endFrame)
+    let complete = 0
+    for (let frame = first; frame < end; frame++) if (storage.has(frame)) complete++
+    return end <= first ? 1 : complete / (end - first)
   }
   function processRange(startFrame: number, endFrame: number, maxFrames: number): number {
     if (!Number.isFinite(maxFrames) || maxFrames < 1) throw new Error('节拍分析批次大小无效')
-    if (!Number.isInteger(startFrame) || !Number.isInteger(endFrame) || endFrame <= startFrame)
-      throw new Error('节拍分析窗口无效')
-    const first = Math.max(0, startFrame)
-    const end = Math.min(frames, endFrame)
+    const { first, end } = physicalRange(startFrame, endFrame)
+    storage.prepareRange(first, end)
     let remaining = Math.floor(maxFrames)
     let complete = 0
     for (let frame = first; frame < end; frame += 1) {
-      if (!computed[frame] && remaining > 0) {
+      if (storage.has(frame)) {
+        completeFrame(frame, true)
+        complete++
+      } else if (remaining > 0) {
         processFrame(frame)
         remaining -= 1
+        complete++
       }
-      complete += computed[frame]!
     }
     return end <= first ? 1 : complete / (end - first)
   }
@@ -270,32 +342,26 @@ export function createBeatThisFeaturesBuilder(
     get processedFrames() {
       return processed
     },
-    process(maxFrames) {
-      processRange(0, frames, maxFrames)
-      return processed / frames
+    get reusedFrames() {
+      return reused
+    },
+    get residentBytes() {
+      return storage.bytes
+    },
+    get peakResidentBytes() {
+      return storage.peakBytes
     },
     processRange,
+    rangeProgress,
     chunk(startFrame, frameCount) {
-      if (!Number.isInteger(startFrame) || !Number.isInteger(frameCount) || frameCount < 1)
-        throw new Error('节拍分析窗口无效')
-      const first = Math.max(0, startFrame)
-      const end = Math.min(frames, startFrame + frameCount)
-      if (computed.subarray(first, end).some((value) => !value))
-        throw new Error('Beat This! 当前窗口特征尚未完成')
+      if (!Number.isSafeInteger(frameCount) || frameCount < 1) throw new Error('节拍分析窗口无效')
+      const { first, end } = physicalRange(startFrame, startFrame + frameCount)
+      for (let frame = first; frame < end; frame++)
+        if (!storage.has(frame)) throw new Error('Beat This! 当前窗口特征尚未完成或已被回收')
       const result = new Float32Array(frameCount * BEAT_THIS_BANDS)
-      if (end > first)
-        result.set(
-          data.subarray(first * BEAT_THIS_BANDS, end * BEAT_THIS_BANDS),
-          (first - startFrame) * BEAT_THIS_BANDS,
-        )
+      for (let frame = first; frame < end; frame++)
+        storage.read(frame, result, (frame - startFrame) * BEAT_THIS_BANDS)
       return result
-    },
-    view() {
-      return { frames: prefixFrames, data: data.subarray(0, prefixFrames * BEAT_THIS_BANDS) }
-    },
-    finish() {
-      if (processed !== frames) throw new Error('Beat This! 音频特征尚未构建完成')
-      return { frames, data }
     },
   }
 }

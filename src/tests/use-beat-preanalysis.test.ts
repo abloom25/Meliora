@@ -1,11 +1,14 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { defineComponent, h, ref } from 'vue'
+import { defineComponent, h, ref, type Ref } from 'vue'
 import type { BeatTimeline } from '../core/analysis/beat-timeline'
-import type { BeatAnalysisMode } from '../core/types'
+import type { BeatAnalysisMode, Track } from '../core/types'
 import { LruCache } from '../core/util/lru-cache'
 import type { BeatTimelineBuilder } from '../platform/web/beat-preanalysis'
 import { useBeatPreanalysis } from '../platform/web/useBeatPreanalysis'
+import * as preanalysisHost from '../platform/web/beat-preanalysis'
+import { recordListening, clearListeningHistory } from '../platform/web/listening-history'
+import { createBeatCheckpoint } from '../core/analysis/beat-checkpoint'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -33,9 +36,14 @@ function fixtureTimeline(): BeatTimeline {
 
 const wrappers: VueWrapper[] = []
 
-function harness(initiallyEnabled = true, initialUnavailableReason: string | null = null) {
+function harness(
+  initiallyEnabled = true,
+  initialUnavailableReason: string | null = null,
+  track?: Ref<Track | null>,
+) {
   const source = ref('/song-a.mp3')
   const enabled = ref(initiallyEnabled)
+  const debugEnabled = ref(false)
   const unavailableReason = ref<string | null>(initialUnavailableReason)
   const durationSeconds = ref(1)
   const mode = ref<BeatAnalysisMode>('basic')
@@ -60,8 +68,10 @@ function harness(initiallyEnabled = true, initialUnavailableReason: string | nul
         controller = useBeatPreanalysis(
           {
             source,
+            track,
             mode,
             enabled,
+            debugEnabled,
             unavailableReason,
             durationSeconds,
             getPlaybackSeconds: () => playback.value,
@@ -77,6 +87,7 @@ function harness(initiallyEnabled = true, initialUnavailableReason: string | nul
     source,
     mode,
     enabled,
+    debugEnabled,
     unavailableReason,
     jobs,
     build,
@@ -92,6 +103,70 @@ afterEach(() => {
 })
 
 describe('useBeatPreanalysis playback lifecycle', () => {
+  it('keeps build metrics scoped to the current source and ignores cancelled callbacks', async () => {
+    const { controller, debugEnabled, build, source } = harness()
+    debugEnabled.value = true
+    controller.start()
+    await flushPromises()
+    const oldMetrics = build.mock.calls[0]![3]!.onMetrics!
+    oldMetrics({
+      totalMs: 40,
+      initializationMs: 0,
+      inferenceMs: 0,
+      sessionReused: false,
+      cacheOrigin: 'persistent',
+      cacheReadyMs: 25,
+      cacheOnly: true,
+    })
+    expect(controller.debugSnapshot.value?.metrics).toMatchObject({
+      cacheOnly: true,
+      cacheReadyMs: 25,
+    })
+    source.value = '/other-song.mp3'
+    await flushPromises()
+    oldMetrics({ totalMs: 999, initializationMs: 0, inferenceMs: 0, sessionReused: false })
+    expect(controller.debugSnapshot.value?.metrics).toBeUndefined()
+  })
+
+  it('persists an already ready short track when its second listening visit qualifies', async () => {
+    const persist = vi
+      .spyOn(preanalysisHost, 'persistKnownBeatCheckpoint')
+      .mockImplementation(() => {})
+    const source = ref('/short-qualification.mp3')
+    const track = ref({
+      id: 'short-qualification',
+      kind: 'local' as const,
+      title: 'Short',
+      artist: '',
+      audioUrl: source.value,
+    })
+    const timeline = fixtureTimeline()
+    const checkpoint = createBeatCheckpoint(
+      { sampleRate: 48000, sampleCount: 48000, channels: 2, modelId: 'basic' },
+      timeline,
+      new Set([0]),
+      1,
+    )
+    const test = harness(true, null, track)
+    test.source.value = source.value
+    test.controller.start()
+    await flushPromises()
+    test.build.mock.calls[0]![3]!.onCheckpoint?.(checkpoint)
+    test.jobs[0]!.resolve(timeline)
+    await flushPromises()
+    expect(test.controller.status.value.phase).toBe('ready')
+    recordListening(track.value, 0.5, true)
+    expect(persist).not.toHaveBeenCalled()
+    recordListening(track.value, 0.5, true)
+    expect(persist).toHaveBeenCalledExactlyOnceWith(
+      source.value,
+      JSON.stringify(['local', track.value.id]),
+      expect.objectContaining({ completedWindows: [0] }),
+    )
+    expect(test.build).toHaveBeenCalledOnce()
+    persist.mockRestore()
+    await clearListeningHistory().catch(() => {})
+  })
   it('forwards pause, rate, and seek-state changes within the same media second', async () => {
     const h = harness()
     h.controller.start()
@@ -214,10 +289,12 @@ describe('useBeatPreanalysis playback lifecycle', () => {
       durationSeconds: 1,
       checkpoint: undefined,
       onCheckpoint: expect.any(Function),
+      onMetrics: expect.any(Function),
       getBufferSeconds: expect.any(Function),
       maxWindows: 3,
       subscribeYield: expect.any(Function),
       onPartial: expect.any(Function),
+      onPreview: expect.any(Function),
       getPrioritySeconds: expect.any(Function),
       getPlaybackState: expect.any(Function),
       subscribePriority: expect.any(Function),
@@ -256,15 +333,19 @@ describe('useBeatPreanalysis playback lifecycle', () => {
       durationSeconds: 1,
       checkpoint: undefined,
       onCheckpoint: expect.any(Function),
+      onMetrics: expect.any(Function),
       getBufferSeconds: expect.any(Function),
       maxWindows: 3,
       subscribeYield: expect.any(Function),
       onPartial: expect.any(Function),
+      onPreview: expect.any(Function),
       getPrioritySeconds: expect.any(Function),
       getPlaybackState: expect.any(Function),
       subscribePriority: expect.any(Function),
     })
     const onStatus = h.build.mock.calls[0]![2]
+    h.build.mock.calls[0]![3]!.onPreview!(fixtureTimeline())
+    expect(h.controller.provisionalTimeline.value).toBeNull()
     onStatus({ phase: 'analysing', progress: 0.5, error: null })
     expect(h.controller.timeline.value).toBeNull()
     expect(h.controller.status.value.phase).toBe('analysing')

@@ -1,5 +1,7 @@
 import {
   createBeatTimelineBuilder,
+  snapshotBeatTimeline,
+  isBeatTimelineReadyAt,
   type BeatTimeRange,
   type BeatTimelineBuilder,
 } from '../core/analysis/beat-timeline'
@@ -36,11 +38,33 @@ import type {
   BeatThisResponse,
 } from '../core/analysis/beat-this-protocol'
 import { BEAT_THIS_PROBES } from '../core/analysis/beat-this-probes'
+import type { BeatInferenceMetrics } from '../core/analysis/beat-preanalysis-protocol'
+import { createBeatFeatureCache, type BeatFeatureCache } from '../core/analysis/beat-feature-cache'
 
 let generation = 0
 let updatePlayback: ((state: BeatPlaybackState, bufferSeconds?: number) => void) | null = null
 let wakeBuild: (() => void) | null = null
 let requestYield: (() => void) | null = null
+type Session = import('onnxruntime-web/all').InferenceSession
+let retained: {
+  session: Session
+  modelId: BeatThisBuildRequest['modelId']
+  model: ArrayBuffer
+  filterbank: ArrayBuffer
+  backend: 'webgpu' | 'wasm'
+  probeMs: number
+} | null = null
+let buildQueue: Promise<void> = Promise.resolve()
+// At most two exact audio identities, each with <=802 KiB of recent log-mel pages.
+// No retained feature cache owns PCM or survives this worker's session lifetime.
+const featureCaches = new Map<string, BeatFeatureCache>()
+
+async function disposeRetainedSession(): Promise<void> {
+  featureCaches.clear()
+  const previous = retained
+  retained = null
+  await previous?.session.release().catch(() => undefined)
+}
 
 function reply(message: BeatThisResponse, transfer: Transferable[] = []): void {
   self.postMessage(message, { transfer })
@@ -49,7 +73,19 @@ function reply(message: BeatThisResponse, transfer: Transferable[] = []): void {
 const yieldThread = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
 async function build(request: BeatThisBuildRequest, current: number): Promise<void> {
-  let session: import('onnxruntime-web/all').InferenceSession | null = null
+  const reusable = request.retainSession && retained?.modelId === request.modelId ? retained : null
+  if (!reusable) featureCaches.clear()
+  if (retained && !reusable) await disposeRetainedSession()
+  let session: Session | null = reusable?.session ?? null
+  let backend: 'webgpu' | 'wasm' | undefined = reusable?.backend
+  let probeMs = reusable?.probeMs ?? 0
+  const metrics: BeatInferenceMetrics = {
+    initializationMs: 0,
+    inferenceMs: 0,
+    sessionReused: reusable !== null,
+    backend,
+  }
+  let successful = false
   let reportedProgress = 0
   let activeRange: BeatTimeRange | undefined
   const active = (): boolean => current === generation
@@ -60,14 +96,53 @@ async function build(request: BeatThisBuildRequest, current: number): Promise<vo
   const closeSession = async (): Promise<void> => {
     const previous = session
     session = null
+    if (retained?.session === previous) retained = null
     await previous?.release().catch(() => undefined)
   }
+  const preserveOrClose = async (): Promise<void> => {
+    if (request.retainSession && session && backend && active()) {
+      retained = {
+        session,
+        modelId: request.modelId,
+        model: model!,
+        filterbank: filterbank!,
+        backend,
+        probeMs,
+      }
+    } else await closeSession()
+    successful = true
+    metrics.backend = backend
+  }
+  const filterbank = reusable?.filterbank ?? request.filterbank
+  const model = reusable?.model ?? request.model
   try {
+    if (!filterbank || !model) throw new Error('Beat This! 模型会话已失效，请重新构建')
+    let featureCache: BeatFeatureCache | undefined
+    if (request.retainSession && request.audioIdentity) {
+      const key = JSON.stringify([
+        request.audioIdentity,
+        request.sampleRate,
+        request.channels.length,
+        request.channels[0]?.length,
+      ])
+      featureCache = featureCaches.get(key) ?? createBeatFeatureCache()
+      featureCaches.delete(key)
+      if (featureCaches.size >= 2) featureCaches.delete(featureCaches.keys().next().value!)
+      featureCaches.set(key, featureCache)
+    }
     const features = createBeatThisFeaturesBuilder(
       request.channels,
       request.sampleRate,
-      new Float32Array(request.filterbank),
+      new Float32Array(filterbank),
+      featureCache,
     )
+    const updateFeatureMetrics = (): void => {
+      metrics.featureFrames = features.processedFrames
+      metrics.reusedFeatureFrames = features.reusedFrames
+      metrics.featureResidentBytes = features.residentBytes
+      metrics.featurePeakResidentBytes = features.peakResidentBytes
+    }
+    metrics.featureInputBytes = 0
     const duration = request.channels[0]!.length / request.sampleRate
     const signature: BeatCheckpointSignature = {
       sampleRate: request.sampleRate,
@@ -85,7 +160,6 @@ async function build(request: BeatThisBuildRequest, current: number): Promise<vo
     if (!Number.isInteger(maximum) || maximum < 1) throw new Error('节拍构建窗口数量无效')
     let builtWindows = 0
     let yielded = false
-    let backend: 'webgpu' | 'wasm' | undefined
     const work = createBeatSchedulingController(
       duration,
       request.playback ?? {
@@ -152,11 +226,16 @@ async function build(request: BeatThisBuildRequest, current: number): Promise<vo
         0.25,
       )
     const returnBuffer = async (): Promise<void> => {
-      await closeSession()
+      await preserveOrClose()
       if (!active()) return
       const saved = checkpoint()
-      const audio = { channels: request.channels, sampleRate: request.sampleRate }
-      reply({ type: 'buffered', checkpoint: saved, audio, backend }, [
+      const audio = {
+        channels: request.channels,
+        sampleRate: request.sampleRate,
+        identity: request.audioIdentity,
+      }
+      updateFeatureMetrics()
+      reply({ type: 'buffered', checkpoint: saved, audio, backend, metrics }, [
         ...beatCheckpointBuffers(saved),
         ...request.channels.map((channel) => channel.buffer as ArrayBuffer),
       ])
@@ -169,6 +248,90 @@ async function build(request: BeatThisBuildRequest, current: number): Promise<vo
     ) {
       await returnBuffer()
       return
+    }
+    interface PreparedWindow {
+      builder: BeatTimelineBuilder
+      basicProgress: number
+      featureProgress: number
+      workMs: number
+      previewPublished: boolean
+    }
+    // A preview owns only small timeline arrays, never another copy of the PCM.
+    // Retain at most two warmups while seeking; validated model checkpoints stay
+    // wholly separate from these temporary basic results.
+    const prepared = new Map<number, PreparedWindow>()
+    const prepare = (index: number): PreparedWindow => {
+      const window = windows[index]!
+      let job = prepared.get(index)
+      if (!job) {
+        const started = performance.now()
+        job = {
+          builder: createBeatTimelineBuilder(request.channels, request.sampleRate, {
+            startSeconds: Math.max(0, window.startFrame / BEAT_THIS_FPS),
+            endSeconds: Math.min(
+              duration,
+              (window.startFrame + BEAT_THIS_CHUNK_FRAMES) / BEAT_THIS_FPS + 0.1,
+            ),
+          }),
+          basicProgress: 0,
+          featureProgress: 0,
+          workMs: performance.now() - started,
+          previewPublished: false,
+        }
+      }
+      prepared.delete(index)
+      prepared.set(index, job)
+      if (prepared.size > 2) prepared.delete(prepared.keys().next().value!)
+      return job
+    }
+    const preview = (job: PreparedWindow): void => {
+      if (!active() || job.previewPublished) return
+      job.previewPublished = true
+      const timeline = snapshotBeatTimeline(job.builder.finish())
+      reply(
+        { type: 'preview', timeline },
+        [...timeline.levels, timeline.sustain].map((values) => values.buffer as ArrayBuffer),
+      )
+    }
+    // Basic analysis is cheap enough to provide a usable first region before
+    // model session creation/probing. Reuse this same builder for final blending.
+    let previewIndex: number | null = null
+    let previewRevision = -1
+    let previewStartupMs = 0
+    for (;;) {
+      await waitForStablePlayback()
+      if (!active()) return
+      if (yielded) {
+        await returnBuffer()
+        return
+      }
+      if (previewRevision !== revision) {
+        const playhead = work.playbackAt(performance.now()).timeSeconds
+        // Model work deliberately looks ahead by its measured inference cost.
+        // A display preview instead repairs the playhead's present gap, even
+        // when a resumed checkpoint predicts a much later model completion.
+        previewIndex = isBeatTimelineReadyAt(assembled.timeline, playhead)
+          ? null
+          : ranges.findIndex(
+              (range) => playhead >= range.startSeconds && playhead < range.endSeconds,
+            )
+        if (previewIndex === -1) previewIndex = null
+        previewRevision = revision
+      }
+      const index = previewIndex
+      if (index === null) break
+      activeRange = windows[index]!.range
+      const job = prepare(index)
+      const started = performance.now()
+      job.basicProgress = job.builder.process(120)
+      if (job.basicProgress >= 1) {
+        previewStartupMs += performance.now() - started
+        preview(job)
+        break
+      }
+      progress(0)
+      await yieldThread()
+      previewStartupMs += performance.now() - started
     }
     const initializationStarted = performance.now()
     const ort = await import('onnxruntime-web/all')
@@ -210,7 +373,7 @@ async function build(request: BeatThisBuildRequest, current: number): Promise<vo
       }
     }
     const openSession = async (backend: 'webgpu' | 'wasm'): Promise<void> => {
-      session = await ort.InferenceSession.create(request.model, {
+      session = await ort.InferenceSession.create(model, {
         executionProviders: [backend],
         graphOptimizationLevel: 'all',
       })
@@ -227,31 +390,28 @@ async function build(request: BeatThisBuildRequest, current: number): Promise<vo
       if (!matchesBeatThisProbe(probe.beat, probe.downbeat, BEAT_THIS_PROBES[request.modelId])) {
         throw new Error('Beat This! 推理结果校验未通过，请重新下载模型或切换基础模式')
       }
-      work.seedWorkDuration(performance.now() - started)
+      probeMs = performance.now() - started
+      work.seedWorkDuration(probeMs)
     }
-    backend = 'webgpu'
-    try {
-      await openSession('webgpu')
-    } catch {
-      await closeSession()
-      if (!active()) return
-      backend = 'wasm'
-      await openSession('wasm')
+    if (session) work.seedWorkDuration(probeMs)
+    else {
+      backend = 'webgpu'
+      try {
+        await openSession('webgpu')
+      } catch {
+        await closeSession()
+        if (!active()) return
+        backend = 'wasm'
+        await openSession('wasm')
+      }
+      metrics.initializationMs = performance.now() - initializationStarted
     }
     if (!active()) return
-    // Bounded jobs reopen the model on each batch. Include that startup in the
-    // first window's estimate so the next refill starts before its buffer runs out.
+    // Cold batches include initialization; warm batches estimate only useful
+    // work so the refill scheduler can adapt after the first successful window.
     let initializationMs =
-      bufferSeconds === undefined ? 0 : performance.now() - initializationStarted
-    interface PreparedWindow {
-      builder: BeatTimelineBuilder
-      basicProgress: number
-      featureProgress: number
-      workMs: number
-    }
-    // Features remain cached for the entire song. Keep only two DSP warmups so
-    // dragging through many positions cannot retain one full timeline per seek.
-    const prepared = new Map<number, PreparedWindow>()
+      previewStartupMs +
+      (bufferSeconds === undefined ? 0 : performance.now() - initializationStarted)
     windowLoop: while (completed.size < windows.length) {
       await waitForStablePlayback()
       if (!active()) return
@@ -261,25 +421,11 @@ async function build(request: BeatThisBuildRequest, current: number): Promise<vo
       const window = windows[index]!
       let selectedRevision = revision
       activeRange = window.range
-      let job = prepared.get(index)
-      if (!job) {
-        const started = performance.now()
-        job = {
-          builder: createBeatTimelineBuilder(request.channels, request.sampleRate, {
-            startSeconds: Math.max(0, window.startFrame / BEAT_THIS_FPS),
-            endSeconds: Math.min(
-              duration,
-              (window.startFrame + BEAT_THIS_CHUNK_FRAMES) / BEAT_THIS_FPS + 0.1,
-            ),
-          }),
-          basicProgress: 0,
-          featureProgress: 0,
-          workMs: performance.now() - started,
-        }
-      }
-      prepared.delete(index)
-      prepared.set(index, job)
-      if (prepared.size > 2) prepared.delete(prepared.keys().next().value!)
+      const job = prepare(index)
+      // A seek can retain this basic warmup while its frequency pages are evicted.
+      // Always revisit processRange: it rechecks residency and credits cache hits
+      // without doing FFT work for frames that are still available.
+      job.featureProgress = 0
       const reportWork = (): void =>
         progress(
           0.05 +
@@ -305,6 +451,7 @@ async function build(request: BeatThisBuildRequest, current: number): Promise<vo
         if (job.basicProgress >= 1 && job.featureProgress >= 1) break
         const started = performance.now()
         if (job.basicProgress < 1) job.basicProgress = job.builder.process(60)
+        if (job.basicProgress >= 1) preview(job)
         if (job.featureProgress < 1)
           job.featureProgress = features.processRange(
             window.startFrame,
@@ -316,18 +463,31 @@ async function build(request: BeatThisBuildRequest, current: number): Promise<vo
       }
       const started = performance.now()
       const input = features.chunk(window.startFrame, BEAT_THIS_CHUNK_FRAMES)
+      metrics.featureInputBytes = input.byteLength
       let output: { beat: Float32Array; downbeat: Float32Array }
       try {
-        output = await run(input)
+        const inferenceStarted = performance.now()
+        try {
+          output = await run(input)
+        } finally {
+          metrics.inferenceMs += performance.now() - inferenceStarted
+        }
       } catch (error) {
         if (backend === 'wasm') throw error
         await closeSession()
         if (!active()) return
         backend = 'wasm'
+        const fallbackStarted = performance.now()
         await openSession('wasm')
+        metrics.initializationMs += performance.now() - fallbackStarted
         if (!active()) return
         // Retry only this window. Earlier validated regions remain unchanged.
-        output = await run(input)
+        const inferenceStarted = performance.now()
+        try {
+          output = await run(input)
+        } finally {
+          metrics.inferenceMs += performance.now() - inferenceStarted
+        }
       }
       if (!active()) return
       const part = blendBeatThisTimeline(
@@ -354,7 +514,6 @@ async function build(request: BeatThisBuildRequest, current: number): Promise<vo
       await returnBuffer()
       return
     }
-    if (!request.checkpoint) features.finish()
     const timeline = assembled.timeline
     if (
       timeline.completedRanges?.length !== 1 ||
@@ -364,17 +523,23 @@ async function build(request: BeatThisBuildRequest, current: number): Promise<vo
       throw new Error('Beat This! 分段预测尚未完整覆盖歌曲')
     delete timeline.completedRanges
     delete timeline.builtUntilSeconds
-    // The host terminates this worker as soon as it receives completion. Release
-    // GPU allocations first instead of relying on a finally that may never run.
-    await closeSession()
+    updateFeatureMetrics()
+    await preserveOrClose()
     if (!active()) return
     reply(
       {
         type: 'complete',
         timeline,
-        backend,
+        backend: backend!,
+        metrics,
         ...(request.bufferSeconds !== undefined
-          ? { audio: { channels: request.channels, sampleRate: request.sampleRate } }
+          ? {
+              audio: {
+                channels: request.channels,
+                sampleRate: request.sampleRate,
+                identity: request.audioIdentity,
+              },
+            }
           : {}),
       },
       [...timeline.levels, timeline.sustain]
@@ -386,7 +551,8 @@ async function build(request: BeatThisBuildRequest, current: number): Promise<vo
         ),
     )
   } catch (error) {
-    // The host terminates this worker on an error as well as on success.
+    // Invalid inference or checkpoints must never re-enter the reusable pool.
+    successful = false
     await closeSession()
     if (active())
       reply({
@@ -399,7 +565,10 @@ async function build(request: BeatThisBuildRequest, current: number): Promise<vo
       wakeBuild = null
       requestYield = null
     }
-    await closeSession()
+    if (!successful) {
+      featureCaches.clear()
+      await closeSession()
+    }
   }
 }
 
@@ -427,5 +596,14 @@ self.onmessage = (event: MessageEvent<BeatThisRequest>): void => {
   wakeBuild = null
   updatePlayback = null
   requestYield = null
-  void build(event.data, generation)
+  const current = generation
+  const request = event.data
+  // A replaced job may still be returning from session.run(). Never release or
+  // reuse its session until that actual work settles.
+  buildQueue = buildQueue.then(async () => {
+    if (request.type === 'dispose') {
+      await disposeRetainedSession()
+      reply({ type: 'disposed' })
+    } else if (current === generation) await build(request, current)
+  })
 }

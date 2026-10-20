@@ -6,6 +6,29 @@ function pcm(samples = 4): BeatAudioData {
 }
 
 describe('bounded preanalysis audio cache', () => {
+  it('does not let neighbouring PCM evict the current song and releases protection on track change', () => {
+    const cache = createBeatAudioCache({ maxPcmBytes: 20 })
+    const current = { ...pcm(), identity: 'content-a' }
+    cache.protectPcm('current')
+    cache.putPcm('current', current)
+    cache.putPcm('next', pcm())
+    expect(cache.takePcm('next')).toBeUndefined()
+    expect(cache.takePcm('current')).toMatchObject({ identity: 'content-a' })
+    cache.putPcm('current', current)
+    cache.protectPcm('next')
+    cache.putPcm('next', pcm())
+    expect(cache.takePcm('current')).toBeUndefined()
+    expect(cache.pcmBytes).toBe(16)
+  })
+
+  it('keeps the byte bound when the protected song returns after a neighbour', () => {
+    const cache = createBeatAudioCache({ maxPcmBytes: 20 })
+    cache.protectPcm('current')
+    cache.putPcm('next', pcm())
+    cache.putPcm('current', pcm())
+    expect(cache.takePcm('next')).toBeUndefined()
+    expect(cache.takePcm('current')).toBeDefined()
+  })
   it('takes exclusive PCM ownership and never returns detached buffers', () => {
     const cache = createBeatAudioCache()
     const audio = pcm()

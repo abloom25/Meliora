@@ -1,15 +1,24 @@
-import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue'
+import { computed, onBeforeUnmount, readonly, ref, shallowRef, watch, type Ref } from 'vue'
 import { EQ_BAND_FREQUENCIES, bandFilterType } from '../../core/audio/equalizer'
 import { createAudioContextCompatible } from './browser'
 import {
   isBeatTimelineReadyAt,
   sampleBeatTimeline,
   type BeatPreloadTarget,
+  type BeatTimeline,
 } from '../../core/analysis/beat-timeline'
+import { createBeatVisualClock } from '../../core/analysis/beat-visual-clock'
 import { useBeatPreanalysis } from './useBeatPreanalysis'
 import { useBeatThisModels } from './useBeatThisModels'
-import type { BeatAnalysisMode } from '../../core/types'
+import type { BeatAnalysisMode, Track } from '../../core/types'
 import type { BeatPlaybackState } from '../../core/analysis/beat-scheduling'
+import {
+  BEAT_DEBUG_HISTORY_MS,
+  BEAT_DEBUG_INTERVAL_MS,
+  type BeatDebugSample,
+  type BeatDebugSnapshot,
+  type BeatHighlightReason,
+} from '../../core/analysis/beat-debug'
 
 // 模块级音频上下文与 source 缓存：
 // 浏览器对同一个 audio 节点只允许 createMediaElementSource 一次。
@@ -44,6 +53,10 @@ const PULSE_WEIGHTS = [0.28, 0.2, 0.12, 0.06, 0.03]
 const SEEK_SETTLE_MS = 180
 
 export interface BeatAnalyserOptions {
+  track?: Ref<Track | null>
+  debugEnabled?: Ref<boolean>
+  /** Higher diagnostic cadence only while the live comparison is visible. */
+  debugSampleIntervalMs?: Readonly<Ref<number>>
   mode?: Ref<BeatAnalysisMode>
   source?: Ref<string>
   durationSeconds?: Ref<number>
@@ -119,14 +132,18 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     }
   }
   const preanalysis = useBeatPreanalysis({
+    track: options.track,
     source: options.source ?? ref(''),
+    debugEnabled: options.debugEnabled,
     mode: options.mode,
     durationSeconds: options.durationSeconds,
     adjacent: options.adjacent,
     preloadEnabled: options.preloadEnabled,
     getPlaybackState: playbackState,
-    enabled: computed(
-      () => visualEnabled.value && (!selectedState.value || selectedState.value.phase === 'ready'),
+    enabled: visualEnabled,
+    modelAvailable: computed(() => !selectedState.value || selectedState.value.phase === 'ready'),
+    preservePreviewOnUnavailable: computed(
+      () => selectedState.value?.phase === 'error' && !options.unavailableReason?.value,
     ),
     unavailableReason,
   })
@@ -150,6 +167,179 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   let visibilityListenerRegistered = false
   let isUnmounted = false
   let motionQuery: MediaQueryList | null = null
+  const debugSnapshot = shallowRef<BeatDebugSnapshot | null>(null)
+  let debugHistory: BeatDebugSample[] = []
+  let lastDebugAt = -Infinity
+  let outputLevel = 0
+  let outputSustain = 0
+  const visualClock = createBeatVisualClock()
+  let clockSample = visualClock.sample({
+    nowMs: performance.now(),
+    mediaSeconds: getActiveAudio().currentTime,
+    playbackRate: getActiveAudio().playbackRate,
+    running: false,
+  })
+  let clockAudio: HTMLAudioElement | null = null
+  let clockContextState: AudioContextState | undefined
+  let timelineSource: 'basic' | 'provisional' | 'model' | 'none' = 'none'
+  let adoptedModelTimeline: BeatTimeline | null = null
+  let lastProvisionalPulseAt = -Infinity
+  let previousProvisionalLevel = 0
+  let lastProvisionalFrameAt = -Infinity
+  let previousModelLevel = 0
+  let handoffUntil = 0
+  let handoffPending = false
+  let firstStartedAt: number | null = null
+  let firstAvailableMs: number | null = null
+  let lastWriteAtMs: number | null = null
+
+  function readVisualClock(now: number, frameDeltaMs?: number) {
+    const audio = getActiveAudio()
+    const state = playbackState()
+    if (clockAudio !== audio || clockContextState !== audioContext?.state) visualClock.reset()
+    clockAudio = audio
+    clockContextState = audioContext?.state
+    let timestamp: AudioTimestamp | undefined
+    try {
+      timestamp = audioContext?.getOutputTimestamp?.()
+    } catch {
+      // Older engines and an audio-device transition may reject this optional API.
+    }
+    clockSample = visualClock.sample({
+      nowMs: now,
+      mediaSeconds: audio.currentTime,
+      playbackRate: audio.playbackRate,
+      running: state.playing && !audio.seeking && audioContext?.state === 'running',
+      contextSeconds: audioContext?.currentTime,
+      outputTimestamp:
+        timestamp?.contextTime !== undefined && timestamp.performanceTime !== undefined
+          ? { contextTime: timestamp.contextTime, performanceTime: timestamp.performanceTime }
+          : undefined,
+      baseLatencySeconds: audioContext?.baseLatency,
+      outputLatencySeconds: audioContext?.outputLatency,
+      manualOffsetMs: options.beatVisualDelay?.value,
+      frameDeltaMs,
+    })
+    return clockSample
+  }
+
+  function availableTimeline(time: number): {
+    timeline: BeatTimeline | null
+    source: typeof timelineSource
+  } {
+    if (!visualEnabled.value) return { timeline: null, source: 'none' }
+    const formal = preanalysis.timeline.value
+    if (formal && isBeatTimelineReadyAt(formal, time))
+      return { timeline: formal, source: selectedModel.value ? 'model' : 'basic' }
+    // A verified model interval must never fall back to its older approximation.
+    if (adoptedModelTimeline && isBeatTimelineReadyAt(adoptedModelTimeline, time))
+      return { timeline: null, source: 'none' }
+    const provisional = preanalysis.provisionalTimeline?.value
+    if (provisional && isBeatTimelineReadyAt(provisional, time))
+      return { timeline: provisional, source: 'provisional' }
+    return { timeline: null, source: 'none' }
+  }
+
+  function clearDebug(): void {
+    debugSnapshot.value = null
+    debugHistory = []
+    lastDebugAt = -Infinity
+  }
+
+  function highlightReason(audio: HTMLAudioElement, time: number): BeatHighlightReason {
+    if (options.enabled?.value === false) return 'disabled'
+    if (reducedMotion.value) return 'reduced-motion'
+    if (document.hidden) return 'hidden'
+    if (audio.paused || audio.ended) return 'paused'
+    if (audio.seeking) return 'seeking'
+    if (stalledAudio === audio || audio.readyState < HTMLMediaElement.HAVE_FUTURE_DATA)
+      return 'buffering'
+    if (!analyser || !frequencyData) return 'audio-unavailable'
+    if (audioContext?.state !== 'running') return 'context-suspended'
+    if (availableTimeline(time).timeline) return 'ready'
+    if (unavailableReason.value) return 'model-unavailable'
+    if (!preanalysis.timeline.value && !preanalysis.provisionalTimeline?.value)
+      return 'timeline-missing'
+    return 'range-unbuilt'
+  }
+
+  function captureDebug(force = false): void {
+    if (!options.debugEnabled?.value || isUnmounted) return
+    const now = performance.now()
+    const requestedInterval = options.debugSampleIntervalMs?.value
+    const interval =
+      requestedInterval !== undefined && Number.isFinite(requestedInterval)
+        ? clamp(requestedInterval, 1000 / 30, 1000)
+        : BEAT_DEBUG_INTERVAL_MS
+    const append = now - lastDebugAt >= interval
+    if (!force && !append) return
+    const audio = getActiveAudio()
+    // Diagnostics observe the last actual render sample; they never advance its clock.
+    const timing = clockSample
+    const time = timing.sampleSeconds
+    const reason = highlightReason(audio, time)
+    const state = playbackState()
+    const previous = debugSnapshot.value?.current
+    if (
+      !append &&
+      previous?.reason === reason &&
+      previous.playing === state.playing &&
+      previous.seeking === state.seeking &&
+      previous.level === outputLevel &&
+      previous.sustain === outputSustain &&
+      previous.delayMs === timing.delayMs
+    )
+      return
+    const active = availableTimeline(time)
+    const raw = active.timeline
+      ? sampleBeatTimeline(active.timeline, time, options.beatFlashRate?.value ?? 1)
+      : { level: 0, sustain: 0 }
+    const current: BeatDebugSample = {
+      sampledAtMs: now,
+      level: outputLevel,
+      sustain: outputSustain,
+      rawLevel: raw.level,
+      rawSustain: raw.sustain,
+      readyMix,
+      playbackSeconds: audio.currentTime,
+      sampleSeconds: time,
+      delayMs: timing.delayMs,
+      playing: state.playing,
+      seeking: state.seeking,
+      canHighlight: reason === 'ready',
+      reason,
+      timing: {
+        clockSource: timing.clockSource,
+        frameLeadMs: timing.frameLeadMs,
+        outputOffsetMs: timing.outputOffsetMs,
+        timelineSource: active.source,
+        firstAvailableMs,
+        lastWriteAtMs,
+        handoffPending,
+      },
+    }
+    if (append) {
+      lastDebugAt = now
+      debugHistory = [
+        ...debugHistory.filter((sample) => now - sample.sampledAtMs <= BEAT_DEBUG_HISTORY_MS),
+        current,
+      ]
+    }
+    debugSnapshot.value = {
+      source: options.source?.value ?? audio.currentSrc ?? audio.src,
+      mode: options.mode?.value ?? 'basic',
+      current,
+      history: debugHistory,
+    }
+  }
+
+  function emitBeat(level: number, sustain: number): void {
+    outputLevel = level
+    outputSustain = sustain
+    options.onBeat?.(level, sustain)
+    lastWriteAtMs = options.onBeat ? performance.now() : null
+    captureDebug()
+  }
 
   function disconnectAnalysisGraph() {
     for (const { source, target } of connectedSources) {
@@ -177,21 +367,21 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     frequencyData = null
   }
 
-  // Timeline samples already use media time. Only compensate output latency and
-  // the user's offset; a negative offset can now read ahead without late inference.
-  function visualDelaySeconds() {
-    const deviceLatency = (audioContext?.baseLatency ?? 0) + (audioContext?.outputLatency ?? 0)
-    const manual = options.beatVisualDelay?.value ?? 0
-    return clamp(deviceLatency + (Number.isFinite(manual) ? manual / 1000 : 0), -0.6, 0.6)
-  }
-
   function resetBeatTracking() {
+    visualClock.reset()
+    timelineSource = 'none'
+    handoffPending = false
+    handoffUntil = 0
+    previousProvisionalLevel = 0
+    lastProvisionalFrameAt = -Infinity
+    previousModelLevel = 0
+    lastProvisionalPulseAt = -Infinity
     readyMix = 0
     beatLevel.value = 0
     sustainLevel = 0
     bandBaselines.fill(0)
     prevBandDbs.fill(0)
-    options.onBeat?.(0, 0)
+    emitBeat(0, 0)
   }
 
   watch(
@@ -199,14 +389,18 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     (next, previous) => {
       // Extending the same track's verified ranges must not interrupt an ongoing pulse.
       // Source/model changes always invalidate to null before publishing a new timeline.
-      if (!next || !previous) resetBeatTracking()
+      if ((!next || !previous) && !preanalysis.provisionalTimeline?.value) resetBeatTracking()
     },
     { flush: 'sync' },
   )
   watch(
     visualEnabled,
     (enabled) => {
-      if (!enabled) resetBeatTracking()
+      if (!enabled) {
+        firstStartedAt = null
+        firstAvailableMs = null
+        resetBeatTracking()
+      } else if (isPlaying.value && firstStartedAt === null) firstStartedAt = performance.now()
     },
     { flush: 'sync' },
   )
@@ -217,9 +411,10 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     beatLevel.value = 0
     resetBeatTracking()
     lastFrameAt = 0
-    options.onBeat?.(0, 0)
+    emitBeat(0, 0)
     spectrumLevels.value = spectrumLevels.value.map(() => 0.08)
     options.onSpectrum?.(spectrumLevels.value)
+    captureDebug(true)
     if (visibilityListenerRegistered) {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       visibilityListenerRegistered = false
@@ -227,12 +422,13 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   }
 
   function pauseBeatAnalysis() {
+    visualClock.reset()
     if (!beatFrame) return
     window.cancelAnimationFrame(beatFrame)
     beatFrame = 0
     spectrumLevels.value = spectrumLevels.value.map((level) => Math.max(0.08, level * 0.82))
     options.onSpectrum?.(spectrumLevels.value)
-    options.onBeat?.(0, 0)
+    emitBeat(0, 0)
   }
 
   function handleVisibilityChange() {
@@ -245,6 +441,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
       }
       if (!beatFrame && isPlaying.value) beatFrame = window.requestAnimationFrame(updateBeatLevel)
     }
+    captureDebug(true)
   }
 
   function getAudioContext(): AudioContext {
@@ -286,12 +483,14 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   function updateBeatLevel() {
     const activeAudio = getActiveAudio()
     const now = performance.now()
-    const dt = lastFrameAt ? clamp((now - lastFrameAt) / 1000, 0.001, 0.1) : 1 / 60
+    const elapsedMs = lastFrameAt ? now - lastFrameAt : 1000 / 60
+    const dt = clamp(elapsedMs / 1000, 0.001, 0.1)
     lastFrameAt = now
+    const time = readVisualClock(now, elapsedMs).sampleSeconds
     if (!analyser || !frequencyData || activeAudio.paused) {
       beatLevel.value *= Math.exp(-dt / 0.13)
       sustainLevel *= Math.exp(-dt / 0.3)
-      options.onBeat?.(beatLevel.value, sustainLevel)
+      emitBeat(beatLevel.value, sustainLevel)
       spectrumLevels.value = spectrumLevels.value.map((level) =>
         Math.max(0.08, level * Math.exp(-dt / 0.084)),
       )
@@ -304,12 +503,16 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     const data = frequencyData
     const binHz = audioContext ? audioContext.sampleRate / analyser.fftSize : 187.5
     const binOf = (hz: number) => clamp(Math.round(hz / binHz), 1, data.length - 1)
-    const timeline = visualEnabled.value ? preanalysis.timeline.value : null
-    const time = activeAudio.currentTime - visualDelaySeconds() * (activeAudio.playbackRate || 1)
+    const active = availableTimeline(time)
+    const timeline = active.timeline
     if (
       timeline &&
       isBeatTimelineReadyAt(timeline, time) &&
       !activeAudio.seeking &&
+      !activeAudio.ended &&
+      stalledAudio !== activeAudio &&
+      isPlaying.value &&
+      !document.hidden &&
       activeAudio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA &&
       audioContext?.state === 'running'
     ) {
@@ -319,15 +522,52 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
         options.beatFlashRate?.value ?? 1,
         timelineSample,
       )
-      readyMix += (1 - readyMix) * smoothingAlpha(dt, 0.18)
-      beatLevel.value = levels.level * readyMix
-      sustainLevel = levels.sustain * readyMix
+      if (firstAvailableMs === null && firstStartedAt !== null)
+        firstAvailableMs = Math.max(0, now - firstStartedAt)
+      if (active.source === 'provisional') {
+        if (
+          levels.level > 0.1 &&
+          (previousProvisionalLevel <= 0.1 || levels.level > previousProvisionalLevel + 0.05)
+        )
+          lastProvisionalPulseAt = now
+        previousProvisionalLevel = levels.level
+        lastProvisionalFrameAt = now
+      } else if (active.source === 'model') {
+        adoptedModelTimeline = timeline
+        if (
+          timelineSource !== 'model' &&
+          (now - lastProvisionalPulseAt < 140 ||
+            (now - lastProvisionalFrameAt < 150 && previousProvisionalLevel > 0.08))
+        ) {
+          handoffPending = true
+          const rate = activeAudio.playbackRate > 0 ? activeAudio.playbackRate : 1
+          handoffUntil = lastProvisionalPulseAt + 50 / rate + Math.min(elapsedMs, 20)
+        }
+      }
+      // Switch to one timeline only. During a nearby provisional attack, the model
+      // may shift that same beat slightly; do not create a second rising edge.
+      if (
+        handoffPending &&
+        now >= handoffUntil &&
+        (levels.level <= 0.08 ||
+          (timelineSource === 'model' && levels.level > previousModelLevel + 0.05))
+      )
+        handoffPending = false
+      readyMix = 1
+      beatLevel.value = handoffPending ? Math.min(beatLevel.value, levels.level) : levels.level
+      previousModelLevel = active.source === 'model' ? levels.level : 0
+      sustainLevel +=
+        (levels.sustain - sustainLevel) *
+        smoothingAlpha(dt, levels.sustain > sustainLevel ? 0.045 : 0.16)
+      timelineSource = active.source
     } else {
+      timelineSource = 'none'
+      handoffPending = false
       readyMix = 0
       beatLevel.value = 0
       sustainLevel = 0
     }
-    options.onBeat?.(beatLevel.value, sustainLevel)
+    emitBeat(beatLevel.value, sustainLevel)
 
     // 频谱柱五段 Hz 划分(sub/low/mid/high/air)
     const idlePhase = now / 1000
@@ -373,6 +613,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   }
 
   async function startBeatAnalysis() {
+    if (firstStartedAt === null && visualEnabled.value) firstStartedAt = performance.now()
     if (!motionQuery) {
       motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
       motionQuery.addEventListener?.('change', handleVisibilityChange)
@@ -473,6 +714,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
 
   onBeforeUnmount(() => {
     isUnmounted = true
+    clearDebug()
     motionQuery?.removeEventListener?.('change', handleVisibilityChange)
     stopBeatAnalysis()
     disconnectAnalysisGraph()
@@ -496,22 +738,32 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     seekSettleTimer = null
     settlingAudio = null
   }
-  if (options.source)
-    watch(
-      options.source,
-      () => {
-        clearSeekSettlement()
-        stalledAudio = null
-      },
-      { flush: 'sync' },
-    )
+  watch(
+    () => [options.source?.value, options.mode?.value],
+    () => {
+      clearSeekSettlement()
+      stalledAudio = null
+      adoptedModelTimeline = null
+      firstStartedAt = isPlaying.value && visualEnabled.value ? performance.now() : null
+      firstAvailableMs = null
+      resetBeatTracking()
+    },
+    { flush: 'sync' },
+  )
   const priorityListeners: Array<() => void> = []
   for (const audio of players) {
-    const updatePriority = (): void => {
-      if (audio === getActiveAudio()) preanalysis.prioritize(audio.currentTime, playbackState())
+    const updatePriority = (event?: Event): void => {
+      if (audio === getActiveAudio()) {
+        if (event && event.type !== 'timeupdate') {
+          visualClock.reset()
+        }
+        preanalysis.prioritize(audio.currentTime, playbackState())
+        captureDebug(event?.type !== 'timeupdate')
+      }
     }
     const settleSeek = (): void => {
       if (audio !== getActiveAudio()) return
+      visualClock.reset()
       clearSeekSettlement()
       settlingAudio = audio
       updatePriority()
@@ -530,17 +782,20 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     }
     const resetOnSeek = (): void => {
       if (audio !== getActiveAudio()) return
+      if (settlingAudio !== audio) clearDebug()
       resetBeatTracking()
       settleSeek()
     }
     const markStalled = (): void => {
       if (audio !== getActiveAudio()) return
       stalledAudio = audio
+      resetBeatTracking()
       updatePriority()
     }
     const markPlaying = (): void => {
       if (audio !== getActiveAudio()) return
       stalledAudio = null
+      visualClock.reset()
       updatePriority()
     }
     audio.addEventListener?.('seeking', resetOnSeek)
@@ -562,6 +817,26 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     for (const remove of priorityListeners) remove()
   })
 
+  watch(
+    () => [options.debugEnabled?.value, options.source?.value, options.mode?.value],
+    () => {
+      clearDebug()
+      captureDebug(true)
+    },
+    { flush: 'sync', immediate: true },
+  )
+  watch(
+    () => [
+      isPlaying.value,
+      visualEnabled.value,
+      unavailableReason.value,
+      options.beatVisualDelay?.value,
+      options.beatFlashRate?.value,
+    ],
+    () => captureDebug(true),
+    { flush: 'sync' },
+  )
+
   return {
     beatLevel,
     spectrumLevels,
@@ -569,5 +844,6 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     stopBeatAnalysis,
     preanalysis,
     resetBeatTracking,
+    debugSnapshot: readonly(debugSnapshot),
   }
 }
