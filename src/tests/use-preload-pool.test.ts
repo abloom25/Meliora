@@ -33,7 +33,7 @@ const defaultSettings: PlayerSettings = {
   beatBrightness: 0.28,
   beatFlashRate: 1,
   beatVisualDelay: 0,
-  lyricFontSize: 20,
+  lyricScale: 1,
   lyricAnimation: true,
   lyricSpring: 1,
   lyricTranslation: true,

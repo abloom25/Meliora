@@ -259,7 +259,7 @@ async function mountLyricsPanel(options: PanelOptions = {}) {
   store.currentTrackId = track.id
   store.currentTime = options.currentTime ?? 0
   store.settings.lyricAnimation = true
-  store.settings.lyricFontSize = 20
+  store.settings.lyricScale = 1
 
   const wrapper = mount(LyricsPanel, {
     attachTo: document.body,
@@ -799,6 +799,31 @@ describe('LyricsPanel', () => {
   })
 
   describe('following playback', () => {
+    it.each([140, 260])(
+      'keeps the spring and syllable animation active after shrinking the lyric stage to %ipx',
+      async (viewportHeight) => {
+        mockedLoadTrackLyrics.mockResolvedValueOnce(karaokeLines)
+        const { wrapper, store } = await mountReadyPanel()
+        await layoutPanel(wrapper, { viewportHeight, lineHeight: 28 })
+        const anchor = viewportHeight * 0.42 - 14
+        const before = lineY(wrapper, 1)
+
+        await moveTo(store, 5.25)
+        expect(lineY(wrapper, 1)).toBeCloseTo(before, 5)
+        runSpringFrames(8)
+        expect(lineY(wrapper, 1)).toBeLessThan(before - 1)
+        expect(lineY(wrapper, 1)).toBeGreaterThan(anchor + 1)
+        runSpringFrames(120)
+        expect(lineY(wrapper, 1)).toBeCloseTo(anchor, 0)
+
+        const word = wrapper.get<HTMLElement>('[data-lyric-index="1"] .lyric-word')
+        expect(word.element.style.getPropertyValue('--lyric-word-fill')).toBe('0.250')
+        await moveTo(store, 5.75)
+        expect(word.element.style.getPropertyValue('--lyric-word-fill')).toBe('0.750')
+        expect(wrapper.classes()).not.toContain('animation-disabled')
+      },
+    )
+
     it('brings the new line to the anchor with a spring when currentTime moves on', async () => {
       const { wrapper, store } = await mountReadyPanel()
       const before = lineY(wrapper, 3)
@@ -1061,16 +1086,20 @@ describe('LyricsPanel', () => {
   })
 
   describe('layout', () => {
-    it('re-measures and keeps the active line anchored when lyricFontSize changes', async () => {
+    it('re-measures and keeps the active line anchored when the lyric scale changes', async () => {
       const { wrapper, store } = await mountReadyPanel()
       await moveTo(store, 10)
       runSpringFrames(120)
       expect(lineY(wrapper, 2)).toBeCloseTo(ANCHOR_Y, 0)
 
-      store.settings.lyricFontSize = 28
+      // 模拟倍率变化后浏览器提供的换行高度；不额外发 resize，验证设置本身触发重测。
+      wrapper.findAll<HTMLElement>('.lyric-line').forEach((line) => {
+        defineReadonlyNumber(line.element, 'offsetHeight', 60)
+      })
+      store.settings.lyricScale = 1.5
       await flushVueUpdates()
-      await layoutPanel(wrapper, { lineHeight: 60 })
 
+      expect(wrapper.element.style.getPropertyValue('--lyric-scale')).toBe('1.5')
       expect(wrapper.findAll('.lyric-line')[2]?.classes()).toContain('active')
       expect(lineY(wrapper, 2)).toBeCloseTo(VIEWPORT * 0.42 - 30, 0)
       expect(lineY(wrapper, 3)).toBeCloseTo(VIEWPORT * 0.42 - 30 + 60 + GAP, 0)

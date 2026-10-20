@@ -35,7 +35,7 @@
     'skipOnError',
   ]
   const LYRICS_KEYS: readonly ResettableSettingKey[] = [
-    'lyricFontSize',
+    'lyricScale',
     'lyricAnimation',
     'lyricSpring',
     'lyricTranslation',
@@ -73,6 +73,7 @@
   })
 
   const volumeLabel = computed(() => `${Math.round(settings.value.volume * 100)}%`)
+  const lyricScaleLabel = computed(() => `${Math.round(settings.value.lyricScale * 100)}%`)
   const lyricSpringLabel = computed(() => `×${settings.value.lyricSpring.toFixed(2)}`)
   const backgroundSaturationLabel = computed(
     () => `${Math.round(settings.value.backgroundSaturation * 100)}%`,
@@ -325,11 +326,13 @@
     <section class="settings-section">
       <SettingsSectionHeader title="歌词" resettable @reset="store.resetSettings(LYRICS_KEYS)" />
       <SettingSlider
-        v-model="settings.lyricFontSize"
-        label="歌词字号"
-        :value-text="`${settings.lyricFontSize}px`"
-        :min="15"
-        :max="30"
+        v-model="settings.lyricScale"
+        label="歌词缩放"
+        description="在适合当前窗口的字号上按比例调整"
+        :value-text="lyricScaleLabel"
+        :min="0.75"
+        :max="1.5"
+        :step="0.05"
       />
       <SettingToggleRow
         v-model="settings.lyricAnimation"
