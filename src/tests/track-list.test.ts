@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import TrackList from '../components/TrackList.vue'
-import type { Track } from '../types/music'
+import type { Track } from '../core/types'
 
 function makeTracks(count: number): Track[] {
   return Array.from({ length: count }, (_, index) => ({

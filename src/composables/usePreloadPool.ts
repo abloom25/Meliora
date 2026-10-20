@@ -1,19 +1,26 @@
-import { onBeforeUnmount, ref, type Ref } from 'vue'
+import { onBeforeUnmount, ref, watch, type Ref } from 'vue'
 import { loadTrackLyrics } from '../services/lyrics'
 import { usePlayerStore } from '../stores/player'
-import type { PlayerSettings, Track } from '../types/music'
+import type { PlayerSettings, Track } from '../core/types'
 import { PRELOAD_TIMEOUTS, CACHE_CONSTANTS } from '../../shared/constants'
+import {
+  createTrackFailureLog,
+  predictPreloadTrack,
+  type PreloadDirection,
+} from '../core/audio/preload'
+import type { QueueState } from '../core/audio/queue'
+import type { AudioBackend, AudioChannel } from '../core/audio/backend'
+import type { BeatPreloadTarget } from '../core/analysis/beat-timeline'
+
+export type { PreloadDirection }
 
 const PRELOAD_READY_TIMEOUT = PRELOAD_TIMEOUTS.COVER
 const COVER_PRELOAD_CACHE_LIMIT = CACHE_CONSTANTS.COVER_PRELOAD_LIMIT
 const COVER_PRELOAD_CACHE_TTL = CACHE_CONSTANTS.COVER_PRELOAD_TTL
-// 失败标记的重试窗口:超过后允许该曲目重试一次,
-// 避免一次瞬时网络抖动把曲目拉黑整个会话。
-const FAILED_TRACK_RETRY_TTL = 5 * 60 * 1000
-export type PreloadDirection = 'previous' | 'next'
 
 export interface PreloadSlot {
-  audio: HTMLAudioElement
+  /** 这一路预加载占用的播放通道。是稳定句柄,后端内部换实现不影响这里 */
+  channel: AudioChannel
   direction: PreloadDirection
   ready: Promise<boolean> | null
   track: Track | null
@@ -47,11 +54,32 @@ function isCoverRecentlyPreloaded(url: string) {
   return true
 }
 
-function waitForImageLoad(image: HTMLImageElement): Promise<void> {
-  return new Promise((resolve, reject) => {
+/** 解码一张封面。默认走浏览器的 Image;桌面端可以换成自己的图片预热 */
+export type CoverDecoder = (url: string) => Promise<void>
+
+const decodeViaImage: CoverDecoder = (url) => {
+  const image = new Image()
+  if (typeof image.decode === 'function') {
+    image.src = url
+    try {
+      return image.decode()
+    } catch (error) {
+      return Promise.reject(error)
+    }
+  }
+  const loaded = new Promise<void>((resolve, reject) => {
     image.onload = () => resolve()
     image.onerror = () => reject(new Error('cover preload failed'))
   })
+  image.src = url
+  return loaded
+}
+
+let decodeCover: CoverDecoder = decodeViaImage
+
+/** 替换封面解码方式。传 null 恢复为浏览器的 Image */
+export function setCoverDecoder(decoder: CoverDecoder | null): void {
+  decodeCover = decoder ?? decodeViaImage
 }
 
 export function preloadCover(url?: string): Promise<void> {
@@ -61,20 +89,7 @@ export function preloadCover(url?: string): Promise<void> {
   const pending = coverPreloadInflight.get(url)
   if (pending) return pending
 
-  const image = new Image()
-  let load: Promise<void>
-  if (typeof image.decode === 'function') {
-    image.src = url
-    try {
-      load = image.decode()
-    } catch (error) {
-      load = Promise.reject(error)
-    }
-  } else {
-    load = waitForImageLoad(image)
-    image.src = url
-  }
-  const ready = load
+  const ready = decodeCover(url)
     .then(() => {
       rememberPreloadedCover(url)
     })
@@ -86,34 +101,44 @@ export function preloadCover(url?: string): Promise<void> {
   return ready
 }
 
-export async function preloadLyrics(track: Track) {
+export async function preloadLyrics(track: Track, signal?: AbortSignal) {
   try {
-    await loadTrackLyrics(track)
+    await loadTrackLyrics(track, signal ?? new AbortController().signal, undefined, 'background')
   } catch {
     // Lyrics failure must not block audio playback.
   }
 }
 
 export interface PreloadPoolOptions {
-  players: readonly HTMLAudioElement[]
+  backend: AudioBackend
   store: ReturnType<typeof usePlayerStore>
   settings: Ref<PlayerSettings>
-  getActiveAudio: () => HTMLAudioElement
+
   transitionInProgress: () => boolean
+  isChannelProtected?: (channel: AudioChannel) => boolean
+  /** Publishes the actual loaded slots; consumers must not predict shuffle again. */
+  onTargetsChanged?: (targets: readonly BeatPreloadTarget[]) => void
 }
 
 export function usePreloadPool(options: PreloadPoolOptions) {
-  const { players, store, settings, transitionInProgress } = options
+  const { backend, store, settings, transitionInProgress } = options
+  const spares = backend.channels().slice(1)
+  const [previousChannel, nextChannel] = spares
+  // 契约要求后端至少给三路。给不够就在装配时当场报错,
+  // 别拖到第一次预加载才在 undefined 上解引用 —— 那时候已经看不出是后端的问题了
+  if (!previousChannel || !nextChannel) {
+    throw new Error('usePreloadPool 需要后端提供至少 3 路通道:1 路出声 + 2 路预加载')
+  }
   const preloadSlots: Record<PreloadDirection, PreloadSlot> = {
     previous: {
-      audio: players[1],
+      channel: previousChannel,
       direction: 'previous',
       ready: null,
       track: null,
       cleanup: null,
     },
     next: {
-      audio: players[2],
+      channel: nextChannel,
       direction: 'next',
       ready: null,
       track: null,
@@ -121,86 +146,96 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     },
   }
   const preloadMessage = ref('')
-  // id → 失败时间戳;判断走 isTrackFailed(TTL 过期自动放行),写入走 markTrackFailed。
-  const failedTrackIds = new Map<string, number>()
+  // 失败记录的 TTL 与放行规则在核心层,这里只是持有它
+  const failureLog = createTrackFailureLog()
   const pendingPreloadTimeouts = new Set<number>()
+  const lyricPreloads = new Map<PreloadSlot, AbortController>()
+  const lyricHandoffs = new Set<AbortController>()
   const isPoolUnmounted = ref(false)
+  let publishedTargets: readonly BeatPreloadTarget[] = []
+
+  function refreshTargets(): void {
+    const targets: BeatPreloadTarget[] = []
+    const sources = new Set<string>()
+    if (!isPoolUnmounted.value && settings.value.preloadNextTrack) {
+      for (const direction of ['next', 'previous'] as const) {
+        const { track, channel } = preloadSlots[direction]
+        if (
+          !track ||
+          channel === backend.active() ||
+          options.isChannelProtected?.(channel) ||
+          channel.failed() ||
+          isTrackFailed(track.id) ||
+          track.audioUrl === store.currentTrack?.audioUrl ||
+          sources.has(track.audioUrl) ||
+          !store.queue.some(
+            (candidate) => candidate.id === track.id && candidate.audioUrl === track.audioUrl,
+          )
+        )
+          continue
+        // AudioChannel returns the resolved media URL; keep the track's original
+        // source as the analysis key so promotion reuses the active-song cache.
+        try {
+          if (channel.source() !== new URL(track.audioUrl, window.location.href).href) continue
+        } catch {
+          continue
+        }
+        const durationSeconds = channel.duration()
+        targets.push({
+          direction,
+          source: track.audioUrl,
+          title: track.title,
+          ...(durationSeconds !== null ? { durationSeconds } : {}),
+        })
+        sources.add(track.audioUrl)
+      }
+    }
+    if (
+      targets.length === publishedTargets.length &&
+      targets.every((target, index) => {
+        const previous = publishedTargets[index]
+        return (
+          previous?.direction === target.direction &&
+          previous.source === target.source &&
+          previous.title === target.title &&
+          previous.durationSeconds === target.durationSeconds
+        )
+      })
+    )
+      return
+    publishedTargets = targets
+    options.onTargetsChanged?.(targets)
+  }
 
   function markTrackFailed(id: string) {
-    failedTrackIds.set(id, Date.now())
+    failureLog.mark(id)
+    refreshTargets()
   }
 
   function clearFailedTrack(id: string) {
-    failedTrackIds.delete(id)
+    failureLog.clear(id)
+    refreshTargets()
   }
 
   function isTrackFailed(id: string): boolean {
-    const failedAt = failedTrackIds.get(id)
-    if (failedAt === undefined) return false
-    if (Date.now() - failedAt > FAILED_TRACK_RETRY_TTL) {
-      // 超过重试窗口,放行一次;若再次失败会由 markTrackFailed 重新计时
-      failedTrackIds.delete(id)
-      return false
-    }
-    return true
+    return failureLog.isFailed(id)
   }
 
-  function findCachedTrack(direction: PreloadDirection): Track | null {
-    const track = preloadSlots[direction].track
-    if (!track || track.id === store.currentTrack?.id || isTrackFailed(track.id)) return null
-    return track
+  function queueState(): QueueState {
+    return {
+      queue: store.queue,
+      currentIndex: store.currentIndex,
+      playMode: store.settings.playMode,
+    }
   }
 
-  function findSequentialTrack(direction: PreloadDirection, manual: boolean): Track | null {
-    const queue = store.queue
-    if (!queue.length) return null
-    if (store.currentIndex < 0) {
-      return queue.find((track) => !isTrackFailed(track.id)) ?? null
-    }
-
-    const step = direction === 'next' ? 1 : -1
-    const wraps = store.settings.playMode !== 'sequence'
-    const shouldRepeatCurrent =
-      direction === 'next' && store.settings.playMode === 'single' && !manual
-    if (shouldRepeatCurrent) {
-      const current = store.currentTrack
-      return current && !isTrackFailed(current.id) ? current : null
-    }
-
-    for (let offset = 1; offset <= queue.length; offset += 1) {
-      const rawIndex = store.currentIndex + step * offset
-      if (!wraps && (rawIndex < 0 || rawIndex >= queue.length)) return null
-      const index = ((rawIndex % queue.length) + queue.length) % queue.length
-      const candidate = queue[index]
-      if (candidate && !isTrackFailed(candidate.id)) return candidate
-    }
-    return null
-  }
-
-  function findFallbackTrack(direction: PreloadDirection, manual: boolean): Track | null {
-    if (store.settings.playMode === 'shuffle') {
-      return (
-        store.queue.find(
-          (track) => track.id !== store.currentTrack?.id && !isTrackFailed(track.id),
-        ) ?? null
-      )
-    }
-    return findSequentialTrack(direction, manual)
-  }
-
+  // 预测规则在核心层,与真正切歌时的选曲共用同一套,不会出现"预加载的和实际播的不是同一首"
   function predictTrack(direction: PreloadDirection, manual = false): Track | null {
-    const queue = store.queue
-    if (!queue.length) return null
-
-    // 优先复用已缓存的预加载槽（命中时无需重新预测）
-    const cachedTrack = findCachedTrack(direction)
-    if (cachedTrack) return cachedTrack
-
-    // 单一真相源：统一走 store.peekNext/peekPrevious，消除 shuffle 双抽样不一致
-    const predicted = direction === 'next' ? store.peekNext(manual) : store.peekPrevious()
-    if (!predicted) return null
-    if (isTrackFailed(predicted.id)) return findFallbackTrack(direction, manual)
-    return predicted
+    return predictPreloadTrack(queueState(), store.currentTrack?.id ?? null, direction, {
+      manual,
+      isFailed: isTrackFailed,
+      cachedTrack: preloadSlots[direction].track,
+    })
   }
 
   function predictNextTrack(manual = false): Track | null {
@@ -211,29 +246,75 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     return predictTrack('previous', true)
   }
 
-  function clearSlot(slot: PreloadSlot) {
+  function cancelSlotLyrics(slot: PreloadSlot): void {
+    lyricPreloads.get(slot)?.abort()
+    lyricPreloads.delete(slot)
+  }
+
+  function startSlotLyrics(slot: PreloadSlot, track: Track): void {
+    cancelSlotLyrics(slot)
+    const controller = new AbortController()
+    lyricPreloads.set(slot, controller)
+    void preloadLyrics(track, controller.signal).finally(() => {
+      if (lyricPreloads.get(slot) === controller) lyricPreloads.delete(slot)
+    })
+  }
+
+  /** Transfer ownership when audio handles rotate. Release incoming after foreground watchers attach. */
+  function transferLyricsForPromotion(slot: PreloadSlot, reverseSlot: PreloadSlot): () => void {
+    const incoming = lyricPreloads.get(slot)
+    lyricPreloads.delete(slot)
+    if (incoming) lyricHandoffs.add(incoming)
+    cancelSlotLyrics(reverseSlot)
+    if (!isPoolUnmounted.value && settings.value.preloadNextTrack && reverseSlot.track)
+      startSlotLyrics(reverseSlot, reverseSlot.track)
+    return () => {
+      if (!incoming) return
+      lyricHandoffs.delete(incoming)
+      incoming.abort()
+    }
+  }
+
+  function clearSlot(slot: PreloadSlot, publish = true) {
+    cancelSlotLyrics(slot)
     if (slot.cleanup) {
       slot.cleanup()
       slot.cleanup = null
     }
     slot.track = null
     slot.ready = null
-    slot.audio.pause()
-    slot.audio.removeAttribute('src')
-    slot.audio.load()
+    // 已移出队列的缓存立即作废，但退休通道在切歌完成前仍需保留音频供回退。
+    if (!options.isChannelProtected?.(slot.channel)) slot.channel.release()
+    if (publish) refreshTargets()
   }
 
   function slotCanStart(slot: PreloadSlot, track: Track) {
     return (
       slot.track?.id === track.id &&
-      slot.audio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
-      !slot.audio.error
+      slot.track.audioUrl === track.audioUrl &&
+      slot.channel.canStart()
     )
   }
 
   function clearPreloads() {
-    clearSlot(preloadSlots.previous)
-    clearSlot(preloadSlots.next)
+    clearSlot(preloadSlots.previous, false)
+    clearSlot(preloadSlots.next, false)
+    refreshTargets()
+  }
+
+  /**
+   * 清空两路预加载,并把它们的通道还原成装配时的划分。
+   *
+   * 出声通道被强行拨回 channels[0] 时(找不到当前曲目而停止播放)必须走这里:
+   * 切过歌之后三路会轮转,某个槽手里可能正拿着 channels[0]。不还原的话
+   * "出声通道与两个槽互不相同"这条前提就破了,随后一次 loadSlot 会 release 掉
+   * 正在出声的那一路,再把别的歌以零增益加载进去 —— 按播放没声音或放错歌。
+   */
+  function resetSlotChannels() {
+    clearPreloads()
+    preloadSlots.previous.channel = previousChannel
+    preloadSlots.next.channel = nextChannel
+    refreshTargets()
   }
 
   function clearPreloadMessage() {
@@ -241,81 +322,77 @@ export function usePreloadPool(options: PreloadPoolOptions) {
   }
 
   function findSlotByTrack(track: Track): PreloadSlot | null {
-    return Object.values(preloadSlots).find((slot) => slot.track?.id === track.id) ?? null
+    return (
+      Object.values(preloadSlots).find(
+        (slot) => slot.track?.id === track.id && slot.track.audioUrl === track.audioUrl,
+      ) ?? null
+    )
   }
 
   function loadSlot(direction: PreloadDirection, track: Track): Promise<boolean> {
     // 卸载后不再发起新的预加载，避免定时器或事件监听器泄漏。
     if (isPoolUnmounted.value) return Promise.resolve(false)
     const slot = preloadSlots[direction]
-    if (slot.track?.id === track.id && slot.ready) return slot.ready
+    if (options.isChannelProtected?.(slot.channel)) return Promise.resolve(false)
+    if (slot.track?.id === track.id && slot.track.audioUrl === track.audioUrl && slot.ready)
+      return slot.ready
 
     const duplicateSlot = findSlotByTrack(track)
-    if (duplicateSlot && duplicateSlot !== slot) clearSlot(duplicateSlot)
+    if (duplicateSlot && duplicateSlot !== slot) {
+      if (options.isChannelProtected?.(duplicateSlot.channel)) return Promise.resolve(false)
+      clearSlot(duplicateSlot)
+    }
 
     clearSlot(slot)
     slot.track = track
-    slot.audio.volume = 0
-    slot.ready = new Promise<boolean>((resolve) => {
-      const timeout = window.setTimeout(() => {
+    slot.channel.setGain(0)
+    const channel = slot.channel
+    const ready = new Promise<boolean>((resolve) => {
+      let settled = false
+      const stops: Array<() => void> = []
+      const finish = (result: boolean) => {
+        if (settled) return
+        settled = true
         pendingPreloadTimeouts.delete(timeout)
-        if (isPoolUnmounted.value) {
-          cleanup()
-          resolve(false)
-          return
-        }
-        if (slot.track?.id === track.id) {
-          // 超时未就绪:完整释放 slot(pause + 移除 src + load 中止下载),
-          // 否则慢速响应的连接会一直挂着占用带宽。clearSlot 内部幂等调用 cleanup。
-          clearSlot(slot)
-        } else {
-          cleanup()
-        }
-        resolve(false)
+        window.clearTimeout(timeout)
+        for (const stop of stops) stop()
+        if (slot.cleanup === cancel) slot.cleanup = null
+        resolve(result)
+      }
+      const cancel = () => finish(false)
+      const ownsSlot = () => slot.channel === channel && slot.track === track && !settled
+      const timeout = window.setTimeout(() => {
+        if (!ownsSlot()) return finish(false)
+        finish(false)
+        clearSlot(slot)
       }, PRELOAD_READY_TIMEOUT)
       pendingPreloadTimeouts.add(timeout)
       const handleReady = () => {
-        if (isPoolUnmounted.value || slot.track?.id !== track.id) return
-        cleanup()
-        resolve(true)
+        if (isPoolUnmounted.value || !ownsSlot()) return
+        finish(true)
       }
-      const handleError = () => {
-        if (isPoolUnmounted.value || slot.track?.id !== track.id) return
-        cleanup()
-        markTrackFailed(track.id)
-        preloadMessage.value = `预加载歌曲暂时无法播放，当前播放不受影响`
-        slot.track = null
-        slot.ready = null
-        resolve(false)
-        scheduleAdjacentPreload()
-      }
-      const cleanup = () => {
-        pendingPreloadTimeouts.delete(timeout)
-        window.clearTimeout(timeout)
-        slot.audio.removeEventListener('canplay', handleReady)
-        slot.audio.removeEventListener('loadeddata', handleReady)
-        slot.audio.removeEventListener('error', handleError)
-        slot.cleanup = null
-      }
-      slot.cleanup = cleanup
-      slot.audio.addEventListener('canplay', handleReady, { once: true })
-      slot.audio.addEventListener('loadeddata', handleReady, { once: true })
-      slot.audio.addEventListener('error', handleError, { once: true })
+      stops.push(channel.on('canplay', handleReady), channel.on('loadeddata', handleReady))
+      slot.cleanup = cancel
     })
-    slot.audio.src = track.audioUrl
-    slot.audio.load()
+    slot.ready = ready
+    channel.load(track.audioUrl)
+    refreshTargets()
     if (direction === 'next') {
       void preloadCover(track.cover)
     }
-    void preloadLyrics(track)
-    return slot.ready
+    startSlotLyrics(slot, track)
+    return ready
   }
 
   function preloadAdjacentTracks() {
     if (!settings.value.preloadNextTrack || transitionInProgress()) return
     const previousTrack = predictPreviousTrack()
     const nextTrack = predictNextTrack()
-    if (previousTrack && previousTrack.id !== store.currentTrack?.id) {
+    const sameNeighbor =
+      previousTrack?.id === nextTrack?.id && previousTrack?.audioUrl === nextTrack?.audioUrl
+    // In a two-song queue both directions name the same song. Keep it in the
+    // next slot instead of releasing and loading it twice on each refresh.
+    if (previousTrack && previousTrack.id !== store.currentTrack?.id && !sameNeighbor) {
       void loadSlot('previous', previousTrack)
     } else {
       clearSlot(preloadSlots.previous)
@@ -330,6 +407,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
   let scheduledHandle = 0
 
   function scheduleAdjacentPreload() {
+    if (isPoolUnmounted.value) return
     if (scheduledHandle) return
     scheduledHandle = window.setTimeout(() => {
       scheduledHandle = 0
@@ -337,8 +415,34 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     }, 0)
   }
 
+  // Slot ownership changes as channels rotate. Subscribe to stable handles and
+  // resolve their current slot at event time, including errors after canplay.
+  const stopTargetListeners = backend.channels().flatMap((channel) => [
+    ...(['loadedmetadata', 'durationchange', 'canplay', 'loadeddata'] as const).map((event) =>
+      channel.on(event, refreshTargets),
+    ),
+    channel.on('error', () => {
+      if (
+        isPoolUnmounted.value ||
+        channel === backend.active() ||
+        options.isChannelProtected?.(channel)
+      )
+        return
+      const slot = Object.values(preloadSlots).find(
+        (candidate) => candidate.channel === channel && candidate.track,
+      )
+      if (!slot?.track) return
+      markTrackFailed(slot.track.id)
+      preloadMessage.value = '预加载歌曲暂时无法播放，当前播放不受影响'
+      clearSlot(slot)
+      scheduleAdjacentPreload()
+    }),
+  ])
+  watch(() => settings.value.preloadNextTrack, refreshTargets, { flush: 'sync' })
+
   onBeforeUnmount(() => {
     isPoolUnmounted.value = true
+    for (const stop of stopTargetListeners) stop()
     if (scheduledHandle) {
       window.clearTimeout(scheduledHandle)
       scheduledHandle = 0
@@ -349,24 +453,29 @@ export function usePreloadPool(options: PreloadPoolOptions) {
       pendingPreloadTimeouts.clear()
     }
     clearPreloads()
+    for (const controller of lyricHandoffs) controller.abort()
+    lyricHandoffs.clear()
   })
 
   return {
     preloadSlots,
     preloadMessage,
-    failedTrackIds,
+    failureLog,
     markTrackFailed,
     clearFailedTrack,
     isTrackFailed,
     predictNextTrack,
     predictPreviousTrack,
     clearPreloads,
+    resetSlotChannels,
     clearSlot,
+    transferLyricsForPromotion,
     clearPreloadMessage,
     findSlotByTrack,
     slotCanStart,
     loadSlot,
     preloadAdjacentTracks,
     scheduleAdjacentPreload,
+    refreshTargets,
   }
 }

@@ -1,4 +1,5 @@
 import type { Env } from './types'
+import { readBytesWithLimit } from './read-json-with-limit'
 
 const GITHUB_API = 'https://api.github.com'
 const GITHUB_TIMEOUT_MS = 8000
@@ -66,7 +67,18 @@ async function fetchWithTimeout(
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(url, { ...init, signal: controller.signal })
+    const response = await fetch(url, { ...init, signal: controller.signal, redirect: 'manual' })
+    const bytes = await readBytesWithLimit(response, 16 * 1024 * 1024)
+    return new Response(
+      response.status === 204 || response.status === 205 || response.status === 304
+        ? null
+        : (bytes as BodyInit),
+      {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      },
+    )
   } finally {
     clearTimeout(timer)
   }
@@ -91,9 +103,27 @@ export async function readFile(
     throw new GitHubReadError(`GitHub readFile failed: ${response.status}`, response.status)
 
   const data = (await response.json()) as { content?: string; sha?: string; encoding?: string }
-  if (!data.content || !data.sha) return null
+  if (typeof data.sha !== 'string' || !data.sha || typeof data.content !== 'string') {
+    throw new GitHubReadError('GitHub readFile returned an invalid file object', 502)
+  }
+  if (data.encoding === 'none') {
+    // 固定为元数据对应的不可变 Blob，避免两次读取之间分支推进导致内容与 revision 不一致。
+    const raw = await fetchWithTimeout(
+      repositoryApiUrl(`git/blobs/${encodeURIComponent(data.sha)}`, env),
+      {
+        headers: { ...headers(env), Accept: 'application/vnd.github.raw+json' },
+      },
+    )
+    if (!raw.ok) throw new GitHubReadError('GitHub raw file read failed', raw.status)
+    return { content: await raw.text(), sha: data.sha }
+  }
 
-  const content = data.encoding === 'base64' ? atob(data.content.replace(/\n/g, '')) : data.content
+  const content =
+    data.encoding === 'base64'
+      ? new TextDecoder().decode(
+          Uint8Array.from(atob(data.content.replace(/\n/g, '')), (char) => char.charCodeAt(0)),
+        )
+      : data.content
 
   return { content, sha: data.sha }
 }

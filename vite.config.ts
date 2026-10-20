@@ -1,12 +1,31 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { createRequire } from 'node:module'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { defineConfig, type Plugin } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
 import { validateMusicConfig } from './shared/config-schema'
 import { generatePublicConfig } from './scripts/generate-public-config.mjs'
+import { publicMusicConfig } from './src/generated/public-config'
+import { DEV_MUSIC_PROXY_PREFIX } from './shared/dev-music-proxy'
+import { guardDevMusicProxy, isLocalConfigWriteAllowed } from './scripts/dev-request-guards'
 
 const localDevConfigPath = join(process.cwd(), '.meliora/config.local.json')
+const beatRuntimeModule = createRequire(import.meta.url)
+  .resolve('onnxruntime-web/all')
+  .replace(/\.js$/, '.mjs')
+function externalBeatRuntime(): Plugin {
+  return {
+    name: 'beat-runtime-external-wasm',
+    enforce: 'pre',
+    resolveId(source) {
+      if (source === 'onnxruntime-web/all') return beatRuntimeModule
+    },
+  }
+}
+const musicApiEndpoint = /^https?:\/\//i.test(publicMusicConfig.apiEndpoint)
+  ? new URL(publicMusicConfig.apiEndpoint)
+  : null
 
 function readBody(request: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -31,9 +50,15 @@ function melioraLocalConfigPlugin(): Plugin {
     name: 'meliora-local-config',
     apply: 'serve',
     configureServer(server) {
+      server.middlewares.use(guardDevMusicProxy(musicApiEndpoint))
       server.middlewares.use('/__meliora-dev/config', async (request, response) => {
         if (request.method !== 'POST') {
           sendJson(response, 405, { error: 'Method Not Allowed' })
+          return
+        }
+
+        if (!isLocalConfigWriteAllowed(request)) {
+          sendJson(response, 403, { error: '仅允许同源 JSON 配置请求' })
           return
         }
 
@@ -68,13 +93,32 @@ function melioraLocalConfigPlugin(): Plugin {
 // https://vite.dev/config/
 export default defineConfig({
   base: '/',
-  plugins: [vue(), melioraLocalConfigPlugin()],
+  worker: { format: 'es', plugins: () => [externalBeatRuntime()] },
+  plugins: [vue(), melioraLocalConfigPlugin(), externalBeatRuntime()],
   server: {
+    host: '0.0.0.0',
     port: 5175,
     proxy: {
+      ...(musicApiEndpoint
+        ? {
+            [`${DEV_MUSIC_PROXY_PREFIX}/`]: {
+              target: musicApiEndpoint.origin,
+              changeOrigin: true,
+              // 让手机沿用已获准的本机开发来源,远程音乐接口不认识局域网 IP。
+              headers: {
+                Origin: 'http://localhost:5175',
+                Referer: 'http://localhost:5175/',
+                Cookie: '',
+                Authorization: '',
+              },
+              rewrite: (path: string) => path.slice(DEV_MUSIC_PROXY_PREFIX.length),
+            },
+          }
+        : {}),
       '/api': {
         target: 'http://localhost:8788',
-        changeOrigin: true,
+        // 保留浏览器访问的 Host,使局域网请求通过后端同源校验。
+        changeOrigin: false,
       },
     },
   },

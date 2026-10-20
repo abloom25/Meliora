@@ -1,7 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { MusicConfig } from '../types/music'
+import type { MusicConfig } from '../../shared/music-config'
 import LocalTrackEditor from '../admin/components/LocalTrackEditor.vue'
 import AdvancedSettingsEditor from '../admin/components/AdvancedSettingsEditor.vue'
 import SecurityEditor from '../admin/components/SecurityEditor.vue'
@@ -13,13 +13,7 @@ const adminApiMock = vi.hoisted(() => ({
   testMusicApi: vi.fn(),
 }))
 
-vi.mock('../admin/services/admin-api', () => ({
-  MAX_UPLOAD_BYTES: 25 * 1024 * 1024,
-  MAX_UPLOAD_SIZE_LABEL: '25MB',
-  changePassword: adminApiMock.changePassword,
-  uploadFile: adminApiMock.uploadFile,
-  testMusicApi: adminApiMock.testMusicApi,
-}))
+vi.mock('../admin/composables/useAdminApi', () => ({ useAdminApi: () => adminApiMock }))
 
 function config(patch: Partial<MusicConfig> = {}): MusicConfig {
   return {
@@ -39,6 +33,18 @@ describe('admin consistency components', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     document.body.innerHTML = ''
+  })
+
+  it('explains token playback limitations and lets users clear a legacy token', async () => {
+    const wrapper = mount(SiteSettingsEditor, {
+      props: { config: config({ apiToken: 'legacy-token' }) },
+    })
+    expect(wrapper.text()).toContain('暂不支持 Token 音源')
+    await wrapper.find('input[placeholder="暂不支持，请留空"]').setValue('')
+    const updated = wrapper.emitted('update:config')?.at(-1)?.[0]
+    expect(updated).not.toHaveProperty('apiToken')
+    expect(updated).toMatchObject({ siteName: 'Meliora' })
+    wrapper.unmount()
   })
 
   it('requires an 8 character password before changing admin password', async () => {
@@ -288,6 +294,56 @@ describe('admin consistency components', () => {
     expect(wrapper.emitted('file-staged')?.[0]).toEqual([
       { path: 'public/icon.png', blobSha: 'a'.repeat(40) },
     ])
+    await wrapper.setProps({ config: { ...config(), siteIcon: './icon.png' } })
+    expect(wrapper.find('.icon-preview img').attributes('src')).toBe(
+      'data:image/png;base64,aWNvbg==',
+    )
+    const updateCount = wrapper.emitted('update:config')?.length
+    await wrapper.find('.icon-preview img').trigger('error')
+    expect(wrapper.emitted('update:config')?.length).toBe(updateCount)
+    expect(wrapper.find('.icon-preview img').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('does not delete a configured icon when its remote preview fails', async () => {
+    const wrapper = mount(SiteSettingsEditor, {
+      props: { config: config({ siteIcon: 'https://example.com/icon.png' }) },
+    })
+    await wrapper.find('.icon-preview img').trigger('error')
+    expect(wrapper.emitted('update:config')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('uses the uploaded data URL in local development config when no public file is written', async () => {
+    adminApiMock.uploadFile.mockResolvedValue({
+      ok: true,
+      local: true,
+      path: 'public/icon.png',
+      blobSha: 'local-dev',
+    })
+    const dataUrl = 'data:image/png;base64,aWNvbg=='
+    class FakeFileReader {
+      result = dataUrl
+      onload: (() => void) | null = null
+      readAsDataURL() {
+        this.onload?.()
+      }
+    }
+    vi.stubGlobal('FileReader', FakeFileReader)
+    const wrapper = mount(SiteSettingsEditor, { props: { config: config() } })
+    const input = wrapper.find<HTMLInputElement>('input[type="file"]')
+    Object.defineProperty(input.element, 'files', {
+      value: [new File(['icon'], 'icon.png', { type: 'image/png' })],
+      configurable: true,
+    })
+    await input.trigger('change')
+    await flushPromises()
+    expect(wrapper.emitted('update:config')?.[0]).toEqual([{ ...config(), siteIcon: dataUrl }])
+    await wrapper.setProps({ config: { ...config(), siteIcon: dataUrl } })
+    expect(wrapper.find('.icon-preview img').attributes('src')).toBe(dataUrl)
+    await wrapper.find('.icon-preview img').trigger('error')
+    expect(wrapper.emitted('update:config')).toHaveLength(1)
+    wrapper.unmount()
   })
 
   it('does not offer SVG as an uploadable site icon type', () => {

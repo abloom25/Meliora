@@ -31,35 +31,7 @@ export interface AdminUser {
   authenticated: boolean
 }
 
-export interface ConfigPayload {
-  siteName: string
-  siteIcon?: string
-  apiEndpoint: string
-  apiToken?: string
-  playlists: Array<{ server: 'netease' | 'tencent'; playlistId: string; enabled?: boolean }>
-  localTracks: Array<{
-    id: string
-    title: string
-    artist: string
-    audio: string
-    album?: string
-    cover?: string
-    lyrics?: string
-  }>
-  githubProxy?: string
-  umami?: {
-    enabled?: boolean
-    scriptUrl?: string
-    websiteId?: string
-  }
-  googleAnalytics?: {
-    enabled?: boolean
-    measurementId?: string
-  }
-  googleSiteVerification?: string
-  customCss?: string
-  customJs?: string
-}
+export type { MusicConfig as ConfigPayload } from '../../shared/music-config'
 
 export interface UploadPayload {
   path: string

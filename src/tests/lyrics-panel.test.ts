@@ -3,11 +3,19 @@ import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import LyricsPanel from '../components/LyricsPanel.vue'
-import { hasCachedTrackLyrics, hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
+import {
+  getLyricsSource,
+  hasCachedTrackLyrics,
+  hasTrackLyricsSource,
+  loadTrackLyrics,
+} from '../services/lyrics'
 import { usePlayerStore } from '../stores/player'
-import type { LyricLine, LyricsSnapshot, Track } from '../types/music'
+import type { LyricLine, LyricsSnapshot, Track } from '../core/types'
+import type { LyricsDebugSnapshot } from '../core/diagnostics/lyrics-debug'
+import type { LyricPlaybackState } from '../core/lyrics/render-schedule'
 
 vi.mock('../services/lyrics', () => ({
+  getLyricsSource: vi.fn(() => null),
   hasCachedTrackLyrics: vi.fn(() => false),
   hasTrackLyricsSource: vi.fn(() => true),
   loadTrackLyrics: vi.fn(),
@@ -15,6 +23,7 @@ vi.mock('../services/lyrics', () => ({
 }))
 
 const mockedLoadTrackLyrics = vi.mocked(loadTrackLyrics)
+const mockedGetLyricsSource = vi.mocked(getLyricsSource)
 const mockedHasCachedTrackLyrics = vi.mocked(hasCachedTrackLyrics)
 const mockedHasTrackLyricsSource = vi.mocked(hasTrackLyricsSource)
 
@@ -190,7 +199,8 @@ function runSpringFrames(count: number, stepMs = 16) {
 }
 
 function lineY(wrapper: VueWrapper, index: number): number {
-  const value = wrapper.findAll<HTMLElement>('.lyric-line')[index]?.element.style.translate ?? ''
+  const row = wrapper.find<HTMLElement>(`[data-lyric-index="${index}"]`)
+  const value = row.exists() ? row.element.style.translate : ''
   return Number.parseFloat(value.replace(/^0\s+/, '')) || 0
 }
 
@@ -234,7 +244,14 @@ async function layoutPanel(
   return viewport
 }
 
-async function mountLyricsPanel(options: { currentTime?: number; active?: boolean } = {}) {
+interface PanelOptions {
+  currentTime?: number
+  active?: boolean
+  getLyricsPlaybackState?: () => LyricPlaybackState
+  subscribeLyricsPlayback?: (listener: () => void) => () => void
+}
+
+async function mountLyricsPanel(options: PanelOptions = {}) {
   const pinia = createPinia()
   setActivePinia(pinia)
   const store = usePlayerStore()
@@ -242,12 +259,14 @@ async function mountLyricsPanel(options: { currentTime?: number; active?: boolea
   store.currentTrackId = track.id
   store.currentTime = options.currentTime ?? 0
   store.settings.lyricAnimation = true
-  store.settings.lyricFontSize = 20
+  store.settings.lyricScale = 1
 
   const wrapper = mount(LyricsPanel, {
     attachTo: document.body,
     props: {
       active: options.active ?? true,
+      getLyricsPlaybackState: options.getLyricsPlaybackState,
+      subscribeLyricsPlayback: options.subscribeLyricsPlayback,
     },
     global: {
       plugins: [pinia],
@@ -262,10 +281,12 @@ async function mountLyricsPanel(options: { currentTime?: number; active?: boolea
 }
 
 /** 挂载并等歌词就绪、尺寸就位 */
-async function mountReadyPanel(options: { currentTime?: number; active?: boolean } = {}) {
+async function mountReadyPanel(options: PanelOptions = {}) {
   const mounted = await mountLyricsPanel(options)
   await flushVueUpdates()
   await layoutPanel(mounted.wrapper)
+  runSpringFrames(120)
+  await flushVueUpdates()
   return mounted
 }
 
@@ -275,6 +296,195 @@ async function moveTo(store: ReturnType<typeof usePlayerStore>, time: number) {
 }
 
 describe('LyricsPanel', () => {
+  it('shows timed waiting dots in the intro and interlude, freezes on pause and clears at singing/end', async () => {
+    mockedLoadTrackLyrics.mockResolvedValueOnce([
+      { time: 12, endTime: 14, text: 'First' },
+      { time: 30, endTime: 32, text: 'Second' },
+    ])
+    const state: LyricPlaybackState = {
+      timeSeconds: 4,
+      playing: false,
+      playbackRate: 1,
+      seeking: false,
+    }
+    const listeners = new Set<() => void>()
+    const { wrapper } = await mountReadyPanel({
+      getLyricsPlaybackState: () => state,
+      subscribeLyricsPlayback: (listener) => {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+    })
+    const notify = async (time: number) => {
+      state.timeSeconds = time
+      listeners.forEach((listener) => listener())
+      await flushVueUpdates()
+    }
+    expect(wrapper.get('.lyric-waiting').attributes('aria-label')).toBe('前奏')
+    expect(wrapper.findAll('.waiting-dot')).toHaveLength(3)
+    expect(wrapper.get<HTMLElement>('.lyric-waiting').element.style.visibility).toBe('visible')
+    expect(wrapper.classes()).toContain('paused')
+    const before = wrapper.get('.lyrics-waiting-indicator').html()
+    vi.advanceTimersByTime(1000)
+    expect(wrapper.get('.lyrics-waiting-indicator').html()).toBe(before)
+    await notify(12.5)
+    expect(wrapper.find('.lyric-waiting').exists()).toBe(false)
+    expect(wrapper.get('.lyric-line.active').text()).toBe('First')
+    await notify(20)
+    expect(wrapper.get('.lyric-waiting').attributes('aria-label')).toBe('间奏')
+    expect(wrapper.find('.lyric-line.active').exists()).toBe(false)
+    await notify(30.5)
+    expect(wrapper.find('.lyric-waiting').exists()).toBe(false)
+    await notify(33)
+    expect(wrapper.find('.lyric-waiting').exists()).toBe(false)
+    await notify(3)
+    expect(wrapper.get('.lyric-waiting').attributes('aria-label')).toBe('前奏')
+  })
+
+  it('moves waiting dots with the next lyric when seeking while paused, including another interval', async () => {
+    mockedLoadTrackLyrics.mockResolvedValueOnce([
+      { time: 12, endTime: 14, text: 'First' },
+      { time: 30, endTime: 32, text: 'Second' },
+    ])
+    const { wrapper, store } = await mountReadyPanel({ currentTime: 30.5 })
+    const halfGap = Math.min(100, Math.max(52, VIEWPORT * 0.16, GAP * 2)) / 2
+    const assertAttached = (index: number) => {
+      const dots = wrapper.get<HTMLElement>('.lyric-waiting').element
+      expect(dots.dataset.waitingAnchor).toBe(String(index))
+      expect(dots.style.visibility).toBe('visible')
+      expect(Number.parseFloat(dots.style.top)).toBeCloseTo(lineY(wrapper, index) - halfGap, 1)
+    }
+    await moveTo(store, 20)
+    assertAttached(1)
+    const initial = Number.parseFloat(wrapper.get<HTMLElement>('.lyric-waiting').element.style.top)
+    expect(initial).not.toBeCloseTo(VIEWPORT * 0.42, 0)
+    runSpringFrames(8)
+    assertAttached(1)
+    expect(
+      Number.parseFloat(wrapper.get<HTMLElement>('.lyric-waiting').element.style.top),
+    ).not.toBeCloseTo(initial, 0)
+    await moveTo(store, 4)
+    assertAttached(0)
+    const intro = wrapper.get('.lyric-waiting').element
+    await moveTo(store, 8)
+    expect(wrapper.get('.lyric-waiting').element).toBe(intro)
+    assertAttached(0)
+    runSpringFrames(120)
+    assertAttached(0)
+    expect(Number.parseFloat((intro as HTMLElement).style.top)).toBeCloseTo(VIEWPORT * 0.42, 0)
+  })
+
+  it('uses static waiting dots and boundary timers with lyric animation disabled', async () => {
+    mockedLoadTrackLyrics.mockResolvedValueOnce([{ time: 12, endTime: 14, text: 'First' }])
+    const state: LyricPlaybackState = {
+      timeSeconds: 4,
+      playing: true,
+      playbackRate: 1,
+      seeking: false,
+    }
+    const { wrapper, store } = await mountReadyPanel({ getLyricsPlaybackState: () => state })
+    store.settings.lyricAnimation = false
+    store.isPlaying = true
+    await flushVueUpdates()
+    clearAnimationFrames()
+    vi.advanceTimersByTime(1000)
+    await flushVueUpdates()
+    expect(
+      wrapper.findAll('.waiting-dot').map((dot) => (dot.element as HTMLElement).style.opacity),
+    ).toEqual(['0.65', '0.65', '0.65'])
+    expect(rafCallbacks).toHaveLength(0)
+    expect(wrapper.classes()).not.toContain('paused')
+    expect(wrapper.get<HTMLElement>('.lyric-waiting').element.style.visibility).toBe('visible')
+  })
+
+  it('hides waiting dots during browsing and restores them after automatic follow resumes', async () => {
+    mockedLoadTrackLyrics.mockResolvedValueOnce([{ time: 12, endTime: 14, text: 'First' }])
+    const { wrapper } = await mountReadyPanel({ currentTime: 4 })
+    expect(wrapper.find('.lyric-waiting').exists()).toBe(true)
+    await wrapper.get('.lyrics-viewport').trigger('wheel', { deltaY: 60, deltaMode: 0 })
+    expect(wrapper.find('.lyric-waiting').exists()).toBe(false)
+    expect(wrapper.find('.browse-return').exists()).toBe(false)
+    vi.advanceTimersByTime(3200)
+    await flushVueUpdates()
+    expect(wrapper.find('.lyric-waiting').exists()).toBe(true)
+  })
+
+  it('uses real media boundaries at double speed, freezes while buffering and stops all hidden rendering', async () => {
+    mockedLoadTrackLyrics.mockResolvedValueOnce([
+      { time: 0, text: 'First' },
+      { time: 0.5, text: 'Second' },
+      { time: 1, text: 'Third' },
+    ])
+    const state: LyricPlaybackState = {
+      timeSeconds: 0.2,
+      playing: true,
+      playbackRate: 2,
+      seeking: false,
+    }
+    const listeners = new Set<() => void>()
+    const { wrapper, store } = await mountReadyPanel({
+      getLyricsPlaybackState: () => state,
+      subscribeLyricsPlayback: (listener) => {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+    })
+    const notify = () => listeners.forEach((listener) => listener())
+    store.settings.lyricAnimation = false
+    store.isPlaying = true
+    await flushVueUpdates()
+    clearAnimationFrames()
+    const timers = vi.spyOn(window, 'setTimeout')
+    notify()
+    expect(timers.mock.calls.some(([, delay]) => delay === 150)).toBe(true)
+    expect(rafCallbacks).toHaveLength(0)
+    state.timeSeconds = 0.51
+    vi.advanceTimersByTime(150)
+    await flushVueUpdates()
+    expect(wrapper.get('.lyric-line.active').text()).toContain('Second')
+    state.playing = false
+    notify()
+    const beforeBuffer = wrapper.emitted('snapshot')?.length
+    vi.advanceTimersByTime(5000)
+    expect(wrapper.emitted('snapshot')?.length).toBe(beforeBuffer)
+    state.timeSeconds = 1.1
+    state.playing = true
+    notify()
+    await flushVueUpdates()
+    expect(wrapper.get('.lyric-line.active').text()).toContain('Third')
+    state.timeSeconds = 0.1
+    state.playing = false
+    notify()
+    await flushVueUpdates()
+    expect(wrapper.get('.lyric-line.active').text()).toContain('First')
+    await wrapper.setProps({ active: false })
+    const beforeInactive = wrapper.emitted('snapshot')?.length
+    state.timeSeconds = 1.1
+    notify()
+    store.currentTime = 1.1
+    await flushVueUpdates()
+    expect(wrapper.emitted('snapshot')?.length).toBe(beforeInactive)
+    await wrapper.setProps({ active: true })
+    expect(wrapper.get('.lyric-line.active').text()).toContain('Third')
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+    try {
+      document.dispatchEvent(new Event('visibilitychange'))
+      const beforeHidden = wrapper.emitted('snapshot')?.length
+      state.timeSeconds = 0.1
+      notify()
+      store.currentTime = 0.1
+      await flushVueUpdates()
+      expect(wrapper.emitted('snapshot')?.length).toBe(beforeHidden)
+    } finally {
+      Reflect.deleteProperty(document, 'hidden')
+    }
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushVueUpdates()
+    expect(wrapper.get('.lyric-line.active').text()).toContain('First')
+    wrapper.unmount()
+    expect(listeners.size).toBe(0)
+  })
+
   beforeEach(() => {
     vi.useFakeTimers()
     mockedHasCachedTrackLyrics.mockReset()
@@ -283,6 +493,8 @@ describe('LyricsPanel', () => {
     mockedHasTrackLyricsSource.mockReturnValue(true)
     mockedLoadTrackLyrics.mockReset()
     mockedLoadTrackLyrics.mockResolvedValue(lyricsLines)
+    mockedGetLyricsSource.mockReset()
+    mockedGetLyricsSource.mockReturnValue(null)
     rafCallbacks = []
     installAnimationFrameMock()
     MockResizeObserver.instances = []
@@ -298,7 +510,344 @@ describe('LyricsPanel', () => {
     document.body.innerHTML = ''
   })
 
+  it('bounds mounted word nodes on long songs and binds distant karaoke by global index', async () => {
+    const longLines: LyricLine[] = Array.from({ length: 2000 }, (_, index) => ({
+      time: index * 5,
+      endTime: index * 5 + 4,
+      text: `Line ${index}`,
+      words: Array.from({ length: 8 }, (_, word) => ({
+        time: index * 5 + word * 0.5,
+        duration: 0.5,
+        text: String(word),
+      })),
+    }))
+    mockedLoadTrackLyrics.mockResolvedValueOnce(longLines)
+    const { wrapper, store } = await mountReadyPanel()
+    expect(wrapper.findAll('.lyric-line').length).toBeLessThan(50)
+    expect(wrapper.find('[data-lyric-index="1500"]').exists()).toBe(false)
+    await moveTo(store, 7500.25)
+    runSpringFrames(120)
+    await flushVueUpdates()
+    const active = wrapper.get<HTMLElement>('[data-lyric-index="1500"]')
+    expect(active.classes()).toContain('active')
+    expect(
+      active.get<HTMLElement>('.lyric-word').element.style.getPropertyValue('--lyric-word-fill'),
+    ).toBe('0.500')
+    expect(lineY(wrapper, 1500)).toBeCloseTo(ANCHOR_Y, 0)
+    expect(wrapper.findAll('.lyric-line').length).toBeLessThan(55)
+    expect(wrapper.findAll('.lyric-word').length).toBeLessThan(440)
+    expect(wrapper.find('[data-lyric-index="0"]').exists()).toBe(false)
+  })
+
+  it('measures newly mounted variable-height rows without losing the follow anchor', async () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.dataset.lyricIndex === '500' ? 80 : 40
+    })
+    mockedLoadTrackLyrics.mockResolvedValueOnce(
+      Array.from({ length: 1000 }, (_, index) => ({
+        time: index * 5,
+        text: `Line ${index}`,
+        translation: index === 500 ? 'A long translation' : undefined,
+      })),
+    )
+    const { wrapper, store } = await mountReadyPanel()
+    await moveTo(store, 2501)
+    runSpringFrames(120)
+    await flushVueUpdates()
+    expect(lineY(wrapper, 500)).toBeCloseTo(VIEWPORT * 0.42 - 40, 0)
+    expect(lineY(wrapper, 501) - lineY(wrapper, 500)).toBeCloseTo(80 + GAP, 0)
+    store.settings.lyricTranslation = false
+    await flushVueUpdates()
+    expect(wrapper.get('[data-lyric-index="500"]').find('.lyric-translation').exists()).toBe(false)
+    expect(lineY(wrapper, 500)).toBeCloseTo(VIEWPORT * 0.42 - 40, 0)
+  })
+
+  it('mounts and focuses distant rows through keyboard navigation without seeking playback', async () => {
+    mockedLoadTrackLyrics.mockResolvedValueOnce(
+      Array.from({ length: 1000 }, (_, index) => ({
+        time: index * 5,
+        text: `Line ${index}`,
+      })),
+    )
+    const { wrapper } = await mountReadyPanel()
+    const first = wrapper.get<HTMLElement>('[data-lyric-index="0"]')
+    first.element.focus()
+    await first.trigger('keydown', { key: 'End' })
+    await flushVueUpdates()
+    expect(document.activeElement).toBe(wrapper.get('[data-lyric-index="999"]').element)
+    expect(wrapper.get('[data-lyric-index="999"]').attributes('tabindex')).toBe('0')
+    expect(wrapper.emitted('seek')).toBeUndefined()
+    await wrapper.get('[data-lyric-index="999"]').trigger('keydown', { key: 'ArrowUp' })
+    await flushVueUpdates()
+    expect(document.activeElement).toBe(wrapper.get('[data-lyric-index="998"]').element)
+    expect(wrapper.findAll('.lyric-line').length).toBeLessThan(80)
+  })
+
+  it('publishes bounded real lyric diagnostics and releases them when disabled', async () => {
+    mockedLoadTrackLyrics.mockResolvedValue(
+      appleMusicLines.map((line, index) =>
+        index === 0
+          ? { ...line, text: 'a'.repeat(200), translation: '翻译', roman: 'roman' }
+          : index === 3
+            ? { ...line, time: 0, endTime: 6 }
+            : line,
+      ),
+    )
+    mockedGetLyricsSource.mockReturnValue('amll')
+    const { wrapper, store } = await mountReadyPanel({ currentTime: 3.5 })
+    expect(wrapper.emitted('debug')).toBeUndefined()
+    await wrapper.setProps({ debugEnabled: true })
+    await vi.advanceTimersByTimeAsync(0)
+    const latest = () => wrapper.emitted('debug')?.at(-1)?.[0] as LyricsDebugSnapshot | null
+    expect(latest()).toMatchObject({
+      trackId: track.id,
+      status: 'ready',
+      source: 'amll',
+      lineCount: 4,
+      wordLineCount: 3,
+      wordCount: 3,
+      harmonyLineCount: 1,
+      translationLineCount: 1,
+      romanLineCount: 1,
+      mediaSeconds: 3.5,
+      panelActive: true,
+      userBrowsing: false,
+      engine: { mountedLineCount: 4, scrollMode: 'follow' },
+    })
+    expect(latest()?.activeLines).toHaveLength(3)
+    expect(latest()?.activeIndices).toEqual([0, 1, 2, 3])
+    expect(latest()?.activeLines[0]?.text).toHaveLength(120)
+    const before = wrapper.emitted('debug')!.length
+    store.isPlaying = true
+    await nextTick()
+    runSpringFrames(60)
+    const updates = wrapper
+      .emitted('debug')!
+      .slice(before)
+      .map(([value]) => value as LyricsDebugSnapshot)
+    expect(updates.length).toBeLessThanOrEqual(5)
+    for (let index = 1; index < updates.length; index += 1)
+      expect(updates[index]!.sampledAtMs - updates[index - 1]!.sampledAtMs).toBeGreaterThanOrEqual(
+        200,
+      )
+    await wrapper.get('.lyrics-viewport').trigger('wheel', { deltaY: 100 })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(latest()).toMatchObject({ userBrowsing: true, engine: { scrollMode: 'browse' } })
+    await wrapper.setProps({ debugEnabled: false })
+    expect(latest()).toBeNull()
+    const stoppedCount = wrapper.emitted('debug')!.length
+    runSpringFrames(30)
+    expect(wrapper.emitted('debug')).toHaveLength(stoppedCount)
+  })
+
+  it('clears old previews during track loading, reports failure, and cancels pending debug samples', async () => {
+    const { wrapper, store } = await mountReadyPanel()
+    await wrapper.setProps({ debugEnabled: true })
+    await vi.advanceTimersByTimeAsync(0)
+    const pending = makeDeferred<LyricLine[]>()
+    mockedLoadTrackLyrics.mockReturnValueOnce(pending.promise)
+    store.setTracks([track, secondTrack])
+    store.selectTrack(secondTrack)
+    await flushVueUpdates()
+    expect(wrapper.emitted('debug')?.at(-1)?.[0]).toBeNull()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(wrapper.emitted('debug')?.at(-1)?.[0]).toMatchObject({
+      trackId: secondTrack.id,
+      status: 'loading',
+      source: null,
+      lineCount: 0,
+      activeLines: [],
+      engine: { mountedLineCount: 0 },
+    })
+    pending.reject(new Error('unavailable'))
+    await flushVueUpdates()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(wrapper.emitted('debug')?.at(-1)?.[0]).toMatchObject({ status: 'error' })
+    store.currentTime = 15
+    await nextTick()
+    wrapper.unmount()
+    const count = wrapper.emitted('debug')!.length
+    expect(wrapper.emitted('debug')?.at(-1)?.[0]).toBeNull()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(wrapper.emitted('debug')).toHaveLength(count)
+  })
+
+  it('reports reduced motion, inactive and hidden states without starting a diagnostic render loop', async () => {
+    const originalMatchMedia = window.matchMedia
+    vi.spyOn(window, 'matchMedia').mockImplementation((query) => ({
+      ...originalMatchMedia(query),
+      matches: query === '(prefers-reduced-motion: reduce)',
+    }))
+    const { wrapper, store } = await mountReadyPanel()
+    try {
+      await wrapper.setProps({ debugEnabled: true })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(wrapper.emitted('debug')?.at(-1)?.[0]).toMatchObject({
+        playing: false,
+        reducedMotion: true,
+        animationEnabled: false,
+        renderLoopRunning: false,
+      })
+      store.isPlaying = true
+      await nextTick()
+      await wrapper.setProps({ active: false })
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(200)
+      expect(wrapper.emitted('debug')?.at(-1)?.[0]).toMatchObject({
+        playing: true,
+        panelActive: false,
+        documentHidden: true,
+        renderLoopRunning: false,
+        engine: { mountedLineCount: 5, stagedLineCount: 0, visibleLineCount: 0 },
+      })
+      store.settings.lyricTranslation = false
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(200)
+      expect(wrapper.emitted('debug')?.at(-1)?.[0]).toMatchObject({
+        translationEnabled: false,
+        translationLineCount: 1,
+        renderLoopRunning: false,
+      })
+    } finally {
+      Reflect.deleteProperty(document, 'hidden')
+    }
+  })
+
   describe('loading', () => {
+    it('ignores queued provider updates and completion after unmount', async () => {
+      const pending = makeDeferred<LyricLine[]>()
+      let publish!: (lines: LyricLine[]) => void
+      mockedLoadTrackLyrics.mockImplementationOnce((_track, _signal, progress) => {
+        publish = progress!
+        return pending.promise
+      })
+      const { wrapper } = await mountLyricsPanel()
+      wrapper.unmount()
+      const snapshots = wrapper.emitted('snapshot')?.length ?? 0
+      const availability = wrapper.emitted('availability')?.length ?? 0
+
+      publish(karaokeLines)
+      pending.resolve(lyricsLines)
+      await flushVueUpdates()
+
+      expect(wrapper.emitted('snapshot')?.length ?? 0).toBe(snapshots)
+      expect(wrapper.emitted('availability')?.length ?? 0).toBe(availability)
+    })
+
+    it('renders interim lyrics and upgrades them without waiting for the final source', async () => {
+      const pending = makeDeferred<LyricLine[]>()
+      let publish!: (lines: LyricLine[]) => void
+      mockedLoadTrackLyrics.mockImplementationOnce((_track, _signal, progress) => {
+        publish = progress!
+        return pending.promise
+      })
+      const { wrapper } = await mountLyricsPanel()
+      const plainLines: LyricLine[] = [{ time: 0, text: 'Plain first' }]
+      mockedGetLyricsSource.mockImplementation((lines) =>
+        lines === plainLines ? 'meting' : lines === karaokeLines ? 'netease' : null,
+      )
+      publish(plainLines)
+      await flushVueUpdates()
+      expect(wrapper.find('.lyric-line').text()).toContain('Plain first')
+      expect(wrapper.emitted('snapshot')?.at(-1)?.[0]).toMatchObject({ source: 'meting' })
+      publish(karaokeLines)
+      await flushVueUpdates()
+      expect(wrapper.findAll('.lyric-line').length).toBeGreaterThan(0)
+      expect(wrapper.findAll('.lyric-word').length).toBeGreaterThan(0)
+      expect(wrapper.emitted('snapshot')?.at(-1)?.[0]).toMatchObject({ source: 'netease' })
+      const snapshotsBefore = wrapper.emitted('snapshot')?.length
+      pending.resolve(karaokeLines)
+      await flushVueUpdates()
+      expect(wrapper.emitted('snapshot')?.length).toBe(snapshotsBefore)
+    })
+    it('clears the previous lyrics source while the next track is loading', async () => {
+      mockedGetLyricsSource.mockImplementation((lines) => (lines === lyricsLines ? 'amll' : null))
+      const { wrapper, store } = await mountReadyPanel()
+      expect(wrapper.emitted('snapshot')?.at(-1)?.[0]).toMatchObject({ source: 'amll' })
+      const pending = makeDeferred<LyricLine[]>()
+      mockedLoadTrackLyrics.mockReturnValueOnce(pending.promise)
+      store.setTracks([track, secondTrack])
+      store.selectTrack(secondTrack, [track, secondTrack])
+      await flushVueUpdates()
+      expect(wrapper.emitted('snapshot')?.at(-1)?.[0]).toMatchObject({
+        status: 'loading',
+        source: undefined,
+        lines: [],
+      })
+      pending.resolve([])
+      await flushVueUpdates()
+    })
+    it.each([0, 0.05])(
+      'keeps an in-flight line transition when the same lyrics gain word timing (offset: %s)',
+      async (offset) => {
+        const pending = makeDeferred<LyricLine[]>()
+        let publish!: (lines: LyricLine[]) => void
+        mockedLoadTrackLyrics.mockImplementationOnce((_track, _signal, progress) => {
+          publish = progress!
+          return pending.promise
+        })
+        const { wrapper, store } = await mountLyricsPanel()
+        publish(lyricsLines)
+        await flushVueUpdates()
+        await layoutPanel(wrapper)
+        await moveTo(store, 10.5)
+        runSpringFrames(3)
+        const before = lineY(wrapper, 2)
+        const originalRow = wrapper.get('[data-lyric-index="2"]').element
+        expect(before).not.toBeCloseTo(ANCHOR_Y, 0)
+        const upgraded = lyricsLines.map((line) => ({
+          ...line,
+          time: line.time! + offset,
+          words: [{ time: line.time! + offset, duration: 2, text: line.text }],
+        }))
+
+        publish(upgraded)
+        await flushVueUpdates()
+
+        expect(lineY(wrapper, 2)).toBeCloseTo(before, 2)
+        expect(wrapper.get('[data-lyric-index="2"]').element).toBe(originalRow)
+        expect(wrapper.get('[data-lyric-index="2"] .lyric-word').attributes('style')).toContain(
+          `--lyric-word-fill: ${((0.5 - offset) / 2).toFixed(3)}`,
+        )
+        runSpringFrames(120)
+        expect(lineY(wrapper, 2)).toBeCloseTo(ANCHOR_Y, 0)
+        pending.resolve(upgraded)
+        await flushVueUpdates()
+      },
+    )
+    it('rebuilds its timeline when interim lyrics are replaced with new timestamps', async () => {
+      const pending = makeDeferred<LyricLine[]>()
+      let publish!: (lines: LyricLine[]) => void
+      mockedLoadTrackLyrics.mockImplementationOnce((_track, _signal, progress) => {
+        publish = progress!
+        return pending.promise
+      })
+      const { wrapper, store } = await mountLyricsPanel({ currentTime: 1 })
+      publish([
+        { time: 0, text: 'First' },
+        { time: 10, text: 'Second' },
+      ])
+      await flushVueUpdates()
+      expect(wrapper.find('.lyric-line.active').text()).toBe('First')
+
+      const replacement: LyricLine[] = [
+        { time: 0, text: 'First' },
+        { time: 0.5, text: 'Second' },
+      ]
+      publish(replacement)
+      await flushVueUpdates()
+      expect(wrapper.find('.lyric-line.active').text()).toBe('Second')
+      await moveTo(store, 0.25)
+      expect(wrapper.find('.lyric-line.active').text()).toBe('First')
+      await moveTo(store, 0.75)
+      expect(wrapper.find('.lyric-line.active').text()).toBe('Second')
+      pending.resolve(replacement)
+      await flushVueUpdates()
+    })
+
     it('selects and positions the current line as soon as lyrics finish loading', async () => {
       const deferred = makeDeferred<LyricLine[]>()
       mockedLoadTrackLyrics.mockReturnValueOnce(deferred.promise)
@@ -423,6 +972,140 @@ describe('LyricsPanel', () => {
   })
 
   describe('following playback', () => {
+    it('releases a finished native line after a brief overlap and restores the handoff after seeking back', async () => {
+      const lines: LyricLine[] = [
+        {
+          time: 0,
+          endTime: 2.01,
+          text: 'First',
+          wordSource: 'native',
+          words: [{ time: 0, duration: 2.01, text: 'First' }],
+        },
+        {
+          time: 2,
+          endTime: 4,
+          text: 'Second',
+          wordSource: 'native',
+          words: [{ time: 2, duration: 2, text: 'Second' }],
+        },
+        {
+          time: 6,
+          endTime: 7,
+          text: 'Third',
+          wordSource: 'native',
+          words: [{ time: 6, duration: 1, text: 'Third' }],
+        },
+      ]
+      mockedLoadTrackLyrics.mockResolvedValueOnce(lines)
+      const { wrapper, store } = await mountReadyPanel({ currentTime: 1.5 })
+      const row = (index: number) => wrapper.get(`[data-lyric-index="${index}"]`)
+      const firstWord = row(0).get<HTMLElement>('.lyric-word').element
+      const assertHandoff = () => {
+        expect(row(0).classes()).toContain('completed')
+        expect(row(0).classes()).not.toContain('active')
+        expect(row(1).classes()).toContain('active')
+        expect(row(1).classes()).not.toContain('completed')
+        expect(wrapper.findAll('.lyric-line.active')).toHaveLength(1)
+        expect(row(1).attributes('tabindex')).toBe('0')
+        expect(wrapper.emitted('snapshot')?.at(-1)?.[0]).toMatchObject({
+          activeIndex: 1,
+          activeIndices: [1],
+        })
+        for (const property of ['--lyric-word-fill', '--lyric-word-edge', '--lyric-word-rise'])
+          expect(firstWord.style.getPropertyValue(property)).toBe('')
+        for (const character of firstWord.querySelectorAll<HTMLElement>('.lyric-char'))
+          expect(character.style.getPropertyValue('--lyric-char-emphasis')).toBe('')
+        expect(
+          row(1)
+            .get<HTMLElement>('.lyric-word')
+            .element.style.getPropertyValue('--lyric-word-fill'),
+        ).not.toBe('')
+      }
+
+      await moveTo(store, 2)
+      expect(
+        wrapper.findAll('.lyric-line.active').map((line) => line.attributes('data-lyric-index')),
+      ).toEqual(['0', '1'])
+      expect(firstWord.style.getPropertyValue('--lyric-word-fill')).not.toBe('')
+
+      await moveTo(store, 2.01)
+      assertHandoff()
+      await moveTo(store, 2.02)
+      assertHandoff()
+
+      await moveTo(store, 1.5)
+      expect(row(0).classes()).toContain('active')
+      expect(row(0).classes()).not.toContain('completed')
+      expect(row(1).classes()).not.toContain('active')
+      expect(firstWord.style.getPropertyValue('--lyric-word-fill')).not.toBe('')
+      expect(wrapper.emitted('snapshot')?.at(-1)?.[0]).toMatchObject({
+        activeIndex: 0,
+        activeIndices: [0],
+      })
+      await moveTo(store, 2.02)
+      assertHandoff()
+    })
+
+    it('distinguishes completed, singing and upcoming lines and restores them after seeking back', async () => {
+      const { wrapper, store } = await mountReadyPanel({ currentTime: 11 })
+      const classes = (index: number) => wrapper.get(`[data-lyric-index="${index}"]`).classes()
+
+      expect(classes(1)).toContain('completed')
+      expect(classes(2)).toContain('active')
+      expect(classes(2)).not.toContain('completed')
+      expect(classes(3)).not.toContain('completed')
+
+      await moveTo(store, 1)
+      expect(classes(0)).toContain('active')
+      expect(classes(1)).not.toContain('completed')
+      expect(classes(2)).not.toContain('completed')
+    })
+
+    it('updates completed rows at a boundary even when the singing group stays unchanged', async () => {
+      mockedLoadTrackLyrics.mockResolvedValueOnce([
+        { time: 0, endTime: 10, text: 'Long voice' },
+        { time: 2, endTime: 2, text: 'Instant annotation', background: true },
+        { time: 12, endTime: 15, text: 'Last line' },
+      ])
+      const { wrapper, store } = await mountReadyPanel({ currentTime: 1 })
+      const annotation = () => wrapper.get('[data-lyric-index="1"]')
+      expect(annotation().classes()).not.toContain('completed')
+
+      await moveTo(store, 3)
+      expect(wrapper.get('[data-lyric-index="0"]').classes()).toContain('active')
+      expect(annotation().classes()).toContain('completed')
+
+      await moveTo(store, 15)
+      expect(wrapper.get('[data-lyric-index="2"]').classes()).toContain('completed')
+      expect(wrapper.findAll('.lyric-line.active')).toHaveLength(0)
+    })
+
+    it.each([140, 260])(
+      'keeps the spring and syllable animation active after shrinking the lyric stage to %ipx',
+      async (viewportHeight) => {
+        mockedLoadTrackLyrics.mockResolvedValueOnce(karaokeLines)
+        const { wrapper, store } = await mountReadyPanel()
+        await layoutPanel(wrapper, { viewportHeight, lineHeight: 28 })
+        runSpringFrames(120)
+        const anchor = viewportHeight * 0.42 - 14
+        const before = lineY(wrapper, 1)
+
+        await moveTo(store, 5.25)
+        expect(lineY(wrapper, 1)).toBeCloseTo(before, 5)
+        runSpringFrames(8)
+        expect(lineY(wrapper, 1)).toBeLessThan(before - 1)
+        expect(lineY(wrapper, 1)).toBeGreaterThan(anchor + 1)
+        runSpringFrames(120)
+        expect(lineY(wrapper, 1)).toBeCloseTo(anchor, 0)
+
+        const word = wrapper.get<HTMLElement>('[data-lyric-index="1"] .lyric-word')
+        expect(word.element.style.getPropertyValue('--lyric-word-fill')).toBe('0.250')
+        await moveTo(store, 5.75)
+        expect(word.element.style.getPropertyValue('--lyric-word-fill')).toBe('0.750')
+        expect(wrapper.classes()).not.toContain('animation-disabled')
+      },
+    )
+
     it('brings the new line to the anchor with a spring when currentTime moves on', async () => {
       const { wrapper, store } = await mountReadyPanel()
       const before = lineY(wrapper, 3)
@@ -518,7 +1201,7 @@ describe('LyricsPanel', () => {
 
       await moveTo(store, 60 * 5 + 1)
 
-      expect(wrapper.findAll('.lyric-line')[60]?.classes()).toContain('active')
+      expect(wrapper.get('[data-lyric-index="60"]').classes()).toContain('active')
       const start = lineY(wrapper, 60)
       expect(start - ANCHOR_Y).toBeGreaterThan(VIEWPORT * 0.5)
       expect(start - ANCHOR_Y).toBeLessThanOrEqual(VIEWPORT * 0.55 + 0.01)
@@ -547,6 +1230,7 @@ describe('LyricsPanel', () => {
     })
 
     it('runs a render loop while playing and stops it once paused', async () => {
+      mockedLoadTrackLyrics.mockResolvedValueOnce(karaokeLines)
       const { store } = await mountReadyPanel()
       clearAnimationFrames()
 
@@ -579,7 +1263,7 @@ describe('LyricsPanel', () => {
       expect(tempo).toBeLessThan(1)
     })
 
-    it('extrapolates the lyric clock between timeupdate events while playing', async () => {
+    it('uses boundary timers for plain lines between timeupdate events without continuous RAF', async () => {
       const rapidLines: LyricLine[] = Array.from({ length: 20 }, (_, index) => ({
         time: index * 0.3,
         text: `Rapid ${index}`,
@@ -589,11 +1273,11 @@ describe('LyricsPanel', () => {
 
       store.isPlaying = true
       await flushVueUpdates()
-      expect(rafCallbacks.length).toBeGreaterThan(0)
+      expect(rafCallbacks).toHaveLength(0)
 
       // timeupdate 事件间隔内(锚点仍停在 currentTime=0)推进 900ms 真实时间:
       // 外推时钟到 0.9s,高亮落在第 3 行(0.9s)
-      vi.advanceTimersByTime(900)
+      vi.advanceTimersByTime(904)
       flushAnimationFrames()
       await flushVueUpdates()
 
@@ -684,17 +1368,69 @@ describe('LyricsPanel', () => {
   })
 
   describe('layout', () => {
-    it('re-measures and keeps the active line anchored when lyricFontSize changes', async () => {
+    it.each(['observer', 'window'] as const)(
+      'keeps an in-flight line transition after an unchanged %s resize',
+      async (notification) => {
+        async function trajectory(notify: boolean) {
+          const { wrapper, store } = await mountReadyPanel()
+          await moveTo(store, 10)
+          runSpringFrames(3)
+          if (notify) {
+            if (notification === 'observer') MockResizeObserver.instances.at(-1)?.emit()
+            else window.dispatchEvent(new Event('resize'))
+          }
+          const positions: number[] = []
+          for (let frame = 0; frame < 20; frame += 1) {
+            runSpringFrames(1)
+            await flushVueUpdates()
+            positions.push(lineY(wrapper, 2))
+          }
+          wrapper.unmount()
+          return positions
+        }
+
+        expect(await trajectory(true)).toEqual(await trajectory(false))
+      },
+    )
+
+    it('remeasures missed hidden resizes and finishes interrupted positioning on return', async () => {
+      const { wrapper, store } = await mountReadyPanel()
+      await moveTo(store, 10)
+      runSpringFrames(3)
+      expect(lineY(wrapper, 2)).not.toBeCloseTo(ANCHOR_Y, 0)
+
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+      try {
+        document.dispatchEvent(new Event('visibilitychange'))
+        await layoutPanel(wrapper, { viewportHeight: 300, lineHeight: 60 })
+      } finally {
+        Reflect.deleteProperty(document, 'hidden')
+      }
+      document.dispatchEvent(new Event('visibilitychange'))
+      await flushVueUpdates()
+
+      expect(lineY(wrapper, 2)).toBeCloseTo(300 * 0.42 - 30, 0)
+      expect(lineY(wrapper, 3)).toBeCloseTo(300 * 0.42 - 30 + 60 + GAP, 0)
+    })
+
+    it('re-measures and keeps the active line anchored when the lyric scale changes', async () => {
       const { wrapper, store } = await mountReadyPanel()
       await moveTo(store, 10)
       runSpringFrames(120)
       expect(lineY(wrapper, 2)).toBeCloseTo(ANCHOR_Y, 0)
 
-      store.settings.lyricFontSize = 28
+      // 模拟倍率变化后浏览器提供的换行高度；不额外发 resize，验证设置本身触发重测。
+      wrapper.findAll<HTMLElement>('.lyric-line').forEach((line) => {
+        defineReadonlyNumber(line.element, 'offsetHeight', 60)
+      })
+      store.settings.lyricScale = 1.5
       await flushVueUpdates()
-      await layoutPanel(wrapper, { lineHeight: 60 })
 
+      expect(wrapper.element.style.getPropertyValue('--lyric-scale')).toBe('1.5')
       expect(wrapper.findAll('.lyric-line')[2]?.classes()).toContain('active')
+      // 改字号先保留屏幕位置，再追新排版目标。
+      expect(lineY(wrapper, 2)).toBeCloseTo(ANCHOR_Y, 0)
+      runSpringFrames(120)
       expect(lineY(wrapper, 2)).toBeCloseTo(VIEWPORT * 0.42 - 30, 0)
       expect(lineY(wrapper, 3)).toBeCloseTo(VIEWPORT * 0.42 - 30 + 60 + GAP, 0)
     })
@@ -710,15 +1446,20 @@ describe('LyricsPanel', () => {
       expect(MockResizeObserver.instances.length).toBeGreaterThan(0)
       MockResizeObserver.instances[0]?.emit(viewport)
       flushAnimationFrames()
+      expect(lineY(wrapper, 2)).toBeCloseTo(ANCHOR_Y, 0)
+      runSpringFrames(120)
       expect(lineY(wrapper, 2)).toBeCloseTo(300 * 0.42 - LINE / 2, 0)
 
       defineReadonlyNumber(viewport, 'clientHeight', 800)
       window.dispatchEvent(new Event('resize'))
       flushAnimationFrames()
+      expect(lineY(wrapper, 2)).toBeCloseTo(300 * 0.42 - LINE / 2, 0)
+      runSpringFrames(120)
       expect(lineY(wrapper, 2)).toBeCloseTo(800 * 0.42 - LINE / 2, 0)
     })
 
     it('hides lyric translations from the panel and snapshot when disabled', async () => {
+      mockedGetLyricsSource.mockImplementation((lines) => (lines === lyricsLines ? 'qq' : null))
       const { wrapper, store } = await mountReadyPanel()
       await moveTo(store, 10)
 
@@ -742,9 +1483,10 @@ describe('LyricsPanel', () => {
       expect(
         snapshotWithoutTranslation?.lines.find((line) => line.text === 'Line two'),
       ).not.toHaveProperty('translation')
+      expect(snapshotWithoutTranslation?.source).toBe('qq')
     })
 
-    it('hides lines far outside the viewport and reveals them as they approach', async () => {
+    it('unmounts distant lines and mounts them as they approach', async () => {
       const manyLines: LyricLine[] = Array.from({ length: 40 }, (_, index) => ({
         time: index * 5,
         text: `Line ${index}`,
@@ -752,19 +1494,39 @@ describe('LyricsPanel', () => {
       mockedLoadTrackLyrics.mockResolvedValueOnce(manyLines)
       const { wrapper, store } = await mountReadyPanel()
 
-      const rows = wrapper.findAll<HTMLElement>('.lyric-line')
-      expect(rows[30]?.element.style.visibility).toBe('hidden')
-      expect(rows[2]?.element.style.visibility).toBe('')
+      expect(wrapper.find('[data-lyric-index="30"]').exists()).toBe(false)
+      expect(wrapper.get<HTMLElement>('[data-lyric-index="2"]').element.style.visibility).toBe('')
 
       await moveTo(store, 30 * 5 + 1)
       runSpringFrames(120)
-      expect(rows[30]?.element.style.visibility).toBe('')
-      expect(rows[2]?.element.style.visibility).toBe('hidden')
+      await flushVueUpdates()
+      expect(wrapper.get<HTMLElement>('[data-lyric-index="30"]').element.style.visibility).toBe('')
+      expect(wrapper.find('[data-lyric-index="2"]').exists()).toBe(false)
     })
   })
 
   describe('browsing', () => {
-    it('does not take over while the user is browsing and follows again after 3200ms', async () => {
+    it('does not restart scrolling from a browsing timeout while the page is hidden', async () => {
+      const { wrapper } = await mountReadyPanel()
+      await wrapper.get('.lyrics-viewport').trigger('wheel', { deltaY: 100, deltaMode: 0 })
+      runSpringFrames(30)
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+      try {
+        document.dispatchEvent(new Event('visibilitychange'))
+        clearAnimationFrames()
+        vi.advanceTimersByTime(4000)
+        await flushVueUpdates()
+        expect(rafCallbacks).toHaveLength(0)
+      } finally {
+        Reflect.deleteProperty(document, 'hidden')
+      }
+      document.dispatchEvent(new Event('visibilitychange'))
+      await flushVueUpdates()
+      expect(wrapper.classes()).not.toContain('browsing')
+      expect(lineY(wrapper, 0)).toBeCloseTo(ANCHOR_Y, 0)
+    })
+
+    it('resumes smoothly after the last browsing gesture has been idle for 3.2 seconds', async () => {
       const { wrapper, store } = await mountReadyPanel()
 
       await wrapper.get('.lyrics-viewport').trigger('wheel', { deltaY: 100, deltaMode: 0 })
@@ -778,17 +1540,44 @@ describe('LyricsPanel', () => {
       await moveTo(store, 16)
       runSpringFrames(60)
       expect(wrapper.findAll('.lyric-line')[3]?.classes()).toContain('active')
-      // 高亮照常推进,但版面停在用户滚到的位置
-      expect(lineY(wrapper, 0)).toBeCloseTo(ANCHOR_Y - 140, 0)
-
-      vi.advanceTimersByTime(3199)
       expect(wrapper.classes()).toContain('browsing')
-
-      vi.advanceTimersByTime(1)
+      runSpringFrames(150)
       await flushVueUpdates()
-      runSpringFrames(120)
       expect(wrapper.classes()).not.toContain('browsing')
       expect(lineY(wrapper, 3)).toBeCloseTo(ANCHOR_Y, 0)
+    })
+
+    it('returns from distant lyrics without rendering a return button', async () => {
+      mockedLoadTrackLyrics.mockResolvedValueOnce(
+        Array.from({ length: 80 }, (_, index) => ({ time: index * 5, text: `Line ${index}` })),
+      )
+      const { wrapper, store } = await mountReadyPanel()
+      await wrapper.get('.lyrics-viewport').trigger('wheel', { deltaY: 1500, deltaMode: 0 })
+      runSpringFrames(120)
+      await flushVueUpdates()
+      await moveTo(store, 5)
+      expect(wrapper.classes()).toContain('browsing')
+      expect(wrapper.find('.browse-return').exists()).toBe(false)
+      vi.advanceTimersByTime(3200)
+      runSpringFrames(120)
+      await flushVueUpdates()
+      expect(wrapper.classes()).not.toContain('browsing')
+      expect(wrapper.find('.browse-return').exists()).toBe(false)
+      expect(lineY(wrapper, 1)).toBeCloseTo(ANCHOR_Y, 0)
+    })
+
+    it('does not take over within the gesture grace period even when a sentence changes', async () => {
+      const { wrapper, store } = await mountReadyPanel()
+      await wrapper.get('.lyrics-viewport').trigger('wheel', { deltaY: 40, deltaMode: 0 })
+      await moveTo(store, 5)
+      await flushVueUpdates()
+      expect(wrapper.classes()).toContain('browsing')
+      runSpringFrames(40)
+      await moveTo(store, 10)
+      expect(wrapper.classes()).toContain('browsing')
+      vi.advanceTimersByTime(3200)
+      await flushVueUpdates()
+      expect(wrapper.classes()).not.toContain('browsing')
     })
 
     it('scales wheel deltas given in lines and pages', async () => {
@@ -834,6 +1623,39 @@ describe('LyricsPanel', () => {
       expect(lineY(wrapper, 0)).toBeLessThan(released - 10)
     })
 
+    it('restores follow after a second finger interrupts lyric dragging', async () => {
+      const { wrapper } = await mountReadyPanel()
+      const viewport = wrapper.get('.lyrics-viewport')
+      await viewport.trigger('touchstart', { touches: [{ clientY: 400 }] })
+      await viewport.trigger('touchmove', { touches: [{ clientY: 350 }] })
+      await viewport.trigger('touchstart', {
+        touches: [{ clientY: 350 }, { clientY: 450 }],
+      })
+      await viewport.trigger('touchend', { touches: [] })
+      expect(wrapper.classes()).toContain('browsing')
+      vi.advanceTimersByTime(3200)
+      runSpringFrames(120)
+      await flushVueUpdates()
+      expect(wrapper.classes()).not.toContain('browsing')
+      expect(lineY(wrapper, 0)).toBeCloseTo(ANCHOR_Y, 0)
+      expect(wrapper.emitted('seek')).toBeUndefined()
+    })
+
+    it('stops a cancelled touch without starting momentum or seeking', async () => {
+      const { wrapper } = await mountReadyPanel()
+      const viewport = wrapper.get('.lyrics-viewport')
+
+      await viewport.trigger('touchstart', { touches: [{ clientY: 400 }] })
+      vi.advanceTimersByTime(16)
+      await viewport.trigger('touchmove', { touches: [{ clientY: 360 }] })
+      const position = lineY(wrapper, 0)
+      await viewport.trigger('touchcancel', { touches: [] })
+      runSpringFrames(20)
+
+      expect(lineY(wrapper, 0)).toBeCloseTo(position, 2)
+      expect(wrapper.emitted('seek')).toBeUndefined()
+    })
+
     it('treats a touch without movement as a tap and does not enter browsing', async () => {
       const { wrapper } = await mountReadyPanel()
       const viewport = wrapper.get('.lyrics-viewport')
@@ -865,10 +1687,10 @@ describe('LyricsPanel', () => {
       expect(lineY(wrapper, 0)).toBeCloseTo(ANCHOR_Y, 0)
 
       // Tab 落到视口外的行上:容器不会滚动,面板自己把它带进来
-      const far = wrapper.findAll<HTMLElement>('.lyric-line')[25]!
+      const far = wrapper.get<HTMLElement>('[data-lyric-index="12"]')
       await far.trigger('focusin')
       runSpringFrames(60)
-      const y = lineY(wrapper, 25)
+      const y = lineY(wrapper, 12)
       expect(y).toBeGreaterThan(0)
       expect(y + LINE).toBeLessThanOrEqual(VIEWPORT * 0.88 + 0.5)
     })
@@ -879,7 +1701,7 @@ describe('LyricsPanel', () => {
       await layoutPanel(wrapper)
 
       await moveTo(store, 16)
-      expect(wrapper.findAll('.lyric-line')[3]?.classes()).toContain('active')
+      expect(wrapper.findAll('.lyric-line')).toHaveLength(0)
       // 不活跃时不动版面
       expect(lineY(wrapper, 3)).toBe(0)
 
@@ -891,6 +1713,26 @@ describe('LyricsPanel', () => {
   })
 
   describe('karaoke', () => {
+    it('restores the current word fill when showing a paused panel after seeking while hidden', async () => {
+      mockedLoadTrackLyrics.mockResolvedValueOnce(karaokeLines)
+      const { wrapper, store } = await mountReadyPanel({ currentTime: 0.5 })
+      await wrapper.setProps({ active: false })
+      await moveTo(store, 5.5)
+      await wrapper.setProps({ active: true })
+      await flushVueUpdates()
+
+      const active = wrapper.get('[data-lyric-index="1"]')
+      expect(active.classes()).toContain('active')
+      expect(
+        active.get<HTMLElement>('.lyric-word').element.style.getPropertyValue('--lyric-word-fill'),
+      ).toBe('0.500')
+      expect(
+        wrapper
+          .get<HTMLElement>('[data-lyric-index="0"] .lyric-word')
+          .element.style.getPropertyValue('--lyric-word-fill'),
+      ).toBe('')
+    })
+
     it('renders one span per syllable and keeps a wrappable gap between words', async () => {
       mockedLoadTrackLyrics.mockResolvedValueOnce(karaokeLines)
       const { wrapper } = await mountReadyPanel()
@@ -1011,7 +1853,7 @@ describe('LyricsPanel', () => {
       expect(current.element.style.getPropertyValue('--lyric-word-fill')).toBe('0.500')
     })
 
-    it('lifts a word by its sing progress and never springs it back', async () => {
+    it('animates genuine long words as intact characters and releases their rise on handoff', async () => {
       mockedLoadTrackLyrics.mockResolvedValueOnce(karaokeLines)
       const { wrapper, store } = await mountReadyPanel()
 
@@ -1020,9 +1862,14 @@ describe('LyricsPanel', () => {
       const words = wrapper
         .findAll<HTMLElement>('.lyric-line')[0]!
         .findAll<HTMLElement>('.lyric-word')
-      // 上浮完全由演唱进度推导(CSS 从 --lyric-word-fill 算),唱完保持抬起
       expect(words[0]!.element.style.getPropertyValue('--lyric-word-fill')).toBe('1.000')
-      expect(words[0]!.element.style.getPropertyValue('--lyric-word-pop')).toBe('')
+      expect(words[0]!.element.style.getPropertyValue('--lyric-word-rise')).toBe('1.000')
+      expect(words[0]!.findAll('.lyric-char').map((character) => character.text())).toEqual([
+        'z',
+        'e',
+      ])
+      await moveTo(store, 5)
+      expect(words[0]!.element.style.getPropertyValue('--lyric-word-rise')).toBe('')
     })
 
     it('keeps unsung words a flat colour with no bright leading edge', async () => {
@@ -1069,7 +1916,7 @@ describe('LyricsPanel', () => {
       expect(rendered[2]?.classes()).not.toContain('active')
       const snapshot = wrapper.emitted('snapshot')?.at(-1)?.[0] as LyricsSnapshot | undefined
       expect(snapshot?.activeIndices).toEqual([0, 1])
-      expect(snapshot?.activeIndex).toBe(1)
+      expect(snapshot?.activeIndex).toBe(0)
     })
 
     it('lights a harmony line on its own timeline instead of with its parent', async () => {
@@ -1107,7 +1954,7 @@ describe('LyricsPanel', () => {
       // 和声从主句下沿探出来
       expect(lineY(wrapper, 2)).toBeCloseTo(lineY(wrapper, 1) + LINE + 8, 0)
 
-      // 主句唱完进入间奏:主句仍保留高亮,和声却该收走,下一句收拢回来
+      // 主句唱完进入间奏:主句保留完成态亮度,和声收走,下一句收拢回来
       await moveTo(store, 7)
       expect(harmony().classes()).toContain('harmony-hidden')
       expect(harmony().attributes('inert')).toBeDefined()
@@ -1115,16 +1962,20 @@ describe('LyricsPanel', () => {
       expect(lineY(wrapper, 3)).toBeCloseTo(folded, 0)
     })
 
-    it('keeps the last sung line lit through an instrumental gap', async () => {
+    it('holds visual focus across a short gap and dims completed lines when the next sentence starts', async () => {
       mockedLoadTrackLyrics.mockResolvedValueOnce(appleMusicLines)
       const { wrapper, store } = await mountReadyPanel()
 
-      // 6s 时三行都唱完了,下一句要到 8s —— 不能整屏变暗
       await moveTo(store, 6.5)
 
-      expect(wrapper.findAll('.lyric-line').some((line) => line.classes().includes('active'))).toBe(
-        true,
-      )
+      const lastVoice = wrapper.get('[data-lyric-index="1"]')
+      expect(lastVoice.classes()).not.toContain('completed')
+      expect(lastVoice.classes()).toContain('active')
+      expect(wrapper.get('[data-lyric-index="0"]').attributes('tabindex')).toBe('0')
+      expect(wrapper.get('[data-lyric-index="3"]').classes()).not.toContain('completed')
+      await moveTo(store, 8)
+      expect(lastVoice.classes()).toContain('completed')
+      expect(lastVoice.classes()).not.toContain('active')
     })
   })
 })

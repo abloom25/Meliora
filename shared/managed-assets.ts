@@ -1,4 +1,4 @@
-import type { MusicConfig } from '../src/types/music'
+import type { MusicConfig } from './music-config'
 
 const MANAGED_MUSIC_PREFIX = './music/'
 const MANAGED_ICON_PATTERN = /^\.\/icon\.(?:png|jpe?g|webp|ico)$/i

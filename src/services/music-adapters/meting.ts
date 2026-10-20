@@ -1,24 +1,18 @@
-import type { MetingPlaylistConfig, MetingTrack, Track } from '../../types/music'
-import { hasCachedLyrics, loadCombinedLyrics, registerTrackLyrics } from '../lyrics'
-import { mapMetingTrack } from '../../utils/tracks'
+import { buildMetingPlaylistUrl } from '../../../shared/music-api'
+import { httpFetch } from '../http'
+import type { Track } from '../../core/types'
+import type { MetingPlaylistConfig } from '../../../shared/music-config'
+import type { MetingTrack } from './types'
+import {
+  getCombinedLyricsCacheToken,
+  hasCachedLyrics,
+  loadCombinedLyrics,
+  registerTrackLyrics,
+} from '../lyrics'
+import { mapMetingTrack } from './track-mapping'
 import type { MusicProviderAdapter, MusicProviderContext } from './types'
-
-function buildMetingPlaylistUrl(apiEndpoint: string, playlist: MetingPlaylistConfig): string {
-  const baseUrl = 'https://meliora.local'
-  const isAbsoluteUrl = /^[a-z][a-z\d+.-]*:/i.test(apiEndpoint)
-  const isProtocolRelativeUrl = apiEndpoint.startsWith('//')
-  const url = new URL(apiEndpoint, baseUrl)
-
-  url.searchParams.set('server', playlist.server)
-  url.searchParams.set('type', 'playlist')
-  url.searchParams.set('id', playlist.playlistId)
-
-  if (isAbsoluteUrl) return url.toString()
-  if (isProtocolRelativeUrl) return `//${url.host}${url.pathname}${url.search}${url.hash}`
-
-  const pathname = apiEndpoint.startsWith('/') ? url.pathname : url.pathname.replace(/^\//, '')
-  return `${pathname}${url.search}${url.hash}`
-}
+import { resolveMusicRequestUrl } from '../../config/music'
+import { wordLyricsCacheKey, type WordLyricsQuery } from '../lyrics-db'
 
 /**
  * 从 Meting 资源地址中取出平台侧歌曲 ID(`?server=&type=&id=`)。
@@ -35,49 +29,79 @@ export function extractMetingTrackId(resourceUrl: string): string | null {
   }
 }
 
-async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+async function fetchPlaylist(url: string, context: MusicProviderContext): Promise<unknown> {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const cancel = () => controller.abort(context.signal?.reason)
+  if (context.signal?.aborted) cancel()
+  else context.signal?.addEventListener('abort', cancel, { once: true })
+  const timer = setTimeout(() => controller.abort(), context.timeoutMs)
   try {
-    return await fetch(url, { signal: controller.signal })
+    const response = await httpFetch(url, { signal: controller.signal })
+    if (!response.ok) throw new Error(`Meting request failed with ${response.status}`)
+    return await response.json()
   } finally {
     clearTimeout(timer)
+    context.signal?.removeEventListener('abort', cancel)
   }
+}
+
+function isMetingTrack(value: unknown): value is MetingTrack {
+  if (!value || typeof value !== 'object') return false
+  const track = value as Record<string, unknown>
+  return ['title', 'author', 'pic', 'url', 'lrc'].every(
+    (key) => track[key] === undefined || typeof track[key] === 'string',
+  )
 }
 
 export const metingMusicAdapter: MusicProviderAdapter<MetingPlaylistConfig> = {
   id: 'meting',
 
   async load(playlist: MetingPlaylistConfig, context: MusicProviderContext): Promise<Track[]> {
-    const response = await fetchWithTimeout(
-      buildMetingPlaylistUrl(context.apiEndpoint, playlist),
-      context.timeoutMs,
+    const payload = await fetchPlaylist(
+      resolveMusicRequestUrl(buildMetingPlaylistUrl(context.apiEndpoint, playlist)),
+      context,
     )
-    if (!response.ok) throw new Error(`Meting request failed with ${response.status}`)
-
-    const payload: unknown = await response.json()
     if (!Array.isArray(payload)) throw new Error('Meting response is not a track list')
 
     const sourceKey = `${playlist.server}:${playlist.playlistId}`
-    return (payload as MetingTrack[])
+    return payload
+      .filter(isMetingTrack)
       .map((track, index) => {
         const mapped = mapMetingTrack(track, sourceKey, index)
-        const lyricsUrl = track.lrc?.trim()
-        if (mapped && lyricsUrl) {
-          // 逐字歌词库按平台歌曲 ID 查询,拿不到 ID 时退化为纯 LRC 加载
+        if (mapped) {
+          mapped.audioUrl = resolveMusicRequestUrl(mapped.audioUrl)
+          if (mapped.cover) mapped.cover = resolveMusicRequestUrl(mapped.cover)
+        }
+        const lyricsUrl = track.lrc?.trim() ? resolveMusicRequestUrl(track.lrc.trim()) : undefined
+        if (mapped) {
+          // ID 查询与普通歌词地址独立;缺少 ID 时仍可用原始歌名/歌手匹配。
+          // 保留标题里的 Live/Remix 等版本标记,不能拿剥离后的显示标题查库。
           const platformId =
-            extractMetingTrackId(lyricsUrl) ?? extractMetingTrackId(track.url?.trim() ?? '')
+            extractMetingTrackId(track.lrc?.trim() ?? '') ??
+            extractMetingTrackId(track.url?.trim() ?? '')
+          const wordQuery: WordLyricsQuery = {
+            platform: platformId ? playlist.server : undefined,
+            id: platformId ?? undefined,
+            title: track.title?.trim(),
+            artist: track.author?.trim(),
+            album: mapped.album,
+          }
           registerTrackLyrics(mapped, {
-            cacheKey: `meting:${lyricsUrl}`,
+            cacheKey: `meting:${JSON.stringify([lyricsUrl, wordLyricsCacheKey(wordQuery)])}`,
             priority: 10,
-            isCached: () => hasCachedLyrics(lyricsUrl),
-            load: (signal) =>
+            isCached: () =>
+              (!lyricsUrl || hasCachedLyrics(lyricsUrl)) &&
+              getCombinedLyricsCacheToken(wordQuery) !== null,
+            cacheable: () => getCombinedLyricsCacheToken(wordQuery) !== null,
+            cacheToken: () => getCombinedLyricsCacheToken(wordQuery),
+            load: (signal, onProgress) =>
               loadCombinedLyrics(
                 {
                   lyricsUrl,
-                  wordQuery: platformId ? { platform: playlist.server, id: platformId } : undefined,
+                  wordQuery,
                 },
                 signal,
+                onProgress,
               ),
           })
         }

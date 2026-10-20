@@ -6,9 +6,9 @@
     EQ_PRESETS,
     clampGain,
     detectPreset,
-  } from '../utils/equalizer'
-  import type { EqPresetId } from '../types/music'
-  import { useHaptic } from '../composables/useHaptic'
+  } from '../core/audio/equalizer'
+  import type { EqPresetId } from '../core/types'
+  import { useHaptic } from '../platform/web/useHaptic'
   import Collapse from './Collapse.vue'
   import SettingRange from './SettingRange.vue'
   import ToggleSwitch from './ToggleSwitch.vue'

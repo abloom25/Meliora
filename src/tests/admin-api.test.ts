@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { MusicConfig } from '../types/music'
+import type { MusicConfig } from '../../shared/music-config'
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), {
@@ -24,6 +24,114 @@ describe('admin-api', () => {
     vi.unstubAllGlobals()
   })
 
+  it('retains the read revision when saving and returns the new revision', async () => {
+    const config = validConfig()
+    const fetchMock = vi.fn().mockImplementation((url, init) => {
+      if (url === '/api/config' && !init?.method)
+        return Promise.resolve(
+          jsonResponse(config, { headers: { 'X-Config-Revision': 'read-revision' } }),
+        )
+      if (url === '/api/auth')
+        return Promise.resolve(
+          jsonResponse({ authenticated: true }, { headers: { 'X-CSRF-Token': 'csrf' } }),
+        )
+      return Promise.resolve(jsonResponse({ revision: 'saved-revision' }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const api = createAdminApi()
+    const snapshot = await api.fetchConfigSnapshot()
+    expect(snapshot).toEqual({ config, revision: 'read-revision' })
+    expect(await api.saveConfig(config, [], snapshot!.revision)).toMatchObject({
+      ok: true,
+      revision: 'saved-revision',
+    })
+    const saved = fetchMock.mock.calls.find(
+      ([url, init]) => url === '/api/config' && init?.method === 'PUT',
+    )
+    expect(JSON.parse(saved![1].body).revision).toBe('read-revision')
+  })
+
+  it('rejects unsupported token configs locally before saving or testing', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const api = createAdminApi()
+    const config = validConfig({
+      apiEndpoint: 'https://music.example.com/api',
+      apiToken: 'private-token',
+      playlists: [{ server: 'netease', playlistId: '123' }],
+    })
+    await expect(api.saveConfig(config)).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('暂不支持'),
+    })
+    await expect(api.testMusicApi(config)).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining('暂不支持'),
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps unauthenticated callbacks scoped to the client instance', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockImplementation(() =>
+          Promise.resolve(jsonResponse({ error: '未授权' }, { status: 401 })),
+        ),
+    )
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const firstExpired = vi.fn()
+    const secondExpired = vi.fn()
+    const first = createAdminApi({ onUnauthenticated: firstExpired })
+    const second = createAdminApi({ onUnauthenticated: secondExpired })
+    await first.fetchConfig()
+    expect(firstExpired).toHaveBeenCalledTimes(1)
+    expect(secondExpired).not.toHaveBeenCalled()
+    await second.fetchConfig()
+    expect(firstExpired).toHaveBeenCalledTimes(1)
+    expect(secondExpired).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not mutate Vue auth state when using an unbound service client', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ authenticated: false }))
+      .mockResolvedValueOnce(jsonResponse({ success: true }))
+      .mockResolvedValueOnce(jsonResponse({ error: '未授权' }, { status: 401 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { useAdminAuth } = await import('../admin/composables/useAdminAuth')
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const auth = useAdminAuth()
+    await auth.login('password')
+    await expect(createAdminApi().fetchConfig()).resolves.toBeNull()
+    expect(auth.authenticated.value).toBe(true)
+  })
+
+  it('does not expire the host session for a passive update check returning 401', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockImplementation(() =>
+          Promise.resolve(jsonResponse({ error: '未授权' }, { status: 401 })),
+        ),
+    )
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const onUnauthenticated = vi.fn()
+    const result = await createAdminApi({ onUnauthenticated }).checkUpdate(
+      '0.2.1',
+      '',
+      false,
+      undefined,
+      { markUnauthenticated: false },
+    )
+    expect(result).toEqual({ ok: false, error: '未授权' })
+    expect(onUnauthenticated).not.toHaveBeenCalled()
+  })
+
   it('marks admin auth as expired when config loading receives 401', async () => {
     const fetchMock = vi
       .fn()
@@ -34,7 +142,8 @@ describe('admin-api', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const { useAdminAuth } = await import('../admin/composables/useAdminAuth')
-    const { fetchConfig } = await import('../admin/services/admin-api')
+    const { useAdminApi } = await import('../admin/composables/useAdminApi')
+    const { fetchConfig } = useAdminApi()
     const auth = useAdminAuth()
 
     await expect(auth.login('password')).resolves.toBe(true)
@@ -57,7 +166,8 @@ describe('admin-api', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const { useAdminAuth } = await import('../admin/composables/useAdminAuth')
-    const { saveConfig } = await import('../admin/services/admin-api')
+    const { useAdminApi } = await import('../admin/composables/useAdminApi')
+    const { saveConfig } = useAdminApi()
     const auth = useAdminAuth()
 
     await expect(auth.login('password')).resolves.toBe(true)
@@ -89,7 +199,8 @@ describe('admin-api', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const { useAdminAuth } = await import('../admin/composables/useAdminAuth')
-    const { saveConfig } = await import('../admin/services/admin-api')
+    const { useAdminApi } = await import('../admin/composables/useAdminApi')
+    const { saveConfig } = useAdminApi()
     const auth = useAdminAuth()
 
     await expect(auth.login('password')).resolves.toBe(true)
@@ -123,7 +234,8 @@ describe('admin-api', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const { useAdminAuth } = await import('../admin/composables/useAdminAuth')
-    const { saveConfig } = await import('../admin/services/admin-api')
+    const { useAdminApi } = await import('../admin/composables/useAdminApi')
+    const { saveConfig } = useAdminApi()
     const auth = useAdminAuth()
 
     await expect(auth.login('password')).resolves.toBe(true)
@@ -143,7 +255,8 @@ describe('admin-api', () => {
       )
     vi.stubGlobal('fetch', fetchMock)
 
-    const { uploadFile } = await import('../admin/services/admin-api')
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const { uploadFile } = createAdminApi()
     const result = await uploadFile('public/music/a/audio.mp3', 'base64')
 
     expect(result.ok).toBe(true)
@@ -166,7 +279,8 @@ describe('admin-api', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const { useAdminAuth } = await import('../admin/composables/useAdminAuth')
-    const { checkUpdate } = await import('../admin/services/admin-api')
+    const { useAdminApi } = await import('../admin/composables/useAdminApi')
+    const { checkUpdate } = useAdminApi()
     const auth = useAdminAuth()
 
     await expect(auth.login('password')).resolves.toBe(true)
@@ -188,7 +302,8 @@ describe('admin-api', () => {
       )
     vi.stubGlobal('fetch', fetchMock)
 
-    const { MAX_UPLOAD_BASE64_LENGTH, uploadFile } = await import('../admin/services/admin-api')
+    const { MAX_UPLOAD_BASE64_LENGTH, createAdminApi } = await import('../admin/services/admin-api')
+    const { uploadFile } = createAdminApi()
     const result = await uploadFile(
       'public/music/a/audio.mp3',
       'a'.repeat(MAX_UPLOAD_BASE64_LENGTH),
@@ -202,7 +317,8 @@ describe('admin-api', () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ sha: 'commit-next' }))
     vi.stubGlobal('fetch', fetchMock)
 
-    const { saveConfig } = await import('../admin/services/admin-api')
+    const { useAdminApi } = await import('../admin/composables/useAdminApi')
+    const { saveConfig } = useAdminApi()
     const current = validConfig({
       siteIcon: './icon.png',
     })
@@ -219,7 +335,8 @@ describe('admin-api', () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
 
-    const { saveConfig } = await import('../admin/services/admin-api')
+    const { useAdminApi } = await import('../admin/composables/useAdminApi')
+    const { saveConfig } = useAdminApi()
     const result = await saveConfig(
       validConfig({
         localTracks: [{ id: 'track-1', title: '', artist: '', audio: '' }],
@@ -246,7 +363,8 @@ describe('admin-api', () => {
       )
     vi.stubGlobal('fetch', fetchMock)
 
-    const { checkUpdate } = await import('../admin/services/admin-api')
+    const { useAdminApi } = await import('../admin/composables/useAdminApi')
+    const { checkUpdate } = useAdminApi()
     const result = await checkUpdate('0.2.0', 'https://proxy.example/?url={url}', true)
 
     expect(result).toEqual({ ok: false, error: 'Resource not accessible' })
@@ -279,7 +397,8 @@ describe('admin-api', () => {
       )
     vi.stubGlobal('fetch', fetchMock)
 
-    const { triggerUpdate } = await import('../admin/services/admin-api')
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const { triggerUpdate } = createAdminApi()
     const result = await triggerUpdate('https://proxy.example/?url={url}', 'v0.3.0', true)
 
     expect(result).toEqual({
@@ -319,7 +438,8 @@ describe('admin-api', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const { fetchUpdateStatus } = await import('../admin/services/admin-api')
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const { fetchUpdateStatus } = createAdminApi()
     const result = await fetchUpdateStatus('2026-06-30T10:00:00.000Z', 'dispatch-123')
 
     expect(result.ok).toBe(true)
@@ -343,7 +463,8 @@ describe('admin-api', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    const { fetchUpdateStatus } = await import('../admin/services/admin-api')
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const { fetchUpdateStatus } = createAdminApi()
     const result = await fetchUpdateStatus('2026-06-30T10:00:00.000Z', 'dispatch-123')
 
     expect(result).toEqual({

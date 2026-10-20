@@ -1,4 +1,4 @@
-import type { PublicMusicConfig } from '../src/types/music'
+import type { PublicMusicConfig } from './music-config'
 
 export const defaultMusicConfig: PublicMusicConfig = {
   siteName: 'Meliora',

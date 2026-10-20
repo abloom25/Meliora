@@ -11,6 +11,7 @@ node_modules
 dist
 dist-ssr
 src/generated/
+public/models/beat-this/runtime-*/
 *.local
 
 # 敏感配置文件(含密钥,严禁提交)

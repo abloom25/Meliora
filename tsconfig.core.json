@@ -1,0 +1,23 @@
+{
+  // src/core 的独立类型检查:**不加载 DOM 类型库**。
+  // 核心层要能原样搬到桌面端(Tauri 里播放走原生后端、没有 DOM),
+  // 所以这里靠"编译期看不见 HTMLElement / window / fetch"来保证它不偷偷用上浏览器 API。
+  // 与 tsconfig.app.json 共用同一批文件,但只做检查、不产出,不参与 -b 的工程引用。
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023"],
+    "types": [],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src/core/**/*.ts"]
+}

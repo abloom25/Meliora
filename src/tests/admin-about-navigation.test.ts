@@ -1,10 +1,10 @@
 import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import DashboardView from '../admin/views/DashboardView.vue'
-import type { MusicConfig } from '../types/music'
+import type { MusicConfig } from '../../shared/music-config'
 
 const adminApiMock = vi.hoisted(() => ({
-  fetchConfig: vi.fn(),
+  fetchConfigSnapshot: vi.fn(),
   saveConfig: vi.fn(),
   checkUpdate: vi.fn(),
   triggerUpdate: vi.fn(),
@@ -13,6 +13,7 @@ const adminApiMock = vi.hoisted(() => ({
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: vi.fn() }),
+  onBeforeRouteLeave: vi.fn(),
 }))
 
 vi.mock('../admin/composables/useAdminAuth', () => ({
@@ -21,13 +22,7 @@ vi.mock('../admin/composables/useAdminAuth', () => ({
   }),
 }))
 
-vi.mock('../admin/services/admin-api', () => ({
-  fetchConfig: adminApiMock.fetchConfig,
-  saveConfig: adminApiMock.saveConfig,
-  checkUpdate: adminApiMock.checkUpdate,
-  triggerUpdate: adminApiMock.triggerUpdate,
-  fetchUpdateStatus: adminApiMock.fetchUpdateStatus,
-}))
+vi.mock('../admin/composables/useAdminApi', () => ({ useAdminApi: () => adminApiMock }))
 
 vi.mock('../generated/app-version', () => ({
   APP_VERSION: '0.1.0',
@@ -53,7 +48,10 @@ describe('admin about navigation', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     document.body.innerHTML = ''
-    adminApiMock.fetchConfig.mockResolvedValue(validConfig())
+    adminApiMock.fetchConfigSnapshot.mockResolvedValue({
+      config: validConfig(),
+      revision: 'initial',
+    })
     adminApiMock.checkUpdate.mockResolvedValue({
       ok: false,
       error: '检查失败',

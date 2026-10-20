@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { decodeXmlEntities, parseTtmlLyrics, parseTtmlTime } from '../utils/lyrics-ttml'
+import { decodeXmlEntities, parseTtmlLyrics, parseTtmlTime } from '../core/lyrics/ttml'
 
 const SAMPLE = `<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata">
 <head><metadata><ttm:agent type="person" xml:id="v1"/><ttm:agent type="person" xml:id="v2"/></metadata></head>

@@ -25,19 +25,35 @@
 
 ### 视听一体
 
-- 🎨 **实时节拍分析**:Web Audio API 频谱采样驱动背景呼吸效果,封面取色驱动全局主题色过渡
+- 🎨 **滚动节拍预分析**:默认基础模式,沿用 HPSS 节奏包络。开播后在浏览器 Worker 中优先构建当前位置前方的一段;
+  分段就绪即开始高亮,缓冲够用便暂停计算,继续播放或拖动进度后从已有窗口续建,支持四档闪烁密度与延迟微调。
+  当前歌曲优先,空闲时串行准备上一首/下一首的开头,切歌复用已完成结果;常听歌曲的已完成窗口可保存在本机并续建。
+- 🥁 **可选增强模型**:设置中可选择 Beat This! Small 或标准版,由用户手动下载启用,模型保存在本机;
+  模型预测节拍位置,原算法提供闪光强度与持续声部,无需后端推理。Small 约 12.7 MB,标准版约 85.3 MB,
+  首次使用另需约 28.3 MB 共享运行组件;可删除本机模型并随时切回基础模式。
+- 💾 **预分析资源范围**:只有 DSP/模型计算按窗口滚动,音频仍需整曲下载和解码,首次分析可能额外读取一次音频。
+  音频内容校验后优先恢复持久缓存,覆盖当前缓冲需求时跳过解码与模型准备;频谱使用有容量上限的窗口缓存。
+  当前限制为时长不超过 10 分钟、文件不超过 64 MiB;无法完整读取的流媒体跳过高亮,播放不受影响。
 - 🌈 **动态背景**:封面模糊渲染 + 可调节模糊/饱和度/节奏亮度,支持关闭
 - 🎵 **零延迟切歌**:三 Audio 池 + 预加载槽 + 平滑切歌淡入淡出
 
 ### 歌词体验
 
-- 📜 **逐字歌词**:接入 Apple Music 规格的逐词歌词库,英文按词、中文按字随演唱推进点亮;
-  也支持增强型 LRC、网易云 YRC 与 QQ QRC 的字级时间轴,没有逐字数据时回落为整行高亮
+- 📜 **逐字歌词**:接入 [AMLL TTML DB](https://github.com/amll-dev/amll-ttml-db) 社区逐词歌词库,英文按词、中文按字随演唱推进点亮;
+  网易云与 QQ 曲目还会按歌曲 ID 获取平台原生 YRC/QRC,保留翻译与罗马音。
+  三源并行、先到先显示,优先采用 AMLL,其次平台逐字歌词,没有逐字数据时回落为整行高亮;
+  也支持增强型 LRC
 - 🎭 **对唱与和声**:对唱双声部左右分栏同时高亮,背景和声在所属句子唱到时从下沿探出、唱完收回
 - 🌊 **弹簧牵引滚动**:每行一根弹簧、沿运动方向逐行错峰起步,换行与拖动进度条都不会顿挫;
   可调弹簧松紧、字号,支持译文与罗马音
 - 🔍 **进度条歌词预览**:悬停进度条即可看到该时刻的歌词,含对唱、和声与逐字进度快照(设置中开启)
+- ℹ️ **歌曲信息**:设置中显示歌曲、歌手、专辑、时长和实际歌词来源;异步加载使用占位与淡入过渡
 - 🪟 **歌词小窗**:Document Picture-in-Picture 独立浮窗,支持在外部应用时查看歌词
+- ⚡ **歌词性能**:长歌词按可见范围挂载,时间轴与布局局部更新;普通歌词等待时间边界,逐字扫光时才逐帧刷新,
+  暂停或页面隐藏时停止相应任务,歌词小窗使用独立调度。歌词请求优先保障当前播放,取消过期预加载。
+
+歌词显示与动画效果参考了 [Apple Music-like Lyrics（AMLL）](https://github.com/amll-dev/applemusic-like-lyrics)
+的实现思路,包括弹簧滚动、逐字高亮、对唱与和声,以及前奏和间奏的三点等待动画,并结合 Meliora 的布局与渲染方式进行了适配。
 
 ### 播放控制
 
@@ -45,6 +61,7 @@
 - ⏰ **定时关闭**:倒计时自动停止播放
 - 🔀 **播放模式**:顺序 / 随机 / 单曲循环
 - ⏭️ **自动跳过**:加载失败自动跳到下一首
+- 📊 **本机听歌统计**:按实际播放时长记录有效播放次数,常听歌曲可复用节拍缓存;设置中可查看和清除统计及缓存
 
 ### 沉浸模式
 
@@ -61,6 +78,7 @@
 ### 曲库管理
 
 - 🌐 **远程歌单**:网易云 / QQ 音乐歌单,通过 Meting API 解析
+- ⏳ **渐进加载**:已就绪的来源先显示,较慢来源继续加载,保留正在播放的曲目
 - 💾 **本地音乐**:上传音频/封面/歌词,自动合并去重
 - ⚙️ **可视化管理**:完整的 Web 管理后台,无需编辑代码
 
@@ -86,6 +104,10 @@ pnpm dev:full     # 前端 + 后端模拟(5175 + 8788)
 - `pnpm dev:full`:同时启动 Vite + Wrangler Pages Functions 本地模拟,`/api/*` 请求代理到 8788 端口,可完整测试管理后台(含 `/setup` 初始化流程)。Wrangler 使用 `.wrangler/pages-dev-static` 临时静态目录启动本地 Functions,静态页面仍由 Vite 提供,不依赖 `dist` 是否存在或是否最新。
 
 本地后端可使用开发模式(`.dev.vars` 中 `DEVELOPMENT=true`),配置和密码不持久化,重启即重置。复制 [.dev.vars.example](.dev.vars.example) 为 `.dev.vars` 并填入真实 GitHub Token、关闭 `DEVELOPMENT` 后可测试完整流程。
+
+平台原生逐字歌词使用同源 `/api/lyrics` 接口,本地测试需启动 `pnpm dev:full`。
+该接口沿用现有 API 环境检查与 `ADMIN_DISABLED` 开关;纯静态部署或 API 被关闭时,播放器仍使用 AMLL 与普通歌词。
+浏览器会缓存命中结果 24 小时、明确未命中结果 15 分钟,网络故障不记为未命中。
 
 ---
 
@@ -182,7 +204,7 @@ pnpm dev:full     # 前端 + 后端模拟(5175 + 8788)
 
 > ### 🔒 配置文件加密
 >
-> 管理后台保存的所有配置(站点信息、API Token、歌单、Umami / GA ID 等)在写入 GitHub 仓库时**全文 AES-GCM 256 加密**,仓库中只存储 base64 密文。构建期会从中生成公开播放器配置,但 `apiToken` 不会进入前端 bundle;需要 token 的 Meting API 后续应通过专门后端代理支持。
+> 管理后台保存的所有配置(站点信息、API Token、歌单、Umami / GA ID 等)在写入 GitHub 仓库时**全文 AES-GCM 256 加密**,仓库中只存储 base64 密文。构建期会从中生成公开播放器配置,但 `apiToken` 不会进入前端 bundle。播放器仅支持无需鉴权的公开 Meting API,不依赖管理边缘函数代理音源。启用远程歌单且填写 API Token 时,保存与连通测试都会明确拒绝；已有配置仍可读取,请在后台清空 Token 并更换为公开接口,或禁用相关歌单。不要把私密 Token 拼进公开 API 端点。服务端连通测试也不能替代浏览器的跨域访问验证。
 >
 > - **加密密钥**:从 `CONFIG_ENCRYPTION_KEY` 用 PBKDF2(100k 迭代)派生,密钥本身**不落盘、不出现在任何文件中**
 > - **密钥解耦**:`CONFIG_ENCRYPTION_KEY` 专用于加密与签名,`GH_TOKEN` 仅用于 GitHub API 读写,两者独立——`GH_TOKEN` 可随时轮换而不影响已加密的配置
@@ -245,6 +267,9 @@ pnpm format       # Prettier
 pnpm build        # 生产构建
 ```
 
+开发模式下可在设置中开启调试面板,查看实际高亮、基础/Small/标准版对比曲线、预加载队列、歌词、小窗、网络与内存采样,
+并手动导出节拍对比 JSON。生产构建不提供调试入口。
+
 ### 本地配置同步
 
 `DEVELOPMENT=true` 时,管理后台的配置与密码仍由本地后端以内存模式处理,重启后会重置。为了让主页保持与生产一致的“构建期公开配置”读取方式,Vite 开发服务器会在后台保存配置成功后,把配置同步写入 `.meliora/config.local.json`,并重新生成 `src/generated/public-config.ts`。
@@ -258,17 +283,30 @@ pnpm build        # 生产构建
 
 ```
 src/
+├── app/             应用装配与平台、服务实现接线
 ├── components/      共享 UI 组件(ConfirmModal / ToggleSwitch / Toast 等)
-├── composables/     业务 hook(useAudioPlayer / useBeatAnalyser 等)
+├── composables/     业务 hook(useAudioPlayer / usePlayerLibrary 等)
+├── core/            平台无关的音频、歌词、分析、主题与纯函数工具
+├── platform/        平台实现、设置存储与浏览器能力
+│   └── web/         Web Audio、节拍分析、歌词小窗、全屏、PWA 等
 ├── stores/          Pinia 状态管理
 ├── services/        远程 IO 抽象(Meting API / 歌词)
-├── utils/           纯函数工具(无副作用、无 DOM 依赖)
-├── workers/         Web Worker(主题色提取)
+├── router/          播放器、管理后台与 404 路由
+├── config/          音乐与歌词运行时配置取用口
+├── generated/       构建期生成的公开配置、版本与后台环境状态
+├── views/           播放器与 404 页面
+├── workers/         Web Worker(主题色提取、封面背景渲染)
 ├── admin/           管理后台(独立子应用)
 │   ├── components/  后台 UI 组件
-│   ├── views/       后台页面(Setup / Login / Dashboard / About)
-│   └── services/    后台 API 服务
-└── styles/          全局样式
+│   ├── views/       后台页面(Setup / Login / Dashboard / About / 配置迁移)
+│   ├── composables/ 后台鉴权、暂存、更新状态与消息
+│   ├── services/    后台 API 服务
+│   └── utils/       CSRF 请求管理
+├── tests/           前端单元与交互测试
+└── styles/          全局样式与播放器页面的 scoped SCSS
+
+shared/              前后端共享的配置类型、校验与规则
+scripts/             构建期配置、版本与 Service Worker 生成脚本
 
 server/              Edge Functions 后端
 ├── core/            核心逻辑(路由 / 鉴权 / 配置 / 上传)
@@ -291,7 +329,20 @@ netlify/             Netlify Function 入口
 
 ## 🙏 致谢
 
+### 歌词效果与内容来源
+
+- [Apple Music-like Lyrics（AMLL）](https://github.com/amll-dev/applemusic-like-lyrics):感谢作者与贡献者公开歌词渲染和动画实现,为 Meliora 的歌词效果提供参考。
+- [AMLL TTML DB](https://github.com/amll-dev/amll-ttml-db):感谢社区的逐词歌词制作、校对与维护者,以及 AMLL API 和镜像服务的维护者,让播放器能够获取更丰富的逐字歌词。
+- [Meting](https://github.com/metowolf/Meting) 及兼容 API 的维护者:感谢远程歌单解析工具与接口服务,用于获取歌曲信息、播放地址、封面和普通歌词。
+- [网易云音乐](https://music.163.com/) 与 [QQ 音乐](https://y.qq.com/):感谢音乐与歌词资源。Meliora 当前支持通过 Meting 解析这两个平台的公开歌单,并按歌曲 ID 获取网易云 YRC、QQ QRC 及可用的翻译与罗马音。
+- [Robotxm / ESLyric-LyricsSource](https://github.com/Robotxm/ESLyric-LyricsSource):QQ QRC 解码实现改编自该项目,保留原作者署名、GPL-3.0 许可及其对 [LDDC](https://github.com/chenmozhijin/LDDC) 的上游致谢。
+- 感谢音乐创作者、歌词贡献者,以及提供本地或自托管音频、封面和歌词的用户。
+
+### 开发支持
+
 特别感谢 [@OnyxAxisOwO](https://github.com/OnyxAxisOwO) 提供 Opus 5 与 Fable 5.1。
+
+特别感谢 [@L33Z22L11](https://github.com/L33Z22L11) 提供 GPT 6 Astra。
 
 本项目在开发过程中由多个 AI 模型参与协作,以下排名与贡献不分先后,包括但不限于:
 
@@ -301,6 +352,7 @@ netlify/             Netlify Function 入口
 - Fable 5.1
 - GPT 5.5
 - GPT 5.6 Sol
+- GPT 6 Astra
 - Kimi K3
 
 ---
@@ -308,6 +360,9 @@ netlify/             Netlify Function 入口
 ## 📄 开源许可
 
 [GNU Affero General Public License v3.0 or later](LICENSE) © abloom25
+
+Beat This! 模型与转换自上游的处理逻辑遵循 MIT 许可,作者、固定版本和转换说明见
+[模型署名](public/models/beat-this/ATTRIBUTION.txt)与[完整许可](public/models/beat-this/LICENSE)。
 
 > AGPL-3.0 要求任何**修改后部署到公网**的衍生版本必须向用户提供完整源代码。如需闭源商业使用,请联系作者协商授权。
 

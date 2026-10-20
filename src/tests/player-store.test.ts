@@ -1,8 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createPinia, setActivePinia } from 'pinia'
+import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia'
+import { nextTick } from 'vue'
 import { loadTrackLyrics, registerTrackLyrics } from '../services/lyrics'
 import { migrateSettings, usePlayerStore } from '../stores/player'
-import type { PlayerSettings, Track } from '../types/music'
+import { wireApplication } from '../app/composition-root'
+import type { PlayerSettings, Track } from '../core/types'
+
+let testPinia: Pinia | undefined
+
+function activateTestPinia() {
+  if (testPinia) disposePinia(testPinia)
+  testPinia = createPinia()
+  setActivePinia(testPinia)
+}
+
+beforeEach(activateTestPinia)
+afterEach(() => {
+  // Stop each store's watchers and debounce timer before the next test clears storage.
+  if (testPinia) disposePinia(testPinia)
+  testPinia = undefined
+  setActivePinia(undefined)
+  vi.restoreAllMocks()
+  vi.useRealTimers()
+  vi.unstubAllEnvs()
+})
 
 const tracks: Track[] = [
   {
@@ -29,7 +50,10 @@ const tracks: Track[] = [
 ]
 
 describe('player store', () => {
-  beforeEach(() => setActivePinia(createPinia()))
+  beforeEach(() => {
+    // store 不再直接依赖服务层,歌词来源的搬运由组装点装上(与 main.ts 一致)
+    wireApplication()
+  })
 
   it('stops after the final track in sequence mode', () => {
     const store = usePlayerStore()
@@ -76,6 +100,37 @@ describe('player store', () => {
 
     expect(store.currentTrack).toBe(activeTrack)
     expect(store.currentTrackId).toBe('2')
+  })
+
+  it('preserves optional metadata when a progressive snapshot reuses the active object', () => {
+    const store = usePlayerStore()
+    const song: Track = {
+      ...tracks[0]!,
+      cover: '/one.jpg',
+      album: 'Album',
+      titleVersions: ['Live'],
+      shareAliases: ['legacy'],
+    }
+    store.setTracks([song])
+    store.selectTrack(song)
+    store.setTracks([song, tracks[1]!], { complete: false })
+    expect(store.currentTrack).toMatchObject({
+      cover: '/one.jpg',
+      album: 'Album',
+      titleVersions: ['Live'],
+      shareAliases: ['legacy'],
+    })
+  })
+
+  it('keeps a pending restored track id until the complete library is known', () => {
+    const store = usePlayerStore()
+    store.currentTrackId = '2'
+    store.setTracks([tracks[0]!], { complete: false })
+    expect(store.currentTrackId).toBe('2')
+    store.setTracks(tracks)
+    expect(store.currentTrack?.id).toBe('2')
+    store.setTracks([tracks[0]!])
+    expect(store.currentTrackId).toBeNull()
   })
 
   it('syncs the queue when refreshing the library, removes deleted tracks, and preserves the active object', () => {
@@ -156,11 +211,6 @@ describe('player store', () => {
 })
 
 describe('player store peekNext / peekPrevious', () => {
-  beforeEach(() => setActivePinia(createPinia()))
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
   it('peekNext returns null on an empty queue', () => {
     const store = usePlayerStore()
     store.settings.playMode = 'loop'
@@ -316,52 +366,143 @@ describe('player store peekNext / peekPrevious', () => {
 })
 
 describe('player settings migration', () => {
-  beforeEach(() => setActivePinia(createPinia()))
-
-  it('defaultSettings has settingsVersion 1', () => {
+  it('defaults to responsive lyric scaling with settingsVersion 2', () => {
     const result = migrateSettings({})
-    expect(result.settingsVersion).toBe(1)
+    expect(result.settingsVersion).toBe(2)
+    expect(result.lyricScale).toBe(1)
     expect(result.volume).toBe(0.72)
     expect(result.playMode).toBe('loop')
     expect(result.smoothTrackChange).toBe(true)
     expect(result.autoHideChrome).toBe(true)
+    expect(result.debugPanelEnabled).toBe(false)
     expect(result.lyricTranslation).toBe(true)
     expect(result.progressLyricPreview).toBe(false)
+    expect(result.beatAnalysisMode).toBe('basic')
   })
 
-  it('migrates legacy settings without settingsVersion to version 1 while preserving user preferences', () => {
-    const legacy: Partial<PlayerSettings> = {
+  it('migrates legacy pixel sizes to proportional scaling while preserving preferences', () => {
+    const legacy = {
       volume: 0.3,
-      playMode: 'shuffle',
+      playMode: 'shuffle' as const,
       backgroundBlur: 50,
       lyricFontSize: 24,
     }
     const result = migrateSettings(legacy)
 
-    expect(result.settingsVersion).toBe(1)
+    expect(result.settingsVersion).toBe(2)
     expect(result.volume).toBe(0.3)
     expect(result.playMode).toBe('shuffle')
     expect(result.backgroundBlur).toBe(50)
-    expect(result.lyricFontSize).toBe(24)
+    expect(result.lyricScale).toBe(1.2)
+    expect(result).not.toHaveProperty('lyricFontSize')
     expect(result.smoothTrackChange).toBe(true)
     expect(result.autoHideChrome).toBe(true)
     expect(result.progressLyricPreview).toBe(false)
   })
 
   it('keeps settingsVersion when already at current version', () => {
-    const result = migrateSettings({ settingsVersion: 1, volume: 0.5 })
-    expect(result.settingsVersion).toBe(1)
+    const result = migrateSettings({ settingsVersion: 2, volume: 0.5 })
+    expect(result.settingsVersion).toBe(2)
     expect(result.volume).toBe(0.5)
   })
+
+  it('migrates removed model and invalid preferences to the available basic mode', () => {
+    expect(
+      migrateSettings({ beatAnalysisMode: 'beatnet' as PlayerSettings['beatAnalysisMode'] })
+        .beatAnalysisMode,
+    ).toBe('basic')
+    expect(
+      migrateSettings({ beatAnalysisMode: 'madmom-onset' as PlayerSettings['beatAnalysisMode'] })
+        .beatAnalysisMode,
+    ).toBe('basic')
+    expect(migrateSettings({ beatAnalysisMode: 'basic' }).beatAnalysisMode).toBe('basic')
+    expect(migrateSettings({ volume: 0.4 }).beatAnalysisMode).toBe('basic')
+    expect(
+      migrateSettings({
+        beatAnalysisMode: 'unknown-model' as PlayerSettings['beatAnalysisMode'],
+      }).beatAnalysisMode,
+    ).toBe('basic')
+  })
+
+  it.each(['beat-this-small', 'beat-this-standard'] as const)(
+    'preserves manually selected %s across settings loads and unrelated resets',
+    (selectedMode) => {
+      expect(migrateSettings({ beatAnalysisMode: selectedMode }).beatAnalysisMode).toBe(
+        selectedMode,
+      )
+      localStorage.setItem('meliora:settings', JSON.stringify({ beatAnalysisMode: selectedMode }))
+      const store = usePlayerStore()
+      expect(store.settings.beatAnalysisMode).toBe(selectedMode)
+      store.resetSettings(['volume'])
+      expect(store.settings.beatAnalysisMode).toBe(selectedMode)
+      store.resetSettings(['beatAnalysisMode'])
+      expect(store.settings.beatAnalysisMode).toBe('basic')
+    },
+  )
 
   it('loadSettings migrates persisted legacy data via the store', () => {
     localStorage.setItem('meliora:settings', JSON.stringify({ volume: 0.4, playMode: 'single' }))
     const store = usePlayerStore()
 
-    expect(store.settings.settingsVersion).toBe(1)
+    expect(store.settings.settingsVersion).toBe(2)
     expect(store.settings.volume).toBe(0.4)
     expect(store.settings.playMode).toBe('single')
     expect(store.settings.autoHideChrome).toBe(true)
+    expect(store.settings.debugPanelEnabled).toBe(false)
+  })
+
+  it('only enables the debug panel for an explicit boolean preference', () => {
+    for (const value of [undefined, null, 'true', 1, {}, false]) {
+      expect(migrateSettings({ debugPanelEnabled: value as boolean }).debugPanelEnabled).toBe(false)
+    }
+    expect(migrateSettings({ debugPanelEnabled: true }).debugPanelEnabled).toBe(true)
+  })
+
+  it('discards a persisted debug opt-in outside development', () => {
+    vi.stubEnv('DEV', false)
+    localStorage.setItem('meliora:settings', JSON.stringify({ debugPanelEnabled: true }))
+    expect(migrateSettings({ debugPanelEnabled: true }).debugPanelEnabled).toBe(false)
+    const store = usePlayerStore()
+    expect(store.settings.debugPanelEnabled).toBe(false)
+    store.$dispose()
+  })
+
+  it('persists the debug opt-in and preserves it when unrelated settings are reset', async () => {
+    vi.useFakeTimers()
+    const store = usePlayerStore()
+    store.settings.debugPanelEnabled = true
+    store.resetSettings(['volume'])
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(JSON.parse(localStorage.getItem('meliora:settings')!).debugPanelEnabled).toBe(true)
+
+    activateTestPinia()
+    const restored = usePlayerStore()
+    expect(restored.settings.debugPanelEnabled).toBe(true)
+    restored.settings.debugPanelEnabled = false
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(JSON.parse(localStorage.getItem('meliora:settings')!).debugPanelEnabled).toBe(false)
+  })
+
+  it('flushes and cancels pending saves before replacing a disposed store', async () => {
+    vi.useFakeTimers()
+    const schedule = vi.spyOn(window, 'setTimeout')
+    const cancel = vi.spyOn(window, 'clearTimeout')
+    const store = usePlayerStore()
+    store.settings.volume = 0.4
+    await nextTick()
+    expect(schedule).toHaveBeenLastCalledWith(expect.any(Function), 200)
+    const pendingSave = schedule.mock.results.at(-1)?.value
+
+    activateTestPinia()
+    expect(cancel).toHaveBeenCalledWith(pendingSave)
+    const restored = usePlayerStore()
+    expect(restored.settings.volume).toBe(0.4)
+    restored.settings.volume = 0.8
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(JSON.parse(localStorage.getItem('meliora:settings')!).volume).toBe(0.8)
   })
 
   it('sanitizes invalid persisted settings instead of leaking NaN or out-of-range values', () => {
@@ -402,7 +543,7 @@ describe('player settings migration', () => {
     expect(result.beatBrightness).toBe(0)
     expect(result.beatFlashRate).toBe(4)
     expect(result.beatVisualDelay).toBe(300)
-    expect(result.lyricFontSize).toBe(22)
+    expect(result.lyricScale).toBe(1.1)
     expect(result.lyricAnimation).toBe(true)
     expect(result.lyricTranslation).toBe(true)
     expect(result.progressLyricPreview).toBe(true)
@@ -413,7 +554,56 @@ describe('player settings migration', () => {
       preset: 'flat',
       bands: [12, 0, -12, 0, 3],
     })
-    expect(result.settingsVersion).toBe(1)
+    expect(result.settingsVersion).toBe(2)
+  })
+
+  it.each([
+    [15, 0.75],
+    [20, 1],
+    [30, 1.5],
+    [5, 0.75],
+    [100, 1.5],
+    [null, 1],
+    ['', 1],
+    [Number.NaN, 1],
+  ])('migrates legacy lyric size %s to scale %s', (lyricFontSize, expected) => {
+    expect(migrateSettings({ lyricFontSize }).lyricScale).toBe(expected)
+  })
+
+  it.each([
+    [0.5, 0.75],
+    [2, 1.5],
+    [1.25, 1.25],
+    ['1.15', 1.15],
+    ['', 1],
+    [null, 1],
+    [true, 1],
+    [Number.NaN, 1],
+    [Number.POSITIVE_INFINITY, 1],
+  ])('sanitizes lyric scale %s and prioritizes it over the old size', (lyricScale, expected) => {
+    expect(
+      migrateSettings({ lyricScale: lyricScale as number, lyricFontSize: 30 }).lyricScale,
+    ).toBe(expected)
+  })
+
+  it('persists the migrated scale without retaining a legacy pixel preference', async () => {
+    vi.useFakeTimers()
+    localStorage.setItem(
+      'meliora:settings',
+      JSON.stringify({ settingsVersion: 1, lyricFontSize: 25 }),
+    )
+    const store = usePlayerStore()
+    expect(store.settings.lyricScale).toBe(1.25)
+    store.settings.volume = 0.5
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(200)
+
+    const saved = JSON.parse(localStorage.getItem('meliora:settings')!)
+    expect(saved.lyricScale).toBe(1.25)
+    expect(saved.settingsVersion).toBe(2)
+    expect(saved).not.toHaveProperty('lyricFontSize')
+    activateTestPinia()
+    expect(usePlayerStore().settings.lyricScale).toBe(1.25)
   })
 
   it('clamps the lyric spring coefficient into the supported range', () => {
@@ -424,12 +614,12 @@ describe('player settings migration', () => {
 
   it('resets only the requested settings and leaves the rest alone', () => {
     const store = usePlayerStore()
-    store.settings.lyricFontSize = 30
+    store.settings.lyricScale = 1.5
     store.settings.backgroundBlur = 130
 
-    store.resetSettings(['lyricFontSize'])
+    store.resetSettings(['lyricScale'])
 
-    expect(store.settings.lyricFontSize).toBe(20)
+    expect(store.settings.lyricScale).toBe(1)
     expect(store.settings.backgroundBlur).toBe(130)
   })
 

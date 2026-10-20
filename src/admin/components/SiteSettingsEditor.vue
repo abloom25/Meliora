@@ -1,17 +1,18 @@
 <script setup lang="ts">
   import { computed, onBeforeUnmount, ref, watch } from 'vue'
   import { Check, Loader2, PlugZap, Upload, X } from '@lucide/vue'
-  import type { MusicConfig } from '../../types/music'
+  import type { MusicConfig } from '../../../shared/music-config'
   import BaseInput from '../../components/BaseInput.vue'
   import {
     MAX_UPLOAD_BYTES,
     MAX_UPLOAD_SIZE_LABEL,
-    testMusicApi,
-    uploadFile,
     type MusicApiTestResult,
     type StagedUpload,
   } from '../services/admin-api'
+  import { useAdminApi } from '../composables/useAdminApi'
   import { useFileStagingState } from '../composables/useFileStagingState'
+
+  const { testMusicApi, uploadFile } = useAdminApi()
 
   const props = defineProps<{ config: MusicConfig }>()
   const emit = defineEmits<{
@@ -21,6 +22,16 @@
   }>()
 
   const iconUrlInput = ref(props.config.siteIcon || '')
+  const uploadedIconPreview = ref<{ path: string; dataUrl: string } | null>(null)
+  const iconPreviewFailed = ref(false)
+  const iconPreviewSource = computed(() =>
+    uploadedIconPreview.value && uploadedIconPreview.value.path === props.config.siteIcon
+      ? uploadedIconPreview.value.dataUrl
+      : props.config.siteIcon,
+  )
+  watch(iconPreviewSource, () => {
+    iconPreviewFailed.value = false
+  })
   // 记录输入框最后一次应用到 config 的值:prop 因撤销/导入等外部原因变化时
   // 才回写输入框;用户正在输入(尚未 blur 应用)时不会被打断。
   let lastAppliedIcon = props.config.siteIcon || ''
@@ -90,7 +101,7 @@
         apiTestStatus.value = 'success'
         emit(
           'notify',
-          `全部 ${result.data.playlistCount} 个歌单测试通过,共 ${result.data.trackCount} 首`,
+          `服务端连通测试通过,共 ${result.data.trackCount} 首；请在播放器确认浏览器可访问`,
           'success',
         )
       } else {
@@ -155,7 +166,9 @@
       const result = await uploadFile(path, base64)
       if (result.ok && result.blobSha && result.path) {
         emit('file-staged', { path: result.path, blobSha: result.blobSha })
-        setIcon(result.local && import.meta.env.DEV ? dataUrl : `./icon.${ext}`)
+        const iconPath = result.local && import.meta.env.DEV ? dataUrl : `./icon.${ext}`
+        uploadedIconPreview.value = { path: iconPath, dataUrl }
+        setIcon(iconPath)
         uploadStatus.value = '已暂存，保存全部后生效'
       } else {
         uploadStatus.value = result.error || '上传失败'
@@ -191,10 +204,10 @@
         <div class="icon-control">
           <div class="icon-preview">
             <img
-              v-if="config.siteIcon"
-              :src="config.siteIcon"
+              v-if="iconPreviewSource && !iconPreviewFailed"
+              :src="iconPreviewSource"
               alt="站点图标"
-              @error="setIcon(undefined)"
+              @error="iconPreviewFailed = true"
             />
             <Upload v-else :size="18" />
           </div>
@@ -248,13 +261,13 @@
       <div class="setting-row">
         <span class="row-label">
           <strong>API Token</strong>
-          <small>部分 Meting API 需要鉴权</small>
+          <small>暂不支持 Token 音源；请清空 Token 并改用无需鉴权的公开接口</small>
         </span>
         <div class="token-field">
           <BaseInput
             :model-value="config.apiToken || ''"
             :type="showApiToken ? 'text' : 'password'"
-            placeholder="可选"
+            placeholder="暂不支持，请留空"
             @update:model-value="setApiToken($event)"
           />
           <button type="button" class="token-toggle" @click="showApiToken = !showApiToken">
@@ -265,8 +278,8 @@
 
       <div class="setting-row api-test-row">
         <span class="row-label">
-          <strong>连通测试</strong>
-          <small>测试全部启用歌单接口</small>
+          <strong>服务端连通测试</strong>
+          <small>测试公开歌单接口；浏览器跨域访问需在播放器确认</small>
         </span>
         <button
           type="button"

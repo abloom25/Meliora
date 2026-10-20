@@ -580,6 +580,7 @@ export async function triggerUpdate(
     return jsonResponse({ error: '目标版本号无效' }, 400)
   }
 
+  const { signal, cleanup } = createTimeoutSignal()
   try {
     const triggeredAt = new Date().toISOString()
     const triggerId =
@@ -595,6 +596,7 @@ export async function triggerUpdate(
         'Content-Type': 'application/json',
       },
       redirect: 'manual',
+      signal,
       body: JSON.stringify({
         ref: env.GH_BRANCH || 'main',
         inputs: {
@@ -623,7 +625,12 @@ export async function triggerUpdate(
       },
       200,
     )
-  } catch {
-    return jsonResponse({ error: '网络错误' }, 500)
+  } catch (error) {
+    return jsonResponse(
+      { error: isAbortError(error) ? '触发更新超时,请检查更新状态后重试' : '网络错误' },
+      isAbortError(error) ? 504 : 500,
+    )
+  } finally {
+    cleanup()
   }
 }

@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { LruCache } from '../utils/lru-cache'
+import { LruCache } from '../core/util/lru-cache'
 
 describe('LruCache', () => {
+  it('inspects entries without refreshing their eviction priority', () => {
+    const cache = new LruCache<string, number>(2)
+    cache.set('old', 1)
+    cache.set('recent', 2)
+    expect(cache.peek('old')).toBe(1)
+    expect(cache.peek('missing')).toBeUndefined()
+    cache.set('new', 3)
+    expect(cache.has('old')).toBe(false)
+    expect(cache.has('recent')).toBe(true)
+  })
+
   it('stores and retrieves values by key', () => {
     const cache = new LruCache<string, number>(4)
     cache.set('a', 1)

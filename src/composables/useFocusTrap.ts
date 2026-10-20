@@ -8,17 +8,20 @@ import {
   type MaybeRefOrGetter,
   toValue,
 } from 'vue'
-import { getFocusableEdges } from '../utils/dom'
+import { getFocusableEdges } from '../platform/web/dom'
 
 // 模块级 trap 栈:多个 trap 同时 active 时(如叠层抽屉/弹窗),
 // 只有最后激活的栈顶 trap 响应 Escape 与 Tab,避免一次按键触发所有 onClose。
-const trapStack: symbol[] = []
+const trapStack: { id: symbol; container: Ref<HTMLElement | null> }[] = []
 
 export function useFocusTrap(
   containerRef: Ref<HTMLElement | null>,
   active: Ref<boolean>,
   onClose?: () => void,
-  options?: { autoFocus?: MaybeRefOrGetter<boolean> },
+  options?: {
+    autoFocus?: MaybeRefOrGetter<boolean>
+    initialFocus?: () => HTMLElement | null
+  },
 ) {
   const triggerRef = ref<HTMLElement | null>(null)
   const trapId = Symbol('focus-trap')
@@ -26,17 +29,17 @@ export function useFocusTrap(
   let focusTimer = 0
 
   function isTopTrap(): boolean {
-    return trapStack[trapStack.length - 1] === trapId
+    return trapStack[trapStack.length - 1]?.id === trapId
   }
 
   function pushTrap() {
-    const index = trapStack.indexOf(trapId)
+    const index = trapStack.findIndex((entry) => entry.id === trapId)
     if (index >= 0) trapStack.splice(index, 1)
-    trapStack.push(trapId)
+    trapStack.push({ id: trapId, container: containerRef })
   }
 
   function removeTrap() {
-    const index = trapStack.indexOf(trapId)
+    const index = trapStack.findIndex((entry) => entry.id === trapId)
     if (index >= 0) trapStack.splice(index, 1)
   }
 
@@ -44,10 +47,18 @@ export function useFocusTrap(
     if (!containerRef.value || !active.value) return
 
     const { first, last } = getFocusableEdges(containerRef.value)
-    if (!first || !last) return
+    if (!first || !last) {
+      e.preventDefault()
+      containerRef.value.focus()
+      return
+    }
 
     const activeElement = document.activeElement
-    if (!activeElement || !containerRef.value.contains(activeElement)) {
+    if (
+      !activeElement ||
+      activeElement === containerRef.value ||
+      !containerRef.value.contains(activeElement)
+    ) {
       // focus 落在容器外(既非 first 也非 last):拉回容器,
       // 按 shift 方向决定从头部还是尾部进入
       e.preventDefault()
@@ -84,31 +95,39 @@ export function useFocusTrap(
     }
   }
 
-  function focusFirstFocusable() {
+  function focusInitialElement() {
     if (!containerRef.value) return false
+    const preferred = options?.initialFocus?.()
+    if (preferred && containerRef.value.contains(preferred)) {
+      preferred.focus()
+      if (document.activeElement === preferred) return true
+    }
     const { first } = getFocusableEdges(containerRef.value)
     if (first) {
       first.focus()
       return document.activeElement === first
     }
+    if (containerRef.value.hasAttribute('tabindex')) {
+      containerRef.value.focus()
+      return document.activeElement === containerRef.value
+    }
     return false
   }
 
   async function activateTrap() {
-    triggerRef.value = document.activeElement as HTMLElement
     pendingActivation = true
 
     await nextTick()
 
     if (!pendingActivation) return
 
-    if (focusFirstFocusable()) {
+    if (focusInitialElement()) {
       pendingActivation = false
       return
     }
 
     await nextTick()
-    if (pendingActivation && focusFirstFocusable()) {
+    if (pendingActivation && focusInitialElement()) {
       pendingActivation = false
     }
   }
@@ -118,7 +137,14 @@ export function useFocusTrap(
     if (triggerRef.value && typeof triggerRef.value.focus === 'function') {
       const trigger = triggerRef.value
       focusTimer = window.setTimeout(() => {
-        trigger.focus()
+        // 切换抽屉时，新抽屉已经接管焦点；嵌套弹层关闭仍可回到下层抽屉内部。
+        const currentTrap = trapStack[trapStack.length - 1]
+        if (
+          trigger.isConnected &&
+          (!currentTrap || currentTrap.container.value?.contains(trigger))
+        ) {
+          trigger.focus()
+        }
         focusTimer = 0
       }, 0)
     }
@@ -129,6 +155,8 @@ export function useFocusTrap(
     active,
     (isActive) => {
       if (isActive) {
+        // 关闭时恢复焦点与是否自动入焦无关；触屏抽屉仍可在打开后通过 Tab 进入。
+        triggerRef.value = document.activeElement as HTMLElement
         pushTrap()
         if (toValue(options?.autoFocus) !== false) void activateTrap()
         else pendingActivation = false
@@ -144,7 +172,7 @@ export function useFocusTrap(
     if (!pendingActivation || !active.value) return
     if (container) {
       void nextTick().then(() => {
-        if (pendingActivation && focusFirstFocusable()) {
+        if (pendingActivation && focusInitialElement()) {
           pendingActivation = false
         }
       })
@@ -155,7 +183,7 @@ export function useFocusTrap(
     document.addEventListener('keydown', handleKeydown)
     if (active.value && pendingActivation) {
       void nextTick().then(() => {
-        if (pendingActivation && focusFirstFocusable()) {
+        if (pendingActivation && focusInitialElement()) {
           pendingActivation = false
         }
       })

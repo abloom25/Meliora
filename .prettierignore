@@ -4,3 +4,7 @@ public/config.json
 
 # User-managed media assets are preserved across upstream updates.
 public/music/
+public/models/beat-this/runtime-*/
+
+# Local configuration and generated evaluation artifacts.
+.meliora/

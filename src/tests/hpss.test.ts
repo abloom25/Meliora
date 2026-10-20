@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createRealtimeHpss } from '../utils/hpss'
+import { createRealtimeHpss } from '../core/analysis/hpss'
 
 const BINS = 64
 

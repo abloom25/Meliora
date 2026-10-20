@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { listenMediaQuery, type MediaQueryChangeHandler } from '../utils/media-query'
+import { listenMediaQuery, type MediaQueryChangeHandler } from '../platform/web/media-query'
 
 describe('listenMediaQuery', () => {
   it('uses modern change listeners when available', () => {

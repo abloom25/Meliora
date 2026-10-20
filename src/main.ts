@@ -1,6 +1,7 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
+import { wireApplication } from './app/composition-root'
 import router from './router'
 import './styles/global.scss'
 
@@ -11,6 +12,8 @@ app.config.errorHandler = (error, _instance, info) => {
 }
 
 app.use(createPinia())
+// 接线要在挂载之前:store 一旦被组件用起来就该已经装好各处实现
+wireApplication()
 app.use(router)
 app.mount('#app')
 

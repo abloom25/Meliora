@@ -1,6 +1,8 @@
 import type { ConfigPayload } from './types'
 import { validateMusicConfig } from '../../shared/config-schema'
 import { CONFIG_LIMITS } from '../../shared/constants'
+import { buildMetingPlaylistUrl } from '../../shared/music-api'
+import { getPlaybackSupportError } from '../../shared/playback-support'
 import { jsonResponse } from './http'
 import { ResponseTooLargeError, readJsonWithLimit } from './read-json-with-limit'
 
@@ -24,13 +26,21 @@ interface MusicApiTestResult {
 const TEST_TIMEOUT_MS = 8000
 const PLAYLIST_CONCURRENCY = 3
 
-async function fetchWithTimeout(url: string): Promise<Response> {
+async function fetchWithTimeout(url: string): Promise<{ response: Response; cleanup: () => void }> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS)
   try {
-    return await fetch(url, { signal: controller.signal, redirect: 'manual' })
-  } finally {
+    const response = await fetch(url, { signal: controller.signal, redirect: 'manual' })
+    return {
+      response,
+      cleanup: () => {
+        clearTimeout(timer)
+        controller.abort()
+      },
+    }
+  } catch (error) {
     clearTimeout(timer)
+    throw error
   }
 }
 
@@ -58,15 +68,11 @@ async function testPlaylistApi(
   config: ConfigPayload,
   playlist: ConfigPayload['playlists'][number],
 ): Promise<PlaylistApiCheck> {
-  const params = new URLSearchParams({
-    server: playlist.server,
-    type: 'playlist',
-    id: playlist.playlistId.trim(),
-  })
-  if (config.apiToken?.trim()) params.set('token', config.apiToken.trim())
-
+  let cleanup = () => {}
   try {
-    const response = await fetchWithTimeout(`${config.apiEndpoint.trim()}?${params.toString()}`)
+    const fetched = await fetchWithTimeout(buildMetingPlaylistUrl(config.apiEndpoint, playlist))
+    cleanup = fetched.cleanup
+    const response = fetched.response
     if (response.status >= 300 && response.status < 400) {
       return {
         server: playlist.server,
@@ -120,6 +126,8 @@ async function testPlaylistApi(
             ? '响应数据过大'
             : '请求失败',
     }
+  } finally {
+    cleanup()
   }
 }
 
@@ -132,6 +140,8 @@ export async function testMusicApi(input: unknown): Promise<Response> {
     return jsonResponse({ error: '配置校验失败', details: validation.errors }, 400)
   }
   const config = validation.config
+  const playbackError = getPlaybackSupportError(config)
+  if (playbackError) return jsonResponse({ error: playbackError }, 400)
 
   const playlists: ConfigPayload['playlists'] = config.playlists.filter(
     (playlist) => playlist.enabled !== false && playlist.playlistId.trim(),

@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import PlayerControls from '../components/PlayerControls.vue'
 import { usePlayerStore } from '../stores/player'
-import type { LyricsSnapshot } from '../types/music'
+import type { LyricsSnapshot } from '../core/types'
+import { createLyricWaitingTimeline, resolveLyricWaitingMotion } from '../core/lyrics'
 
 const lyricPreview: LyricsSnapshot = {
   status: 'ready',
@@ -39,6 +40,16 @@ const advancedPreview: LyricsSnapshot = {
     { time: 30, endTime: 50, text: 'other voice', agent: 'secondary' },
     { time: 35, endTime: 45, text: 'ooh', background: true },
     { time: 60, endTime: 70, text: 'later line' },
+  ],
+}
+
+const waitingPreview: LyricsSnapshot = {
+  status: 'ready',
+  activeIndex: -1,
+  lines: [
+    { time: 10, endTime: 20, text: 'First phrase' },
+    { time: 40, endTime: 50, text: 'Second phrase', agent: 'secondary' },
+    { time: 55, endTime: 60, text: 'Last phrase' },
   ],
 }
 
@@ -199,6 +210,41 @@ describe('PlayerControls lyric preview', () => {
 
     expect(document.body.querySelector('.lyric-preview-bubble')).toBeNull()
 
+    wrapper.unmount()
+  })
+
+  it('shares one fresh track measurement per hover frame after the track moves', async () => {
+    const store = usePlayerStore()
+    store.duration = 100
+    store.settings.progressLyricPreview = true
+    const wrapper = mountProgressControls()
+    const range = wrapper.get<HTMLElement>('.range')
+    mockProgressRect(range.element)
+    const measure = vi.mocked(range.element.getBoundingClientRect)
+
+    dispatchPointerEvent(range.element, 'pointermove', { clientX: 50, clientY: 120 })
+    await waitPreviewFrame()
+    expect(measure).toHaveBeenCalledTimes(1)
+    expect(document.body.querySelector('.lyric-preview-bubble')?.textContent).toContain('0:25')
+
+    measure.mockClear()
+    measure.mockReturnValue({
+      x: 100,
+      y: 200,
+      top: 200,
+      right: 500,
+      bottom: 228,
+      left: 100,
+      width: 400,
+      height: 28,
+      toJSON: () => ({}),
+    })
+    dispatchPointerEvent(range.element, 'pointermove', { clientX: 300, clientY: 214 })
+    await waitPreviewFrame()
+    const bubble = document.body.querySelector<HTMLElement>('.lyric-preview-bubble')
+    expect(measure).toHaveBeenCalledTimes(1)
+    expect(bubble?.textContent).toContain('0:50')
+    expect(bubble?.style.translate).toBe('300px 174px')
     wrapper.unmount()
   })
 
@@ -394,7 +440,7 @@ describe('PlayerControls lyric preview', () => {
     wrapper.unmount()
   })
 
-  it('dims the bubble while the hovered moment falls in an instrumental gap', async () => {
+  it('replaces the completed line with waiting dots in a long instrumental gap', async () => {
     const store = usePlayerStore()
     store.duration = 100
     store.currentTime = 0
@@ -409,8 +455,9 @@ describe('PlayerControls lyric preview', () => {
     await waitPreviewFrame()
 
     const bubble = document.body.querySelector('.lyric-preview-bubble')
-    expect(bubble?.classList.contains('held')).toBe(true)
-    expect(previewRows()).toEqual([{ text: 'Opening line', secondary: false, harmony: false }])
+    expect(bubble?.classList.contains('held')).toBe(false)
+    expect(bubble?.querySelectorAll('.waiting-dot')).toHaveLength(3)
+    expect(previewRows()).toEqual([])
 
     // 正在唱的时刻不该被压暗
     dispatchPointerEvent(range.element, 'pointermove', { clientX: 80, clientY: 120 })
@@ -418,7 +465,203 @@ describe('PlayerControls lyric preview', () => {
     expect(document.body.querySelector('.lyric-preview-bubble')?.classList.contains('held')).toBe(
       false,
     )
+    expect(document.body.querySelector('.lyric-preview-waiting')).toBeNull()
 
+    wrapper.unmount()
+  })
+
+  it('shows intro dots before any active lyric and uses hovered time independently of playback', async () => {
+    const store = usePlayerStore()
+    store.duration = 100
+    store.currentTime = 45
+    store.settings.progressLyricPreview = true
+    store.settings.lyricAnimation = true
+    const wrapper = mountProgressControls({ lyricPreview: waitingPreview })
+    const range = wrapper.get<HTMLElement>('.range')
+    mockProgressRect(range.element)
+    dispatchPointerEvent(range.element, 'pointermove', { clientX: 0, clientY: 120 })
+    await waitPreviewFrame()
+
+    const indicator = document.body.querySelector<HTMLElement>('.lyrics-waiting-indicator')!
+    expect(indicator).not.toBeNull()
+    expect(indicator.style.opacity).toBe('1')
+    expect(document.body.querySelector('.lyric-preview-time')?.textContent).toBe('0:00')
+    expect(previewRows()).toEqual([])
+
+    const raf = vi.spyOn(window, 'requestAnimationFrame')
+    const interval = createLyricWaitingTimeline(waitingPreview.lines).read(5)!.interval
+    dispatchPointerEvent(range.element, 'pointermove', { clientX: 10, clientY: 120 })
+    await waitPreviewFrame()
+    const expected = resolveLyricWaitingMotion(5, interval)
+    expect(document.body.querySelector('.lyrics-waiting-indicator')).toBe(indicator)
+    expect(Number(indicator.style.scale)).toBeCloseTo(expected.scale, 4)
+    expect(
+      [...indicator.children].map((dot) => Number((dot as HTMLElement).style.opacity)),
+    ).toEqual(expected.dotOpacities.map((opacity) => Number(opacity.toFixed(3))))
+    // 一次指针更新与测试等待各调用一次 RAF；指针停住不启动呼吸计时器。
+    expect(raf).toHaveBeenCalledTimes(2)
+    const frozen = indicator.outerHTML
+    store.currentTime = 56
+    store.isPlaying = true
+    await nextTick()
+    expect(indicator.outerHTML).toBe(frozen)
+    expect(raf).toHaveBeenCalledTimes(2)
+
+    dispatchPointerEvent(range.element, 'pointermove', { clientX: 20, clientY: 120 })
+    await waitPreviewFrame()
+    expect(document.body.querySelector('.lyric-preview-waiting')).toBeNull()
+    expect(previewRows().map((row) => row.text)).toEqual(['First phrase'])
+    wrapper.unmount()
+  })
+
+  it('switches across interlude boundaries in both directions and keeps short pauses as held lyrics', async () => {
+    const store = usePlayerStore()
+    store.duration = 100
+    store.settings.progressLyricPreview = true
+    const wrapper = mountProgressControls({ lyricPreview: waitingPreview })
+    const range = wrapper.get<HTMLElement>('.range')
+    mockProgressRect(range.element)
+
+    for (const time of [20, 30, 40, 30, 19, 51, 60]) {
+      dispatchPointerEvent(range.element, 'pointermove', { clientX: time * 2, clientY: 120 })
+      await waitPreviewFrame()
+      const waiting = document.body.querySelector('.lyric-preview-waiting')
+      if (time === 20 || time === 30) {
+        expect(waiting?.classList.contains('secondary')).toBe(true)
+        expect(waiting?.querySelectorAll('.waiting-dot')).toHaveLength(3)
+        expect(previewRows()).toEqual([])
+      } else {
+        expect(waiting).toBeNull()
+        expect(previewRows()).toHaveLength(1)
+      }
+      if (time === 51) {
+        expect(
+          document.body.querySelector('.lyric-preview-bubble')?.classList.contains('held'),
+        ).toBe(true)
+        expect(previewRows()[0]?.text).toBe('Second phrase')
+      }
+    }
+    wrapper.unmount()
+  })
+
+  it('restores waiting dots after lyrics load while hovering and removes them when unavailable', async () => {
+    const store = usePlayerStore()
+    store.duration = 100
+    store.settings.progressLyricPreview = true
+    const wrapper = mountProgressControls({ lyricPreview: null })
+    const range = wrapper.get<HTMLElement>('.range')
+    mockProgressRect(range.element)
+    dispatchPointerEvent(range.element, 'pointermove', { clientX: 10, clientY: 120 })
+    await waitPreviewFrame()
+    expect(document.body.querySelector('.lyric-preview-bubble')).toBeNull()
+
+    await wrapper.setProps({ lyricPreview: waitingPreview })
+    expect(document.body.querySelectorAll('.lyric-preview-waiting .waiting-dot')).toHaveLength(3)
+    await wrapper.setProps({ previewEnabled: false })
+    expect(document.body.querySelector('.lyric-preview-bubble')).toBeNull()
+    await wrapper.setProps({ previewEnabled: true })
+    dispatchPointerEvent(range.element, 'pointermove', { clientX: 10, clientY: 120 })
+    await waitPreviewFrame()
+    expect(document.body.querySelectorAll('.lyric-preview-waiting .waiting-dot')).toHaveLength(3)
+    await wrapper.setProps({ lyricPreview: { ...waitingPreview, status: 'loading' } })
+    expect(document.body.querySelector('.lyric-preview-bubble')).toBeNull()
+    await wrapper.setProps({ lyricPreview: waitingPreview })
+    expect(document.body.querySelectorAll('.lyric-preview-waiting .waiting-dot')).toHaveLength(3)
+    store.settings.progressLyricPreview = false
+    await nextTick()
+    expect(document.body.querySelector('.lyric-preview-bubble')).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('uses a static waiting mark when animations are disabled or reduced motion changes', async () => {
+    let reducedMotionChanged: ((event: MediaQueryListEvent) => void) | undefined
+    const remove = vi.fn()
+    vi.spyOn(window, 'matchMedia').mockReturnValue({
+      matches: false,
+      media: '(prefers-reduced-motion: reduce)',
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(() => true),
+      addEventListener: (_event: string, handler: (event: MediaQueryListEvent) => void) => {
+        reducedMotionChanged = handler
+      },
+      removeEventListener: remove,
+    } as MediaQueryList)
+    const store = usePlayerStore()
+    store.duration = 100
+    store.settings.progressLyricPreview = true
+    store.settings.lyricAnimation = true
+    const wrapper = mountProgressControls({ lyricPreview: waitingPreview })
+    const range = wrapper.get<HTMLElement>('.range')
+    mockProgressRect(range.element)
+    dispatchPointerEvent(range.element, 'pointermove', { clientX: 10, clientY: 120 })
+    await waitPreviewFrame()
+    const indicator = document.body.querySelector<HTMLElement>('.lyrics-waiting-indicator')!
+    expect(Number(indicator.style.scale)).toBeGreaterThan(1)
+    store.settings.lyricAnimation = false
+    await nextTick()
+    expect(Number(indicator.style.scale)).toBe(1)
+    expect([...indicator.children].map((dot) => (dot as HTMLElement).style.opacity)).toEqual([
+      '0.65',
+      '0.65',
+      '0.65',
+    ])
+    store.settings.lyricAnimation = true
+    await nextTick()
+    expect(Number(indicator.style.scale)).toBeGreaterThan(1)
+    reducedMotionChanged?.({ matches: true } as MediaQueryListEvent)
+    await nextTick()
+    expect(Number(indicator.style.scale)).toBe(1)
+    wrapper.unmount()
+    expect(remove).toHaveBeenCalledWith('change', reducedMotionChanged)
+  })
+
+  it('reclamps a waiting bubble that grows into long lyrics without another pointer move', async () => {
+    const store = usePlayerStore()
+    store.duration = 100
+    store.settings.progressLyricPreview = true
+    const originalMeasure = HTMLElement.prototype.getBoundingClientRect
+    const right = window.innerWidth
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.classList.contains('range')) {
+        return {
+          x: right - 200,
+          y: 100,
+          top: 100,
+          left: right - 200,
+          right,
+          bottom: 128,
+          width: 200,
+          height: 28,
+        } as DOMRect
+      }
+      if (!this.classList.contains('lyric-preview-bubble')) return originalMeasure.call(this)
+      const width = this.querySelector('.lyric-preview-waiting') ? 72 : 300
+      return { x: 0, y: 0, top: 0, right: width, bottom: 60, left: 0, width, height: 60 } as DOMRect
+    })
+    const wrapper = mountProgressControls({
+      lyricPreview: {
+        status: 'ready',
+        activeIndex: 0,
+        lines: [
+          { time: 0, endTime: 20, text: 'First phrase' },
+          { time: 95, endTime: 100, text: 'A much longer final phrase beside the window edge' },
+        ],
+      },
+    })
+    const range = wrapper.get<HTMLElement>('.range')
+    dispatchPointerEvent(range.element, 'pointermove', { clientX: right - 20, clientY: 114 })
+    await waitPreviewFrame()
+    const bubble = document.body.querySelector<HTMLElement>('.lyric-preview-bubble')!
+    expect(bubble.style.width).toBe('72px')
+
+    dispatchPointerEvent(range.element, 'pointermove', { clientX: right - 8, clientY: 114 })
+    await waitPreviewFrame()
+    expect(bubble.style.width).toBe('300px')
+    expect(bubble.style.translate).toBe(`${right - 12 - 150}px 74px`)
     wrapper.unmount()
   })
 
@@ -500,6 +743,22 @@ describe('PlayerControls lyric preview', () => {
     await nextTick()
 
     expect(onSeek).toHaveBeenLastCalledWith(60)
+    expect(range.classes()).not.toContain('is-dragging')
+    wrapper.unmount()
+  })
+
+  it('cancels an old progress drag immediately when the current track changes', async () => {
+    const store = usePlayerStore()
+    store.duration = 100
+    const onSeek = vi.fn()
+    const wrapper = mountProgressControls({ onSeek })
+    const range = wrapper.get<HTMLElement>('.range')
+    mockProgressRect(range.element)
+    dispatchPointerEvent(range.element, 'pointerdown', { clientX: 40, clientY: 120 })
+    store.currentTrackId = 'another-track'
+    dispatchPointerEvent(window, 'pointerup', { clientX: 160, clientY: 120 })
+    await nextTick()
+    expect(onSeek).not.toHaveBeenCalled()
     expect(range.classes()).not.toContain('is-dragging')
     wrapper.unmount()
   })

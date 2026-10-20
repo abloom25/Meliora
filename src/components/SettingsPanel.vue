@@ -2,18 +2,26 @@
   import { Download, GitFork, PictureInPicture2, SlidersHorizontal } from '@lucide/vue'
   import { storeToRefs } from 'pinia'
   import { computed } from 'vue'
-  import { BEAT_FLASH_RATE_STEPS, sanitizeBeatFlashRate } from '../utils/beat-envelope'
+  import { BEAT_FLASH_RATE_STEPS, sanitizeBeatFlashRate } from '../core/analysis/beat-envelope'
+  import type { BeatBuildStatus } from '../core/analysis/beat-timeline'
+  import { formatTrackDisplayTitle } from '../core/library/tracks'
+  import type { LyricProviderSource, LyricStatus, Track } from '../core/types'
   import { APP_VERSION } from '../generated/app-version'
   import { usePlayerStore, type ResettableSettingKey } from '../stores/player'
   import Collapse from './Collapse.vue'
+  import BeatAnalysisSettings from './BeatAnalysisSettings.vue'
   import EqualizerPanel from './EqualizerPanel.vue'
   import SettingSlider from './SettingSlider.vue'
   import SettingToggleRow from './SettingToggleRow.vue'
   import SettingsSectionHeader from './SettingsSectionHeader.vue'
   import SleepTimerControl from './SleepTimerControl.vue'
+  import SongInfoValue from './SongInfoValue.vue'
   import ToggleSwitch from './ToggleSwitch.vue'
+  import ListeningStatsSection from './ListeningStatsSection.vue'
+  import type { ListeningStatsSummary } from '../platform/web/listening-history'
 
   const REPO_URL = 'https://github.com/abloom25/Meliora'
+  const debugSettingsAvailable = import.meta.env.DEV
 
   const store = usePlayerStore()
   const { settings } = storeToRefs(store)
@@ -27,7 +35,7 @@
     'skipOnError',
   ]
   const LYRICS_KEYS: readonly ResettableSettingKey[] = [
-    'lyricFontSize',
+    'lyricScale',
     'lyricAnimation',
     'lyricSpring',
     'lyricTranslation',
@@ -37,6 +45,7 @@
   const BACKGROUND_KEYS: readonly ResettableSettingKey[] = [
     'dynamicBackground',
     'beatFlash',
+    'beatAnalysisMode',
     'backgroundBlur',
     'backgroundSaturation',
     'beatBrightness',
@@ -64,6 +73,7 @@
   })
 
   const volumeLabel = computed(() => `${Math.round(settings.value.volume * 100)}%`)
+  const lyricScaleLabel = computed(() => `${Math.round(settings.value.lyricScale * 100)}%`)
   const lyricSpringLabel = computed(() => `×${settings.value.lyricSpring.toFixed(2)}`)
   const backgroundSaturationLabel = computed(
     () => `${Math.round(settings.value.backgroundSaturation * 100)}%`,
@@ -92,11 +102,80 @@
     iosInstallAvailable: boolean
   }
 
-  defineProps<{
+  interface SongInfoState {
+    track: Track | null
+    duration: number
+    lyricStatus: LyricStatus
+    lyricSource: LyricProviderSource | null
+    hasWordTiming: boolean
+    loading?: boolean
+    durationUnavailable?: boolean
+  }
+
+  const props = defineProps<{
     playModeText: string
     sleepTimer: SleepTimerState
     capabilities: SettingsCapabilities
+    songInfo?: SongInfoState
+    beatBuild?: BeatBuildStatus
+    listeningStats?: ListeningStatsSummary
+    clearListeningHistory?: () => Promise<void>
   }>()
+
+  const LYRIC_SOURCE_LABELS: Record<LyricProviderSource, string> = {
+    amll: 'AMLL 逐字歌词库',
+    netease: '网易云 YRC',
+    qq: 'QQ 音乐 QRC',
+    meting: 'Meting 歌词',
+    local: '自定义歌词',
+  }
+  const MUSIC_KIND_LABELS: Record<Track['kind'], string> = {
+    meting: 'Meting',
+    remote: '自定义音源',
+    local: '本地曲库',
+  }
+  const songTitle = computed(() =>
+    props.songInfo?.track ? formatTrackDisplayTitle(props.songInfo.track) : '',
+  )
+  const songDuration = computed(() => {
+    const duration = props.songInfo?.duration
+    if (duration === undefined || !Number.isFinite(duration) || duration <= 0) return ''
+    const totalSeconds = Math.floor(duration)
+    const hours = Math.floor(totalSeconds / 3600)
+    const minutes = Math.floor((totalSeconds % 3600) / 60)
+    const seconds = (totalSeconds % 60).toString().padStart(2, '0')
+    return hours > 0
+      ? `${hours}:${minutes.toString().padStart(2, '0')}:${seconds}`
+      : `${minutes}:${seconds}`
+  })
+  const lyricSourceLabel = computed(() => {
+    const info = props.songInfo
+    if (!info || info.lyricStatus === 'idle') return '尚未加载'
+    if (info.lyricStatus === 'loading') return '正在加载'
+    if (info.lyricStatus === 'empty') return '暂无歌词'
+    if (info.lyricStatus === 'error') return '歌词加载失败'
+    return info.lyricSource ? LYRIC_SOURCE_LABELS[info.lyricSource] : '来源未知'
+  })
+  const songInfoLoading = computed(() => !props.songInfo?.track && props.songInfo?.loading === true)
+  const durationLoading = computed(
+    () =>
+      songInfoLoading.value ||
+      Boolean(
+        props.songInfo?.track &&
+        !songDuration.value &&
+        !props.songInfo.durationUnavailable &&
+        Number.isFinite(props.songInfo.duration),
+      ),
+  )
+  const lyricSourceLoading = computed(
+    () => songInfoLoading.value || props.songInfo?.lyricStatus === 'loading',
+  )
+  const lyricSourceReady = computed(() =>
+    Boolean(props.songInfo?.track && props.songInfo.lyricStatus === 'ready'),
+  )
+  const lyricSourceKey = computed(
+    () => `${props.songInfo?.track?.id}:${lyricSourceLabel.value}:${props.songInfo?.hasWordTiming}`,
+  )
 
   const emit = defineEmits<{
     cyclePlayMode: []
@@ -106,11 +185,90 @@
     openLyricsWindow: []
     installPwa: []
     showIosInstallGuide: []
+    beatBuildRetry: []
   }>()
 </script>
 
 <template>
   <div class="settings-scroll">
+    <section class="settings-section song-info-section">
+      <SettingsSectionHeader title="歌曲信息" />
+      <!-- 固定信息槽位,异步字段只替换内容,不再插入/移除整行挤动下方设置。 -->
+      <div class="song-info-content" :aria-busy="songInfoLoading">
+        <p class="song-info-title" :title="songTitle">
+          <SongInfoValue :loading="songInfoLoading" :value-key="songTitle">{{
+            songTitle || '尚未选择歌曲'
+          }}</SongInfoValue>
+        </p>
+        <p class="song-info-artist" :title="songInfo?.track?.artist">
+          <SongInfoValue :loading="songInfoLoading" :value-key="songInfo?.track?.artist">{{
+            songInfo?.track ? songInfo.track.artist || '未知歌手' : '选择歌曲后查看歌曲和歌词来源'
+          }}</SongInfoValue>
+        </p>
+        <dl class="song-info-details">
+          <div class="song-info-row">
+            <dt>专辑</dt>
+            <dd class="song-info-album" :title="songInfo?.track?.album">
+              <SongInfoValue :loading="songInfoLoading" :value-key="songInfo?.track?.album">{{
+                songInfo?.track?.album || '未提供'
+              }}</SongInfoValue>
+            </dd>
+          </div>
+          <div class="song-info-row">
+            <dt>时长</dt>
+            <dd class="song-info-duration" :aria-busy="durationLoading">
+              <SongInfoValue
+                :loading="durationLoading"
+                :value-key="songDuration"
+                loading-label="正在加载时长"
+              >
+                {{ songDuration || (songInfo?.track ? '暂不可用' : '—') }}
+              </SongInfoValue>
+            </dd>
+          </div>
+          <div class="song-info-row">
+            <dt>音乐类型</dt>
+            <dd>
+              <SongInfoValue :loading="songInfoLoading" :value-key="songInfo?.track?.kind">{{
+                songInfo?.track ? MUSIC_KIND_LABELS[songInfo.track.kind] : '—'
+              }}</SongInfoValue>
+            </dd>
+          </div>
+          <div
+            class="song-info-row song-info-lyrics"
+            aria-live="polite"
+            aria-atomic="true"
+            :aria-busy="lyricSourceLoading"
+          >
+            <dt>歌词来源</dt>
+            <dd class="song-info-lyric-value">
+              <SongInfoValue
+                :loading="lyricSourceLoading"
+                :value-key="lyricSourceKey"
+                loading-label="正在加载歌词来源"
+              >
+                <span class="song-info-lyric-result">
+                  <span class="song-info-source" :title="lyricSourceLabel">
+                    {{ songInfo?.track ? lyricSourceLabel : '—' }}
+                  </span>
+                  <span v-if="lyricSourceReady" class="song-info-timing">
+                    {{ songInfo?.hasWordTiming ? '逐字' : '逐行' }}
+                  </span>
+                </span>
+              </SongInfoValue>
+            </dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+
+    <ListeningStatsSection
+      v-if="listeningStats && clearListeningHistory"
+      :stats="listeningStats"
+      :track="songInfo?.track"
+      :on-clear="clearListeningHistory"
+    />
+
     <section class="settings-section">
       <SettingsSectionHeader title="播放" resettable @reset="store.resetSettings(PLAYBACK_KEYS)" />
       <SettingSlider
@@ -168,11 +326,13 @@
     <section class="settings-section">
       <SettingsSectionHeader title="歌词" resettable @reset="store.resetSettings(LYRICS_KEYS)" />
       <SettingSlider
-        v-model="settings.lyricFontSize"
-        label="歌词字号"
-        :value-text="`${settings.lyricFontSize}px`"
-        :min="15"
-        :max="30"
+        v-model="settings.lyricScale"
+        label="歌词缩放"
+        description="在适合当前窗口的字号上按比例调整"
+        :value-text="lyricScaleLabel"
+        :min="0.75"
+        :max="1.5"
+        :step="0.05"
       />
       <SettingToggleRow
         v-model="settings.lyricAnimation"
@@ -284,6 +444,7 @@
       />
       <!-- 同上:闪光关掉后亮度 / 频率 / 延迟都无处生效 -->
       <Collapse :expanded="settings.beatFlash">
+        <BeatAnalysisSettings :status="beatBuild" @retry="emit('beatBuildRetry')" />
         <SettingSlider
           v-model="settings.beatBrightness"
           label="节奏亮度"
@@ -309,6 +470,15 @@
           :step="10"
         />
       </Collapse>
+    </section>
+
+    <section v-if="debugSettingsAvailable" class="settings-section">
+      <SettingsSectionHeader title="调试" />
+      <SettingToggleRow
+        v-model="settings.debugPanelEnabled"
+        label="播放器调试面板"
+        description="开启后可从顶部查看播放与预分析状态"
+      />
     </section>
 
     <section class="settings-section about-section">
@@ -380,6 +550,101 @@
   // 分组标题后的第一项不画分隔线
   .settings-section-header + * {
     border-top: 0;
+  }
+  .song-info-content {
+    margin: 0;
+    padding: 5px 14px 15px;
+  }
+  .song-info-title,
+  .song-info-artist {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .song-info-title {
+    --song-info-placeholder-width: 75%;
+    --song-info-placeholder-height: 1em;
+    color: rgba(255, 255, 255, 0.94);
+    font-size: 0.93rem;
+    font-weight: 650;
+    line-height: 1.45;
+    block-size: 1.45em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .song-info-artist {
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    line-height: 1.5;
+    block-size: 1.5em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .song-info-details {
+    display: grid;
+    gap: 10px;
+    margin: 17px 0 0;
+    font-size: 0.71rem;
+    line-height: 1.5;
+  }
+  .song-info-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: baseline;
+    gap: 16px;
+    min-block-size: 1.5em;
+  }
+  .song-info-row dt {
+    color: var(--text-subtle);
+    white-space: nowrap;
+  }
+  .song-info-row dd {
+    margin: 0;
+    color: var(--text-muted);
+    text-align: right;
+    min-inline-size: 0;
+    block-size: 1.5em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .song-info-duration {
+    --song-info-placeholder-width: 3.5em;
+    font-variant-numeric: tabular-nums;
+  }
+  .song-info-lyrics {
+    padding-top: 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.075);
+  }
+  .song-info-lyrics .song-info-lyric-value {
+    block-size: 2em;
+  }
+  .song-info-lyric-result {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 6px;
+  }
+  .song-info-source {
+    color: var(--text-muted);
+    font-weight: 560;
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .song-info-timing {
+    flex: 0 0 auto;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-muted);
+    font-size: 0.6rem;
+    box-sizing: border-box;
+    text-align: center;
+    min-block-size: 1.9em;
   }
   .about-section {
     margin-top: 14px;
@@ -513,6 +778,9 @@
       margin-top: 9px;
       border-radius: 20px;
     }
+    .song-info-content {
+      padding: 4px 12px 13px;
+    }
     .setting-group,
     .setting-row {
       padding: 13px 12px;
@@ -537,6 +805,9 @@
     .settings-section {
       margin-top: 7px;
       border-radius: 18px;
+    }
+    .song-info-content {
+      padding: 4px 10px 11px;
     }
     .setting-group,
     .setting-row {

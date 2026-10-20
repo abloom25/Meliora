@@ -108,30 +108,98 @@
 
 ## 2. 目录与分层
 
-严格保持以下分层,**禁止**跨层倒置依赖:
+> **本项目的最高架构目标:平台无关 + 完全解耦。**
+> 播放器要能移植到桌面端(Tauri + 原生音频后端),因此**业务规则一律不许和浏览器绑死**。
+> 写任何代码前先问一句:这段逻辑换到没有 DOM 的环境还成立吗?成立就属于 `core/`。
 
 ```
 入口      src/main.ts → src/App.vue → src/views/PlayerView.vue
+组装      src/app/            组装点:把平台实现与服务实现装到只认接口的层上
+核心      src/core/           平台无关的规则与数据结构(零 DOM / 零 BOM / 零 Vue)
+平台      src/platform/       平台实现。platform/web/ 是浏览器那一份
 状态      src/stores/         Pinia store
-编排      src/App.vue         只装配,不写业务
-能力      src/composables/    业务 hook(命名 useXxx)
-服务      src/services/       远程/外部 IO 抽象
-工具      src/utils/          纯函数 + 数据结构(部分需保持 DOM-free 以便供 worker 共用,详见 §3.7)
+能力      src/composables/    业务 hook(命名 useXxx),把 core 与 platform 接到 Vue 上
+服务      src/services/       远程 / 外部 IO,传输方式可注入
 组件      src/components/     视图组件
-Worker    src/workers/        Web Worker 入口(`*.worker.ts`),仅依赖 `src/utils/` 中的纯模块
-配置/类型 src/config/, src/types/
+Worker    src/workers/        Web Worker 入口(`*.worker.ts`),仅依赖 core
+配置/类型 src/config/         运行时可替换的配置取用口
 样式      src/styles/         全局样式
-PWA       public/sw.js, public/manifest.webmanifest
+共享      shared/             前后端共用(配置类型、schema、常量)
 脚本      scripts/            构建期 node 脚本
 ```
 
-依赖方向:`views / components → composables → services / stores → utils / types`;Worker 入口仅允许 `import` `src/utils/` 中标记为 DOM-free 的纯模块。
+依赖方向(**禁止**任何反向依赖):
 
-- `utils` **不得** import composables / services / stores / components。
-- `services` **不得** import composables / components。
+```
+components / views → composables → services / stores → platform → core
+                                                                   ↑
+                                                    shared/ 只被 core 之外的层与后端引用
+```
+
+- `core` **不得** import 任何其它层,也不得使用浏览器全局。它是唯一可以原样搬到桌面端的目录。
+- `platform` 只被 composables / services / stores 使用,**不得**被 core 引用。
+- `stores` 只描述真状态,**不得** import services;需要服务能力时暴露注册钩子,由 `src/app/` 装上。
+- `services` **不得** import composables / components;对外请求一律走可注入的传输口
+  (`services/http.ts`、`services/lyrics.ts` 的 `setLyricsTextFetcher`),不得直接调全局 `fetch`。
 - `composables` 之间可互相组合,但避免循环依赖。
-- `stores` 只描述真状态,**不**承担业务流程编排。
-- `workers` 中的代码运行在 Worker 上下文,**不得** import 任何 DOM/BOM API、Vue 模块、composable、store、service;只能 import `src/utils/` 中的 DOM-free 纯模块。
+- 只在浏览器成立的 hook(Web Audio、Document PiP、全屏、震动、PWA 安装)放 `platform/web/`,
+  **不要**放 `composables/` —— 目录本身要能说明"桌面端得重写这一块"。
+- `workers` 中的代码运行在 Worker 上下文,只能 import `core/` 中的纯模块。
+
+### 2.1 core 的硬约束(有工具强制,不是自觉)
+
+`src/core/**` 同时受两道检查约束,提交前必过:
+
+- **ESLint**:禁止 import `vue` / `pinia` / `platform` / `composables` / `services` / `stores` / `views` /
+  `admin` / `generated`;禁止使用 `window`、`document`、`navigator`、`localStorage`、`fetch`、
+  `matchMedia`、`requestAnimationFrame`、`performance`、`AudioContext`、`Image` 等浏览器全局。
+- **`tsconfig.core.json`**:单独编译 `src/core/**` 且**不加载 DOM 类型库**,
+  所以连 `HTMLElement`、`MediaQueryList`、`BiquadFilterType` 这类**类型**都用不了。
+  由 `pnpm type-check` 一并执行。
+
+需要平台能力时的正确做法,按优先级:
+
+1. **做成参数**:把时间戳、尺寸、随机数当入参传进来(如 `createLyricClock` 收 `performance.now()` 的读数)。
+2. **做成接口**:在 core 里定义契约,由 platform 实现(如 `core/platform/storage.ts` 的 `KeyValueStore`、
+   `core/audio/backend.ts` 的 `AudioBackend`)。
+3. **做成注入口**:模块级 `setXxx()` 替换实现,默认值是 Web 那一份
+   (如 `setLyricsTextFetcher`、`setHttpFetcher`、`setSettingsStore`、`setMusicConfig`、`setCoverDecoder`)。
+
+**绝不允许**在 core 里写 `typeof window !== 'undefined'` 这类嗅探来绕过检查。
+
+### 2.2 新增音乐源
+
+音源是**注册**出来的,不是写死的。加一种音源只改两处声明,装配逻辑、后台界面、
+配置校验都会自动跟上:
+
+1. 在 `shared/music-sources.ts` 的 `MUSIC_SOURCE_KINDS` 里补一项:`id`、显示名、说明、
+   条目在配置里的字段名、量词。
+2. 在 `shared/music-config.ts` 的 `PublicMusicConfig` 里补上那个字段的类型,
+   并在 `shared/config-schema.ts` 补它的校验。
+3. 写一个实现 `MusicProviderAdapter` 的适配器,注册进 `services/music.ts` 的 `DEFAULT_ADAPTERS`。
+
+由此自动获得:后台「音乐源」页多出一行开关(`MusicSourceToggles.vue` 遍历注册表渲染)、
+运行时按 `config.sources[id].enabled` 决定加不加载、以及校验会拒绝未注册的音源开关。
+
+**不要**在 `services/music.ts` 里硬编码某个音源的字段名,也**不要**在后台界面里手写音源列表。
+
+歌词来源不走这套:适配器在映射曲目时用 `registerTrackLyrics(track, provider)` 给曲目挂上
+自己的歌词来源(带 `priority` 做优先级合并),新音源不需要改歌词服务。
+
+### 2.3 新增能力时的归位判断
+
+| 这段代码……                              | 放哪                       |
+| --------------------------------------- | -------------------------- |
+| 只吃数据吐数据,换平台照样成立           | `core/`                    |
+| 调了浏览器 API,换平台要重写             | `platform/web/`            |
+| 定义"要什么能力",不关心谁实现           | `core/` 里的 interface     |
+| 把 core 和 platform 接到 Vue 的响应式上 | `composables/`             |
+| 发请求、读远端                          | `services/`,传输走可注入口 |
+| 前后端都要用的配置形状                  | `shared/`                  |
+
+歌词是现成的范例:解析 / 时间轴 / 场景 / 排版在 `core/lyrics/`(统一入口 `core/lyrics/index.ts`),
+DOM 写入在 `composables/useLyricsEngine.ts`,取文本在 `services/lyrics.ts`,
+Document PiP 小窗在 `platform/web/useLyricsWindow.ts`。
 
 ---
 
@@ -216,18 +284,28 @@ PWA       public/sw.js, public/manifest.webmanifest
   - 自带超时(**远程 IO 默认 8s**),内部用 `AbortController` 实现,`finally` 清理 timer;
   - 用 `try/catch` 包裹,失败时返回结构化结果或抛出可识别错误,**绝不**让未处理的 reject 冒泡。
 - 并行请求统一用 `Promise.allSettled`,单源失败不影响其他源。
-- 远程返回的数据先经过 `utils/` 中的 adapter(`mapXxx`)归一化,再进入 store。
+- 远程返回的数据先经过 `services/music-adapters/` 中的 adapter(`mapXxx`)归一化,再进入 store。
+  外部服务的 DTO 类型(如 `MetingTrack`)属于适配器层,**不要**放进 `core/`。
 - 可缓存的远程结果走 LRU(参考 `services/lyrics.ts`),失败时主动 `delete` 防止毒化缓存。
 
-### 3.7 Utils
+### 3.7 Core(`src/core/`)
 
-- 必须是**纯函数**或纯数据结构,无副作用,无 IO,无 DOM 依赖(除非工具本身就是 DOM 工具,如 `utils/dom.ts`)。
-- 覆盖到的算法/解析逻辑需补 vitest 单测。
-- **DOM-free 共享纯模块**:任何会被 `src/workers/` 中 Worker 入口 import 的纯模块(例如 `utils/theme-core.ts`)**必须**保持完全 DOM-free——
-  - 不得使用 `document` / `window` / `Image` / `HTMLCanvasElement` / `OffscreenCanvas` 等 DOM/BOM API;
-  - 也不得 import `utils/dom.ts` 等含 DOM 引用的模块;
-  - 输入参数应使用平台中立的数据形态(`Uint8ClampedArray`、`Uint8Array`、纯对象等),由调用方在主线程或 Worker 中分别完成像素采样/解码后再传入。
-  - 形如"主线程版"包装文件(`utils/theme.ts`)负责接住 DOM 输入并选择 Worker 路径或主线程兜底,纯算法仅放在 `*-core.ts` 中。
+- 必须是**纯函数**或纯数据结构:无副作用、无 IO、无 DOM、无 Vue。约束见 §2.1,有工具强制。
+- 输入参数用平台中立的数据形态(`Uint8ClampedArray`、`Uint8Array`、纯对象、数字时间戳),
+  不要收 `HTMLElement`、`MediaQueryList` 这类平台对象。
+- 算法与解析逻辑必须补 vitest 单测 —— 这层没有 DOM 依赖,单测成本最低,没有理由不写。
+- 领域类型放 `core/types.ts`;**配置类型放 `shared/music-config.ts`**,后端与构建脚本也要用,
+  不得让 `shared/` 或 `server/` 反过来 import `src/`。
+- 子目录按能力划分,不按技术划分:`lyrics/`、`audio/`、`analysis/`、`theme/`、`motion/`、`library/`、`util/`。
+  对外能力较多的目录提供 `index.ts` 统一入口(如 `core/lyrics/index.ts`),外部不要深入具体文件。
+
+### 3.8 Platform(`src/platform/`)
+
+- 存放**只在某个平台成立**的实现:`platform/web/` 是浏览器那一份。
+- 一个平台模块要么实现 core 定义的接口,要么是给 composable 用的浏览器 hook。
+- 外部感知不到它是哪个平台:能替换的东西都通过注入口暴露,默认值指向 Web 实现。
+- 主线程与 Worker 的分工沿用旧规则:纯算法留在 `core/`(如 `core/theme/palette.ts`),
+  接住 DOM 输入、选择 Worker 或主线程兜底的包装放 `platform/web/theme.ts`。
 
 ---
 
@@ -291,12 +369,13 @@ PWA       public/sw.js, public/manifest.webmanifest
 
 - **fetch**:统一带超时(**远程 IO 8s 默认**)、AbortController、try/catch;允许时走 `Promise.allSettled` 并行。
 - **预加载超时**:相邻曲目预加载等本地 / 媒体资源预热超时单独管理(当前 `usePreloadPool` 使用 `PRELOAD_READY_TIMEOUT = 9000`),与 §3.6 的远程 IO 超时区分;新增预加载场景须显式声明并 ≥6s 防止挂死。
-- **缓存**:重复读取的远程资源使用 `utils/lru-cache.ts`,各使用方按域独立持有 LRU 实例(当前主题色、歌词、标题各持有一份,容量按域自定,默认 64);命中标志需区分"in-flight Promise"与"已完成结果"。
+- **缓存**:重复读取的远程资源使用 `core/util/lru-cache.ts`,各使用方按域独立持有 LRU 实例(当前主题色、歌词、标题各持有一份,容量按域自定,默认 64);命中标志需区分"in-flight Promise"与"已完成结果"。
 - **图片**:大图加载前优先 `Image.decode()`,失败再 fallback。
 - **长列表**:超过 ~80 条时使用虚拟列表(参考 `TrackList.vue`),`ITEM_HEIGHT` + `BUFFER_COUNT`。
 - **共享状态**:跨组件的轻量缓存优先用**模块级 `shallowRef`** 形成单例(参考 `useCoverCache`),避免每个组件重新订阅。
   - **二态语义**:同一 composable 中需要"曲库级持久缓存"与"切歌即重置"两类状态时,**必须分别建模**——前者用模块级 `shallowRef<Set<string>>`(如 `loadedCovers`),后者用模块级 `ref<string | null>`(如 `mainCoverReadyTrackId`),并提供独立的 `markXxx` / `resetXxx` 方法,严禁混用同一变量。
-- **存储**:**禁止**直接调用 `localStorage`,必须经过 `utils/storage.ts` 的 `safeStorage`。
+- **存储**:**禁止**直接调用 `localStorage`。状态层走 `platform/settings-store.ts` 的 `settingsStore()`
+  (桌面端可用 `setSettingsStore()` 整体替换),浏览器专用场景才直接用 `platform/web/storage.ts` 的 `safeStorage`。
 - **音视频**:涉及 `<audio>`/`<video>` 时,优先复用元素而非销毁重建;若挂接 WebAudio,务必记录"`createMediaElementSource` 只能 attach 一次"的约束。
 - **预加载**:可预测的下一步资源应提前并行预热(音频 / 封面 / 文本),并设置 race timeout(≥6s)防止挂死。预加载封面等占用图像内存的资源时,只对**主预测方向**(下一首)预热,不要对方向 / 反向同时预热。
 - **GPU 合成层**:`will-change` **不得**常驻挂在静态规则上,应通过条件 class(如 `.beat-active`)只在动画期间启用;暂停 / 空闲时让浏览器回收合成层。

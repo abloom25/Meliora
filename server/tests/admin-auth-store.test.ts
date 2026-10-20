@@ -128,6 +128,18 @@ describe('admin-auth-store', () => {
     expect(githubMocks.writeFile).not.toHaveBeenCalled()
   })
 
+  it('allows only one concurrent password change based on the same snapshot', async () => {
+    const { setupPassword, changePassword, getTokenVersion } =
+      await import('../core/admin-auth-store')
+    await setupPassword('initial-password', DEV_ENV)
+    const results = await Promise.all([
+      changePassword('initial-password', 'next-password-one', DEV_ENV),
+      changePassword('initial-password', 'next-password-two', DEV_ENV),
+    ])
+    expect(results.filter((result) => result.ok)).toHaveLength(1)
+    expect(await getTokenVersion(DEV_ENV)).toBe(1)
+  })
+
   it('rejects stored hashes with absurd PBKDF2 iteration counts (CPU DoS guard)', async () => {
     const { verifyPassword } = await import('../core/admin-auth-store')
 

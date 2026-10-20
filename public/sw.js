@@ -5,6 +5,15 @@ const CACHE_PREFIX = 'meliora-shell-'
 const APP_SHELL = ['./', './manifest.webmanifest', './favicon.svg', './pwa-icon.svg']
 const MUTABLE_ASSET_PATTERN = /^\/(?:music\/|icon\.(?:png|jpe?g|webp|ico)$)/i
 
+function updateCache(event, key, response) {
+  event.waitUntil(
+    caches
+      .open(CACHE_NAME)
+      .then((cache) => cache.put(key, response))
+      .catch(() => {}),
+  )
+}
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
@@ -36,6 +45,9 @@ self.addEventListener('fetch', (event) => {
   if (rangeHeader && rangeHeader.trim().length > 0) return
   // 对音频与视频资源直接放行，交由浏览器默认处理，确保流式与 seek 行为正常
   if (event.request.destination === 'audio' || event.request.destination === 'video') return
+  // 整曲预分析通过 fetch 读取音频，destination 为空。保留浏览器 HTTP 缓存，
+  // 但不要把这些大文件重复写入应用外壳缓存。
+  if (/(?:^|,)\s*audio\//i.test(event.request.headers.get('accept') || '')) return
 
   if (event.request.method !== 'GET') return
   const requestUrl = new URL(event.request.url)
@@ -44,6 +56,9 @@ self.addEventListener('fetch', (event) => {
   // 缓存优先策略会让退出登录后的 /api/auth 仍返回旧的 { authenticated: true },
   // 刷新页面后重新进入已登录态,导致退出登录在生产环境失效。
   if (requestUrl.pathname.startsWith('/api/')) return
+  // Optional model assets have an explicit download/delete lifecycle in their own cache.
+  // Never duplicate them in the app shell or silently redownload after the user clears them.
+  if (requestUrl.pathname.startsWith('/models/')) return
   // 后台上传的图标、封面和本地音乐使用稳定 URL。它们不是 Vite hash 资源,
   // 缓存优先会让用户替换文件后仍看到旧内容,所以直接交给网络和浏览器缓存策略。
   if (MUTABLE_ASSET_PATTERN.test(requestUrl.pathname)) return
@@ -58,11 +73,13 @@ self.addEventListener('fetch', (event) => {
           // 只缓存成功响应,避免部署窗口期的 5xx 错误页污染离线兜底外壳
           if (response.ok) {
             const copy = response.clone()
-            void caches.open(CACHE_NAME).then((cache) => cache.put('./', copy))
+            updateCache(event, './', copy)
           }
           return response
         })
-        .catch(() => caches.match('./')),
+        .catch(() =>
+          caches.match('./').then((cached) => cached || new Response('', { status: 504 })),
+        ),
     )
     return
   }
@@ -72,13 +89,13 @@ self.addEventListener('fetch', (event) => {
       const network = fetch(event.request).then((response) => {
         if (response.ok) {
           const copy = response.clone()
-          void caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy))
+          updateCache(event, event.request, copy)
         }
         return response
       })
       // 缓存命中时仅做后台更新;吞掉网络失败,避免离线时 unhandled rejection
       if (cached) {
-        void network.catch(() => {})
+        event.waitUntil(network.catch(() => {}))
         return cached
       }
       return network.catch(() =>

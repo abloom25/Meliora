@@ -30,6 +30,8 @@ const urlValidationBuildPath = join(
   'url-validation.mjs',
 )
 const constantsBuildPath = join(process.cwd(), 'node_modules/.tmp', 'constants.mjs')
+const musicSourcesSourcePath = join(process.cwd(), 'shared/music-sources.ts')
+const musicSourcesBuildPath = join(process.cwd(), 'node_modules/.tmp', 'music-sources.mjs')
 const envSchemaBuildPath = join(
   process.cwd(),
   'node_modules/.tmp',
@@ -156,6 +158,7 @@ async function loadValidateMusicConfig() {
       const ts = await import('typescript')
       await transpileSharedModule(urlValidationSourcePath, urlValidationBuildPath)
       await transpileSharedModule(constantsSourcePath, constantsBuildPath)
+      await transpileSharedModule(musicSourcesSourcePath, musicSourcesBuildPath)
       const source = await readFile(schemaSourcePath, 'utf8')
       const transpiled = ts
         .transpileModule(source, {
@@ -172,6 +175,8 @@ async function loadValidateMusicConfig() {
         .replace('from "./utils/url-validation"', 'from "./shared/utils/url-validation.mjs"')
         .replace("from './constants'", "from './constants.mjs'")
         .replace('from "./constants"', 'from "./constants.mjs"')
+        .replace("from './music-sources'", "from './music-sources.mjs'")
+        .replace('from "./music-sources"', 'from "./music-sources.mjs"')
       await mkdir(dirname(schemaBuildPath), { recursive: true })
       await writeFile(schemaBuildPath, transpiled)
       const moduleUrl = `${pathToFileURL(schemaBuildPath).href}?t=${Date.now()}`
@@ -322,7 +327,7 @@ async function loadStoredConfig(configPath, encryptionKey) {
 
 async function renderPublicConfigModule(publicConfig) {
   const json = JSON.stringify(publicConfig, null, 2)
-  const source = `import type { PublicMusicConfig } from '../types/music'\n\nexport const publicMusicConfig = ${json} satisfies PublicMusicConfig\n`
+  const source = `import type { PublicMusicConfig } from '../../shared/music-config'\n\nexport const publicMusicConfig = ${json} satisfies PublicMusicConfig\n`
   const prettier = await import('prettier')
   const prettierOptions = (await prettier.resolveConfig(process.cwd())) ?? {}
   return prettier.format(source, {

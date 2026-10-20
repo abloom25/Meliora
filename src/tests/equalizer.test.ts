@@ -15,7 +15,7 @@ import {
   isValidPreset,
   normalizeBands,
   sanitizeEqualizer,
-} from '../utils/equalizer'
+} from '../core/audio/equalizer'
 
 describe('equalizer constants', () => {
   it('exposes five bands matching the frequency list', () => {

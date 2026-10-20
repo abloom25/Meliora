@@ -1,5 +1,8 @@
 <script setup lang="ts">
-  defineProps<{
+  import { ref, toRef, useId } from 'vue'
+  import { useFocusTrap } from '../../composables/useFocusTrap'
+
+  const props = defineProps<{
     visible: boolean
     title?: string
     cancelText?: string
@@ -10,20 +13,33 @@
   }>()
 
   const emit = defineEmits<{ cancel: []; confirm: [] }>()
+  const cardRef = ref<HTMLElement | null>(null)
+  const titleId = useId()
+  const bodyId = useId()
+  function cancel() {
+    if (!props.loading) emit('cancel')
+  }
+  useFocusTrap(cardRef, toRef(props, 'visible'), cancel)
 </script>
 
 <template>
   <Teleport to="body">
     <Transition name="confirm-modal">
-      <div v-if="visible" class="confirm-modal-backdrop" @click.self="emit('cancel')">
+      <div v-if="visible" class="confirm-modal-backdrop" @click.self="cancel">
         <div
+          ref="cardRef"
           class="confirm-modal-card"
+          role="dialog"
+          aria-modal="true"
+          :aria-labelledby="title ? titleId : undefined"
+          :aria-describedby="bodyId"
+          tabindex="-1"
           :style="width ? { '--confirm-modal-width': width } : undefined"
         >
           <slot name="header">
-            <h3 v-if="title">{{ title }}</h3>
+            <h3 v-if="title" :id="titleId">{{ title }}</h3>
           </slot>
-          <div class="confirm-modal-body">
+          <div :id="bodyId" class="confirm-modal-body">
             <slot />
           </div>
           <div class="confirm-modal-actions">
@@ -31,7 +47,7 @@
               type="button"
               class="confirm-modal-btn cancel"
               :disabled="loading"
-              @click="emit('cancel')"
+              @click="cancel"
             >
               {{ cancelText ?? '取消' }}
             </button>

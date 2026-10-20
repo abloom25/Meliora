@@ -1,7 +1,7 @@
 import type { Ref } from 'vue'
-import type { Track } from '../types/music'
-import { createTrackShareId, formatTrackDisplayTitle } from '../utils/tracks'
-import type { HapticStyle } from './useHaptic'
+import type { Track } from '../core/types'
+import { createTrackShareId, formatTrackDisplayTitle } from '../core/library/tracks'
+import type { HapticStyle } from '../platform/web/useHaptic'
 
 export interface UseTrackShareOptions {
   currentTrack: Ref<Track | null>
@@ -9,7 +9,7 @@ export interface UseTrackShareOptions {
   onShowNotice: (msg: string) => void
 }
 
-function copyText(value: string) {
+async function copyText(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(value)
   const textarea = document.createElement('textarea')
   textarea.value = value
@@ -17,9 +17,11 @@ function copyText(value: string) {
   textarea.style.opacity = '0'
   document.body.append(textarea)
   textarea.select()
-  document.execCommand('copy')
-  textarea.remove()
-  return Promise.resolve()
+  try {
+    if (!document.execCommand('copy')) throw new Error('Clipboard copy failed')
+  } finally {
+    textarea.remove()
+  }
 }
 
 export function useTrackShare(options: UseTrackShareOptions) {

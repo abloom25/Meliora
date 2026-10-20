@@ -2,13 +2,15 @@ import { reactive } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   LYRICS_TIMEOUT_ERROR_NAME,
+  getLyricsSource,
+  hasCachedTrackLyrics,
   hasTrackLyricsSource,
   loadLyricsText,
   loadTrackLyrics,
   mergeTrackLyricsProvider,
   registerTrackLyrics,
 } from '../services/lyrics'
-import type { LyricLine, Track } from '../types/music'
+import type { LyricLine, Track } from '../core/types'
 
 describe('lyrics text cache timeout', () => {
   afterEach(() => {
@@ -96,6 +98,35 @@ describe('track lyrics service', () => {
 
     await expect(loadTrackLyrics(track)).resolves.toEqual(lyrics)
     expect(hasTrackLyricsSource(track)).toBe(true)
+    expect(getLyricsSource(lyrics)).toBeNull()
+  })
+
+  it('keeps declared provenance on published arrays and their Vue proxies without copying', async () => {
+    const lines: LyricLine[] = [{ time: 1, text: 'Uploaded line', wordSource: 'native' }]
+    const track: Track = {
+      id: 'declared-source',
+      title: 'Uploaded',
+      artist: 'Artist',
+      audioUrl: '/uploaded.mp3',
+      kind: 'local',
+    }
+    registerTrackLyrics(track, {
+      cacheKey: 'declared-provenance',
+      source: 'local',
+      load: async (_signal, onProgress) => {
+        await Promise.resolve()
+        onProgress?.(lines)
+        return lines
+      },
+    })
+    const sources: Array<string | null> = []
+    const result = await loadTrackLyrics(track, undefined, (current) =>
+      sources.push(getLyricsSource(current)),
+    )
+    expect(result).toBe(lines)
+    expect(sources).toEqual(['local'])
+    expect(getLyricsSource(reactive(lines))).toBe('local')
+    expect(getLyricsSource([{ time: 1, text: 'Unknown', wordSource: 'native' }])).toBeNull()
   })
 
   it('delegates lyrics loading to the adapter-provided lyrics loader', async () => {
@@ -127,7 +158,7 @@ describe('track lyrics service', () => {
         translation: 'Adapter translation',
       },
     ])
-    expect(load).toHaveBeenCalledWith(expect.any(AbortSignal))
+    expect(load).toHaveBeenCalledWith(expect.any(AbortSignal), expect.any(Function))
   })
 
   it('caches provider lyrics by cacheKey and deduplicates in-flight loads', async () => {
@@ -151,6 +182,108 @@ describe('track lyrics service', () => {
     ])
     await expect(loadTrackLyrics(track)).resolves.toEqual(lyrics)
     expect(load).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes expired source results without letting a cached plain source mask expiry', async () => {
+    let fresh = true
+    let finishRefresh!: (lines: LyricLine[]) => void
+    const firstLines: LyricLine[] = [{ time: 1, text: 'Previously cached' }]
+    const refreshedLines: LyricLine[] = [{ time: 1, text: 'Updated lyrics' }]
+    const load = vi
+      .fn<() => Promise<LyricLine[]>>()
+      .mockResolvedValueOnce(firstLines)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishRefresh = resolve
+          }),
+      )
+    const track: Track = {
+      id: 'custom:provider-expiry',
+      title: 'Expiring Lyrics',
+      artist: 'Artist',
+      audioUrl: '/provider-expiry.mp3',
+      kind: 'remote',
+    }
+    registerTrackLyrics(track, {
+      cacheKey: 'custom:lyrics:provider-expiry',
+      cacheable: () => fresh,
+      isCached: () => true,
+      load,
+    })
+    await expect(loadTrackLyrics(track)).resolves.toBe(firstLines)
+    expect(hasCachedTrackLyrics(track)).toBe(true)
+
+    fresh = false
+    expect(hasCachedTrackLyrics(track)).toBe(false)
+    const first = loadTrackLyrics(track)
+    const second = loadTrackLyrics(track)
+    expect(load).toHaveBeenCalledTimes(2)
+    fresh = true
+    finishRefresh(refreshedLines)
+    expect(await first).toBe(refreshedLines)
+    expect(await second).toBe(refreshedLines)
+    expect(hasCachedTrackLyrics(track)).toBe(true)
+  })
+
+  it('publishes the same progressive result only once when the provider finishes', async () => {
+    const lines: LyricLine[] = [{ time: 1, text: 'Final progressive lyrics' }]
+    const track: Track = {
+      id: 'custom:provider-progress-identity',
+      title: 'Progressive Lyrics',
+      artist: 'Artist',
+      audioUrl: '/progress-identity.mp3',
+      kind: 'remote',
+    }
+    registerTrackLyrics(track, {
+      cacheKey: 'custom:lyrics:provider-progress-identity',
+      load: async (_signal, onProgress) => {
+        await Promise.resolve()
+        onProgress?.(lines)
+        return lines
+      },
+    })
+    const progress = vi.fn()
+    await expect(loadTrackLyrics(track, undefined, progress)).resolves.toBe(lines)
+    expect(progress).toHaveBeenCalledExactlyOnceWith(lines)
+  })
+
+  it('rebuilds a merged cache when another provider refreshes its shared source', async () => {
+    let sourceToken: object | null = {}
+    const firstLines: LyricLine[] = [{ time: 1, text: 'Old word source' }]
+    const updatedLines: LyricLine[] = [{ time: 1, text: 'Refreshed word source' }]
+    const load = vi.fn().mockResolvedValueOnce(firstLines).mockResolvedValue(updatedLines)
+    const track: Track = {
+      id: 'custom:source-token',
+      title: 'Shared Source',
+      artist: 'Artist',
+      audioUrl: '/source-token.mp3',
+      kind: 'remote',
+    }
+    registerTrackLyrics(track, {
+      cacheKey: 'custom:lyrics:source-token',
+      cacheable: () => true,
+      isCached: () => true,
+      cacheToken: () => sourceToken,
+      load,
+    })
+    await expect(loadTrackLyrics(track)).resolves.toBe(firstLines)
+    expect(hasCachedTrackLyrics(track)).toBe(true)
+    await loadTrackLyrics(track)
+    expect(load).toHaveBeenCalledTimes(1)
+
+    // 共享词库已被另一条目刷新,因此仍然「新鲜」,但旧合并结果不能继续使用。
+    sourceToken = {}
+    expect(hasCachedTrackLyrics(track)).toBe(false)
+    await expect(loadTrackLyrics(track)).resolves.toBe(updatedLines)
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(hasCachedTrackLyrics(track)).toBe(true)
+
+    sourceToken = null
+    expect(hasCachedTrackLyrics(track)).toBe(false)
+    await loadTrackLyrics(track)
+    await loadTrackLyrics(track)
+    expect(load).toHaveBeenCalledTimes(4)
   })
 
   it('lets one aborted provider-cache caller reject without cancelling the shared load', async () => {
@@ -292,5 +425,42 @@ describe('track lyrics service', () => {
     mergeTrackLyricsProvider(duplicate, kept)
 
     await expect(loadTrackLyrics(kept)).resolves.toEqual([{ time: 1, text: 'Local lyric' }])
+  })
+
+  it('replays interim lyrics to new subscribers and detaches cancelled listeners', async () => {
+    let publish!: (lines: LyricLine[]) => void
+    let finish!: (lines: LyricLine[]) => void
+    const track: Track = {
+      id: 'progressive',
+      title: 'Song',
+      artist: 'Artist',
+      audioUrl: '/song.mp3',
+      kind: 'remote',
+    }
+    registerTrackLyrics(track, {
+      cacheKey: 'provider:progressive-listeners',
+      load: (_signal, onProgress) => {
+        publish = onProgress!
+        return new Promise((resolve) => {
+          finish = resolve
+        })
+      },
+    })
+    const firstProgress = vi.fn()
+    const secondProgress = vi.fn()
+    const controller = new AbortController()
+    const first = loadTrackLyrics(track, controller.signal, firstProgress)
+    const firstRejected = expect(first).rejects.toMatchObject({ name: 'AbortError' })
+    const interim = [{ time: 1, text: 'Interim' }]
+    publish(interim)
+    const second = loadTrackLyrics(track, undefined, secondProgress)
+    expect(secondProgress).toHaveBeenCalledWith(interim)
+    controller.abort()
+    await firstRejected
+    const final = [{ time: 1, text: 'Final' }]
+    finish(final)
+    await expect(second).resolves.toEqual(final)
+    expect(firstProgress).toHaveBeenCalledTimes(1)
+    expect(secondProgress).toHaveBeenLastCalledWith(final)
   })
 })

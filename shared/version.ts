@@ -40,10 +40,13 @@ function comparePrereleaseIdentifier(left: string, right: string): number {
   const leftNumeric = /^\d+$/.test(left)
   const rightNumeric = /^\d+$/.test(right)
 
-  if (leftNumeric && rightNumeric) return Number(left) - Number(right)
+  if (leftNumeric && rightNumeric) {
+    if (left.length !== right.length) return left.length - right.length
+    return left === right ? 0 : left < right ? -1 : 1
+  }
   if (leftNumeric) return -1
   if (rightNumeric) return 1
-  return left.localeCompare(right)
+  return left === right ? 0 : left < right ? -1 : 1
 }
 
 export function compareSemver(leftVersion: string, rightVersion: string): number {
@@ -51,9 +54,12 @@ export function compareSemver(leftVersion: string, rightVersion: string): number
   const right = parseSemver(rightVersion)
   if (!left || !right) return 0
 
-  const stableDiff =
-    left.major - right.major || left.minor - right.minor || left.patch - right.patch
-  if (stableDiff !== 0) return stableDiff
+  const leftCore = normalizeVersionTag(leftVersion).match(SEMVER_PATTERN)!
+  const rightCore = normalizeVersionTag(rightVersion).match(SEMVER_PATTERN)!
+  for (let index = 1; index <= 3; index += 1) {
+    const partDiff = comparePrereleaseIdentifier(leftCore[index], rightCore[index])
+    if (partDiff !== 0) return partDiff
+  }
 
   if (!left.prerelease.length && !right.prerelease.length) return 0
   if (!left.prerelease.length) return 1

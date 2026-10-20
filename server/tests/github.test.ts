@@ -54,6 +54,52 @@ describe('writeFile content encoding contract', () => {
 })
 
 describe('Git Data atomic commit helpers', () => {
+  it('does not treat malformed successful file responses as missing files', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ sha: 'exists' })))
+    await expect(readFile('public/config.json', ENV)).rejects.toThrow('invalid file object')
+  })
+
+  it('rejects successful file metadata with a non-string SHA', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ sha: 123, content: '', encoding: 'none' })),
+    )
+    await expect(readFile('public/config.json', ENV)).rejects.toThrow('invalid file object')
+  })
+
+  it('reads large Contents files using raw media while retaining their revision', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ sha: 'large-sha', content: '', encoding: 'none' })),
+      )
+      .mockResolvedValueOnce(new Response('配置内容'))
+    await expect(readFile('public/config.json', ENV)).resolves.toEqual({
+      content: '配置内容',
+      sha: 'large-sha',
+    })
+    expect(fetchMock.mock.calls[1]?.[1]?.headers).toMatchObject({
+      Accept: 'application/vnd.github.raw+json',
+    })
+  })
+
+  it('keeps raw content and revision consistent when the branch advances after metadata is read', async () => {
+    let branchAdvanced = false
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (!branchAdvanced) {
+        branchAdvanced = true
+        return new Response(JSON.stringify({ sha: 'old-blob', content: '', encoding: 'none' }))
+      }
+      if (String(url) === 'https://api.github.com/repos/owner/repo/git/blobs/old-blob') {
+        return new Response('old content')
+      }
+      return new Response('new branch content')
+    })
+    await expect(readFile('public/config.json', ENV)).resolves.toEqual({
+      content: 'old content',
+      sha: 'old-blob',
+    })
+  })
+
   it('pins the branch head and base tree before an atomic save', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')

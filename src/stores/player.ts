@@ -1,15 +1,20 @@
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
-import type { PlayMode, PlayerSettings, Track } from '../types/music'
-import { transferTrackLyricsProvider } from '../services/lyrics'
-import { safeStorage } from '../utils/storage'
-import { createDefaultEqualizer, sanitizeEqualizer } from '../utils/equalizer'
-import { sanitizeBeatFlashRate } from '../utils/beat-envelope'
+import type { BeatAnalysisMode, PlayMode, PlayerSettings, Track } from '../core/types'
+import { settingsStore } from '../platform/settings-store'
+import { createDefaultEqualizer, sanitizeEqualizer } from '../core/audio/equalizer'
+import {
+  nextPlayMode,
+  selectNextTrack,
+  selectPreviousTrack,
+  type QueueState,
+} from '../core/audio/queue'
+import { sanitizeBeatFlashRate } from '../core/analysis/beat-envelope'
 
 const SETTINGS_KEY = 'meliora:settings'
 const LAST_TRACK_KEY = 'meliora:last-track'
 
-const CURRENT_SETTINGS_VERSION = 1
+const CURRENT_SETTINGS_VERSION = 2
 
 const defaultSettings: PlayerSettings = {
   volume: 0.72,
@@ -18,18 +23,20 @@ const defaultSettings: PlayerSettings = {
   preloadNextTrack: true,
   dynamicBackground: true,
   beatFlash: true,
+  beatAnalysisMode: 'basic',
   backgroundBlur: 90,
   backgroundSaturation: 1.15,
   beatBrightness: 0.28,
   beatFlashRate: 1,
   beatVisualDelay: 0,
-  lyricFontSize: 20,
+  lyricScale: 1,
   lyricAnimation: true,
   lyricSpring: 1,
   lyricTranslation: true,
   progressLyricPreview: false,
   skipOnError: true,
   autoHideChrome: true,
+  debugPanelEnabled: false,
   equalizer: createDefaultEqualizer(),
   settingsVersion: CURRENT_SETTINGS_VERSION,
 }
@@ -37,7 +44,9 @@ const defaultSettings: PlayerSettings = {
 /** 可被「恢复默认」重置的设置项。settingsVersion 是迁移用的内部字段,不参与重置 */
 export type ResettableSettingKey = Exclude<keyof PlayerSettings, 'settingsVersion'>
 
-export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings {
+type SavedPlayerSettings = Partial<PlayerSettings> & { lyricFontSize?: unknown }
+
+export function migrateSettings(saved: SavedPlayerSettings): PlayerSettings {
   const input = saved && typeof saved === 'object' ? saved : {}
   return {
     volume: sanitizeNumber(input.volume, defaultSettings.volume, 0, 1),
@@ -46,6 +55,7 @@ export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings 
     preloadNextTrack: sanitizeBoolean(input.preloadNextTrack, defaultSettings.preloadNextTrack),
     dynamicBackground: sanitizeBoolean(input.dynamicBackground, defaultSettings.dynamicBackground),
     beatFlash: sanitizeBoolean(input.beatFlash, defaultSettings.beatFlash),
+    beatAnalysisMode: sanitizeBeatAnalysisMode(input.beatAnalysisMode),
     backgroundBlur: sanitizeNumber(input.backgroundBlur, defaultSettings.backgroundBlur, 45, 130),
     backgroundSaturation: sanitizeNumber(
       input.backgroundSaturation,
@@ -61,7 +71,7 @@ export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings 
       -100,
       300,
     ),
-    lyricFontSize: sanitizeNumber(input.lyricFontSize, defaultSettings.lyricFontSize, 15, 30),
+    lyricScale: migrateLyricScale(input),
     lyricAnimation: sanitizeBoolean(input.lyricAnimation, defaultSettings.lyricAnimation),
     lyricSpring: sanitizeNumber(input.lyricSpring, defaultSettings.lyricSpring, 0.5, 2),
     lyricTranslation: sanitizeBoolean(input.lyricTranslation, defaultSettings.lyricTranslation),
@@ -71,9 +81,26 @@ export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings 
     ),
     skipOnError: sanitizeBoolean(input.skipOnError, defaultSettings.skipOnError),
     autoHideChrome: sanitizeBoolean(input.autoHideChrome, defaultSettings.autoHideChrome),
+    debugPanelEnabled:
+      import.meta.env.DEV &&
+      sanitizeBoolean(input.debugPanelEnabled, defaultSettings.debugPanelEnabled),
     equalizer: sanitizeEqualizer(input.equalizer),
     settingsVersion: CURRENT_SETTINGS_VERSION,
   }
+}
+
+function migrateLyricScale(input: SavedPlayerSettings): number {
+  // 有新字段时以它为准，即使损坏也不恢复旧像素值，避免已调整的偏好倒退。
+  const hasScale = Object.prototype.hasOwnProperty.call(input, 'lyricScale')
+  const value = hasScale ? input.lyricScale : input.lyricFontSize
+  if (
+    (typeof value !== 'number' && typeof value !== 'string') ||
+    (typeof value === 'string' && !value.trim())
+  )
+    return defaultSettings.lyricScale
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return defaultSettings.lyricScale
+  return sanitizeNumber(hasScale ? numeric : numeric / 20, defaultSettings.lyricScale, 0.75, 1.5)
 }
 
 function sanitizeNumber(value: unknown, fallback: number, min: number, max: number): number {
@@ -92,9 +119,14 @@ function sanitizePlayMode(value: unknown): PlayMode {
   return modes.includes(value as PlayMode) ? (value as PlayMode) : defaultSettings.playMode
 }
 
+function sanitizeBeatAnalysisMode(value: unknown): BeatAnalysisMode {
+  if (value === 'beat-this-small' || value === 'beat-this-standard') return value
+  return 'basic'
+}
+
 function loadSettings(): PlayerSettings {
   try {
-    const saved = JSON.parse(safeStorage.getItem(SETTINGS_KEY) || '{}') as Partial<PlayerSettings>
+    const saved = JSON.parse(settingsStore().getItem(SETTINGS_KEY) || '{}') as SavedPlayerSettings
     return migrateSettings(saved)
   } catch {
     return { ...defaultSettings }
@@ -106,7 +138,7 @@ export const usePlayerStore = defineStore('player', () => {
   const queue = ref<Track[]>([])
   const queueVersion = ref(0)
   const currentTrackVersion = ref(0)
-  const currentTrackId = ref<string | null>(safeStorage.getItem(LAST_TRACK_KEY))
+  const currentTrackId = ref<string | null>(settingsStore().getItem(LAST_TRACK_KEY))
   const isPlaying = ref(false)
   const currentTime = ref(0)
   const duration = ref(0)
@@ -133,17 +165,27 @@ export const usePlayerStore = defineStore('player', () => {
     currentTrackVersion.value += 1
   }
 
-  function setTracks(nextTracks: Track[]) {
+  // 曲目对象被换新时,挂在旧对象上的东西(比如已解析的歌词来源)需要转移过去。
+  // 状态层不该知道"歌词是怎么取的",所以只留一个可注册的搬运钩子,由服务层在启动时装上
+  let carryTrackSideData: ((from: Track, to: Track) => void) | null = null
+
+  function onTrackReplaced(handler: ((from: Track, to: Track) => void) | null) {
+    carryTrackSideData = handler
+  }
+
+  function setTracks(nextTracks: Track[], options: { complete?: boolean } = {}) {
     const activeTrack = currentTrack.value ?? undefined
     const mergedTracks = activeTrack
       ? nextTracks.map((track) => {
           if (track.id !== activeTrack.id) return track
-          transferTrackLyricsProvider(track, activeTrack)
+          carryTrackSideData?.(track, activeTrack)
+          // 渐进加载会复用当前对象，先复制，避免删除可选字段时连来源一起删掉。
+          const nextMetadata = { ...track }
           delete activeTrack.titleVersions
           delete activeTrack.shareAliases
           delete activeTrack.album
           delete activeTrack.cover
-          Object.assign(activeTrack, track)
+          Object.assign(activeTrack, nextMetadata)
           bumpCurrentTrackVersion()
           return activeTrack
         })
@@ -163,7 +205,11 @@ export const usePlayerStore = defineStore('player', () => {
       queue.value = syncedQueue
       bumpQueueVersion()
     }
-    if (currentTrackId.value && !mergedTrackById.has(currentTrackId.value)) {
+    if (
+      options.complete !== false &&
+      currentTrackId.value &&
+      !mergedTrackById.has(currentTrackId.value)
+    ) {
       currentTrackId.value = null
     }
   }
@@ -181,30 +227,21 @@ export const usePlayerStore = defineStore('player', () => {
     errorMessage.value = ''
   }
 
+  // 选曲规则本身是纯的,放在 core/audio/queue;这里只负责把当前状态喂进去
+  function queueState(): QueueState {
+    return {
+      queue: queue.value,
+      currentIndex: currentIndex.value,
+      playMode: settings.value.playMode,
+    }
+  }
+
   function peekNext(manual = false): Track | null {
-    if (!queue.value.length) return null
-    if (settings.value.playMode === 'single' && !manual && currentTrack.value)
-      return currentTrack.value
-    if (settings.value.playMode === 'shuffle' && queue.value.length > 1) {
-      let nextIndex: number
-      do {
-        nextIndex = Math.floor(Math.random() * queue.value.length)
-      } while (nextIndex === currentIndex.value)
-      return queue.value[nextIndex] ?? null
-    }
-    const nextIndex = currentIndex.value + 1
-    if (nextIndex >= queue.value.length) {
-      if (settings.value.playMode === 'sequence') return null
-      return queue.value[0] ?? null
-    }
-    return queue.value[nextIndex] ?? null
+    return selectNextTrack(queueState(), { manual })
   }
 
   function peekPrevious(): Track | null {
-    if (!queue.value.length) return null
-    let previousIndex = currentIndex.value - 1
-    if (previousIndex < 0) previousIndex = queue.value.length - 1
-    return queue.value[previousIndex] ?? null
+    return selectPreviousTrack(queueState())
   }
 
   function nextTrack(manual = false, preferredTrackId?: string): Track | null {
@@ -238,14 +275,12 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function cyclePlayMode() {
-    const modes: PlayMode[] = ['sequence', 'loop', 'single', 'shuffle']
-    const index = modes.indexOf(settings.value.playMode)
-    settings.value.playMode = modes[(index + 1) % modes.length] ?? 'loop'
+    settings.value.playMode = nextPlayMode(settings.value.playMode)
   }
 
   let saveSettingsTimer = 0
   function persistSettings() {
-    safeStorage.setItem(SETTINGS_KEY, JSON.stringify(settings.value))
+    settingsStore().setItem(SETTINGS_KEY, JSON.stringify(settings.value))
   }
   // store 被 dispose(其 effect scope 销毁)时清理挂起的防抖定时器,
   // 并立即落盘尚未写入的设置,避免丢失最后一次修改。
@@ -265,8 +300,8 @@ export const usePlayerStore = defineStore('player', () => {
     { deep: true },
   )
   watch(currentTrackId, (value) => {
-    if (value) safeStorage.setItem(LAST_TRACK_KEY, value)
-    else safeStorage.removeItem(LAST_TRACK_KEY)
+    if (value) settingsStore().setItem(LAST_TRACK_KEY, value)
+    else settingsStore().removeItem(LAST_TRACK_KEY)
   })
 
   // 把指定设置项恢复默认:置为 undefined 后交给 migrateSettings 走既有的兜底链路,
@@ -294,6 +329,7 @@ export const usePlayerStore = defineStore('player', () => {
     errorMessage,
     setTracks,
     selectTrack,
+    onTrackReplaced,
     peekNext,
     peekPrevious,
     nextTrack,

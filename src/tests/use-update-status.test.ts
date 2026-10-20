@@ -6,10 +6,7 @@ const adminApiMock = vi.hoisted(() => ({
   fetchUpdateStatus: vi.fn(),
 }))
 
-vi.mock('../admin/services/admin-api', () => ({
-  triggerUpdate: adminApiMock.triggerUpdate,
-  fetchUpdateStatus: adminApiMock.fetchUpdateStatus,
-}))
+vi.mock('../admin/composables/useAdminApi', () => ({ useAdminApi: () => adminApiMock }))
 
 function flushPromises() {
   return Promise.resolve()

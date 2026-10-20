@@ -5,7 +5,7 @@ import {
   isInstrumentalPlaceholder,
   parseLyrics,
   splitLyricTranslation,
-} from '../utils/lyrics'
+} from '../core/lyrics/lyrics'
 
 describe('parseLyrics', () => {
   it('parses millisecond timestamps, repeated tags, and sorts lines', () => {

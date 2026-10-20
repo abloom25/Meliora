@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { mount } from '@vue/test-utils'
-import { usePwaInstall } from '../composables/usePwaInstall'
+import { usePwaInstall } from '../platform/web/usePwaInstall'
 
 interface DisplayModeChange {
   matches: boolean

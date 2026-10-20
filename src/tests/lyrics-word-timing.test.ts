@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest'
 import {
   lineWeight,
   mergeLyricTranslations,
+  mergeLyricAnnotations,
   mergeSyllablesIntoWords,
   resolveLyricTimings,
   tokenizeLyricText,
   wordFillProgress,
-} from '../utils/lyrics'
-import type { LyricLine } from '../types/music'
+} from '../core/lyrics/lyrics'
+import type { LyricLine } from '../core/types'
 
 describe('tokenizeLyricText', () => {
   it('splits CJK per character and latin per word', () => {
@@ -177,20 +178,41 @@ describe('mergeLyricTranslations', () => {
     const primary: LyricLine[] = [{ time: 1, text: 'one' }]
     const donor: LyricLine[] = [{ time: 9, text: 'other', translation: '九' }]
 
-    expect(mergeLyricTranslations(primary, donor)[0]?.translation).toBeUndefined()
+    expect(mergeLyricTranslations(primary, donor)).toBe(primary)
   })
 
   it('never overwrites an existing translation', () => {
     const primary: LyricLine[] = [{ time: 1, text: 'one', translation: 'keep' }]
     const donor: LyricLine[] = [{ time: 1, text: 'one', translation: 'replace' }]
 
-    expect(mergeLyricTranslations(primary, donor)[0]?.translation).toBe('keep')
+    expect(mergeLyricTranslations(primary, donor)).toBe(primary)
   })
 
   it('returns the input untouched when the donor has no translations', () => {
     const primary: LyricLine[] = [{ time: 1, text: 'one' }]
 
     expect(mergeLyricTranslations(primary, [{ time: 1, text: 'one' }])).toBe(primary)
+  })
+})
+
+describe('mergeLyricAnnotations', () => {
+  it('merges translation and romanization independently without replacing existing text', () => {
+    const primary: LyricLine[] = [{ time: 1, text: '你好', translation: 'Keep translation' }]
+    const donor: LyricLine[] = [
+      { time: 1.1, text: '你好', translation: 'Replace', roman: 'ni hao' },
+    ]
+    const result = mergeLyricAnnotations(primary, donor)
+    expect(result[0]).toMatchObject({ translation: 'Keep translation', roman: 'ni hao' })
+    expect(mergeLyricAnnotations(result, donor)).toBe(result)
+  })
+
+  it('does not attach auxiliary vocals to harmony or unrelated timestamps', () => {
+    const primary: LyricLine[] = [
+      { time: 1, text: 'Harmony', background: true },
+      { time: 9, text: 'Later' },
+    ]
+    const donor: LyricLine[] = [{ time: 1, text: 'Other', translation: '一', roman: 'yi' }]
+    expect(mergeLyricAnnotations(primary, donor)).toBe(primary)
   })
 })
 
