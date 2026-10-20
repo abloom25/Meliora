@@ -1,10 +1,12 @@
 import { createBeatVisualRenderer } from '../platform/web/beat-visuals'
-import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch, type Ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { usePlayerStore } from '../stores/player'
 import type { Track } from '../core/types'
 import type { AudioChannel } from '../core/audio/backend'
+import type { LyricPlaybackState } from '../core/lyrics/render-schedule'
 import type { BeatPreloadTarget } from '../core/analysis/beat-timeline'
+import { sanitizeBeatFlashRate } from '../core/analysis/beat-envelope'
 import { shouldUseIOSBackgroundSafeAudio } from '../platform/web/browser'
 import { createWebAudioBackend } from '../platform/web/audio-backend'
 import { describePlaybackFailure, resolveFailureAction } from '../core/audio/failure'
@@ -14,7 +16,6 @@ import { useEqualizer } from './useEqualizer'
 import {
   usePreloadPool,
   preloadCover,
-  preloadLyrics,
   type PreloadDirection,
   type PreloadSlot,
 } from './usePreloadPool'
@@ -22,8 +23,18 @@ import { FADE_IN_DURATION_MS, FADE_OUT_DURATION_MS } from '../core/audio/fade'
 import { createAudioGain } from '../platform/web/audio-gain'
 import { createPlaybackTransition } from '../platform/web/playback-transition'
 import { createMediaSession } from '../platform/web/media-session'
+import { useAudioPreloadDebug } from '../platform/web/useAudioPreloadDebug'
+import { useBeatComparison } from '../platform/web/useBeatComparison'
+import { useBeatThisModels } from '../platform/web/useBeatThisModels'
+import { useJsonDownload } from '../platform/web/useJsonDownload'
+import { APP_VERSION } from '../generated/app-version'
+import { useListeningStats } from '../platform/web/useListeningStats'
 
 export interface UseAudioPlayerOptions {
+  /** Only observe diagnostic data while its panel is visible. */
+  debugEnabled?: Readonly<Ref<boolean>>
+  /** Comparison work is available only on its visible diagnostic tab. */
+  beatComparisonEnabled?: Readonly<Ref<boolean>>
   /**
    * 可选：返回需要每帧同步 `--beat-level` CSS 变量的目标节点列表。
    * 由节拍渲染适配器消费，与分析器的采样逻辑分离。
@@ -39,6 +50,10 @@ export interface UseAudioPlayerOptions {
 export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   const store = usePlayerStore()
   const { currentTrack, isPlaying, currentTime, duration, settings } = storeToRefs(store)
+  const debugEnabled = computed(() => import.meta.env.DEV && options.debugEnabled?.value === true)
+  const comparisonEnabled = computed(
+    () => debugEnabled.value && options.beatComparisonEnabled?.value === true,
+  )
   if (!['basic', 'beat-this-small', 'beat-this-standard'].includes(settings.value.beatAnalysisMode))
     settings.value.beatAnalysisMode = 'basic'
   const iosBackgroundSafeAudio = shouldUseIOSBackgroundSafeAudio()
@@ -69,6 +84,36 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   // 而不是一排静止的柱子
   const spectrumAvailable = ref(!iosBackgroundSafeAudio)
   let degradationWarned = false
+  const lyricPlaybackListeners = new Set<() => void>()
+  const waitingChannels = new Set<AudioChannel>()
+
+  function notifyLyricsPlayback(): void {
+    if (disposed) return
+    for (const listener of lyricPlaybackListeners) listener()
+  }
+
+  function getLyricsPlaybackState(): LyricPlaybackState {
+    const channel = backend.active()
+    const audio = backend.elementOf(channel)
+    return {
+      timeSeconds: channel.currentTime(),
+      playing:
+        !disposed &&
+        isPlaying.value &&
+        !audio.paused &&
+        !audio.ended &&
+        !waitingChannels.has(channel) &&
+        audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA,
+      playbackRate: audio.playbackRate,
+      seeking: audio.seeking,
+    }
+  }
+
+  function subscribeLyricsPlayback(listener: () => void): () => void {
+    if (disposed) return () => undefined
+    lyricPlaybackListeners.add(listener)
+    return () => lyricPlaybackListeners.delete(listener)
+  }
 
   function schedulePlayerTimeout(callback: () => void, delay: number): number {
     const version = playbackVersion
@@ -86,6 +131,12 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
 
   const { bindFilters: bindEqFilters } = useEqualizer({ settings })
   const beatVisuals = createBeatVisualRenderer(options)
+  const listening = useListeningStats({
+    track: currentTrack,
+    players: channels.map((channel) => backend.elementOf(channel)),
+    getActiveAudio: () => backend.elementOf(backend.active()),
+    isPlaying,
+  })
   const adjacentBeatTargets = shallowRef<readonly BeatPreloadTarget[]>([])
   const {
     beatLevel,
@@ -94,11 +145,15 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     stopBeatAnalysis,
     preanalysis,
     resetBeatTracking,
+    debugSnapshot,
   } = useBeatAnalyser({
+    track: currentTrack,
     // 频谱要真实元素,这是 Web 后端的专有出口
     players: channels.map((channel) => backend.elementOf(channel)),
     getActiveAudio: () => backend.elementOf(backend.active()),
     isPlaying,
+    debugEnabled,
+    debugSampleIntervalMs: computed(() => (comparisonEnabled.value ? 1000 / 30 : 100)),
     mode: computed(() => settings.value.beatAnalysisMode),
     beatFlashRate: computed(() => settings.value.beatFlashRate),
     beatVisualDelay: computed(() => settings.value.beatVisualDelay),
@@ -121,9 +176,67 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     onEqFiltersReady: bindEqFilters,
     onTainted: (audio) => {
       backend.degradeForTaint(audio)
+      notifyLyricsPlayback()
       degradeBeatAnalysis()
     },
   })
+
+  const comparisonModels = useBeatThisModels()
+  const beatComparison = useBeatComparison({
+    source: computed(() => currentTrack.value?.audioUrl ?? ''),
+    durationSeconds: duration,
+    flashRate: computed(() => sanitizeBeatFlashRate(settings.value.beatFlashRate)),
+    enabled: comparisonEnabled,
+    debug: debugSnapshot ?? shallowRef(null),
+    liveTimeline: preanalysis.timeline,
+    liveMode: computed(() => settings.value.beatAnalysisMode),
+    modelAvailable: computed(() => ({
+      small: comparisonModels.status.value.small.phase === 'ready',
+      standard: comparisonModels.status.value.standard.phase === 'ready',
+    })),
+    getPlaybackSeconds: () => backend.active().currentTime(),
+    getPlaybackState: () => {
+      const audio = backend.elementOf(backend.active())
+      return {
+        timeSeconds: audio.currentTime,
+        playing:
+          isPlaying.value &&
+          !audio.paused &&
+          !audio.ended &&
+          audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA,
+        playbackRate: audio.playbackRate,
+        seeking: audio.seeking,
+      }
+    },
+    acquirePause: (signal) => preanalysis.acquirePause(signal, { foregroundFirst: true }),
+  })
+  const comparisonDownload = useJsonDownload()
+  watch(() => currentTrack.value?.audioUrl, comparisonDownload.clearError, { flush: 'sync' })
+
+  async function exportBeatComparison(): Promise<boolean> {
+    if (beatComparison.recordingStats.value.sampleCount === 0) return false
+    const source = currentTrack.value?.audioUrl
+    const exportedAtIso = new Date().toISOString()
+    const stamp = exportedAtIso.replace(/[:.]/g, '-')
+    return comparisonDownload.download(() => {
+      if (
+        currentTrack.value?.audioUrl !== source ||
+        beatComparison.recordingStats.value.sampleCount === 0
+      )
+        throw new Error('Comparison source changed')
+      return beatComparison.exportData({
+        exportedAtIso,
+        title: currentTrack.value?.title,
+        artist: currentTrack.value?.artist,
+        appVersion: APP_VERSION,
+        playbackRate: backend.elementOf(backend.active()).playbackRate,
+        requestedSampleIntervalMs: 1000 / 30,
+        beatBrightness: settings.value.beatBrightness,
+        beatVisualDelayMs: settings.value.beatVisualDelay,
+        beatFlashEnabled: settings.value.beatFlash,
+      })
+    }, `meliora-beat-comparison-${stamp}.json`)
+  }
 
   const {
     preloadSlots,
@@ -136,6 +249,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     clearPreloads,
     resetSlotChannels,
     clearSlot,
+    transferLyricsForPromotion,
     clearPreloadMessage,
     findSlotByTrack,
     slotCanStart,
@@ -152,6 +266,34 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       adjacentBeatTargets.value = targets
     },
   })
+
+  const audioPreloadDebug = useAudioPreloadDebug({
+    enabled: debugEnabled,
+    getElements: () => channels.map((channel) => backend.elementOf(channel)),
+    getSlots: () =>
+      (['previous', 'next'] as const).map((direction) => {
+        const slot = preloadSlots[direction]
+        return {
+          direction,
+          channel: slot.channel,
+          audio: backend.elementOf(slot.channel),
+          track: slot.track,
+          protected: slot.channel === retiringChannel,
+        }
+      }),
+  })
+  watch(
+    [
+      () => debugSnapshot?.value,
+      adjacentBeatTargets,
+      currentTrack,
+      spectrumAvailable,
+      isPlaying,
+      () => settings.value.preloadNextTrack,
+    ],
+    audioPreloadDebug.refresh,
+    { flush: 'post' },
+  )
 
   watch(
     () => currentTrack.value?.id,
@@ -219,6 +361,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       channel.setGain(0)
     }
     backend.setActive(channels[0]!)
+    notifyLyricsPlayback()
     backend.active().setGain(1)
     automaticCrossfadeStarted = false
     pendingSeekTime.value = null
@@ -286,6 +429,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
 
   function replayCurrentTrack() {
     if (!currentTrack.value) return
+    listening.restartVisit()
     automaticCrossfadeStarted = false
     pendingSeekTime.value = null
     backend.active().seek(0)
@@ -304,6 +448,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     channel.seek(resolution.time)
     currentTime.value = resolution.time
     pendingSeekTime.value = resolution.kind === 'pending' ? resolution.time : null
+    notifyLyricsPlayback()
   }
 
   // 时长终于可用时,把界面上的进度对到通道真正落到的位置
@@ -326,13 +471,15 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     slot.cleanup?.()
     reverseSlot.cleanup?.()
     backend.setActive(incoming)
+    notifyLyricsPlayback()
     slot.channel = spare
     slot.track = null
     slot.ready = null
     reverseSlot.channel = outgoing
     reverseSlot.track = oldTrack
     reverseSlot.ready = oldTrack ? Promise.resolve(true) : null
-    return { outgoing, oldTrack, incoming }
+    const releaseIncomingLyrics = transferLyricsForPromotion(slot, reverseSlot)
+    return { outgoing, oldTrack, incoming, releaseIncomingLyrics }
   }
 
   interface SwitchOptions {
@@ -400,7 +547,6 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         slot.channel.setGain(0)
         slot.channel.load(track.audioUrl)
         void preloadCover(track.cover)
-        void preloadLyrics(track)
       }
 
       // ===== 极简同步阶段:只做通道切换 + reactivity =====
@@ -413,7 +559,10 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         void fadePlayer(previous, previousGain, 0, FADE_OUT_DURATION_MS)
       }
 
-      const { outgoing, oldTrack, incoming } = replaceActiveWithSlot(slot, direction)
+      const { outgoing, oldTrack, incoming, releaseIncomingLyrics } = replaceActiveWithSlot(
+        slot,
+        direction,
+      )
       retiringChannel = outgoing
       const outgoingSource = outgoing.source()
       mountActiveAudioForIOS()
@@ -439,6 +588,9 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         updateStore()
       } finally {
         committingSwitch = false
+        // LyricsPanel's track watcher joins the shared request before the speculative
+        // subscriber is released; the rotated spare slot must no longer own it.
+        void nextTick(releaseIncomingLyrics)
       }
       currentTime.value = 0
       duration.value = incoming.duration() ?? 0
@@ -500,6 +652,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
           const reverseSlot = preloadSlots[direction === 'next' ? 'previous' : 'next']
           reverseSlot.cleanup?.()
           backend.setActive(outgoing)
+          notifyLyricsPlayback()
           retiringChannel = null
           outgoing.setGain(1)
           reverseSlot.channel = incoming
@@ -608,6 +761,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   async function previous() {
     invalidatePlayback()
     if (previousMeansRestart(backend.active().currentTime())) {
+      listening.restartVisit()
       seek(0)
       return
     }
@@ -713,6 +867,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     { flush: 'sync' },
   )
   watch(isPlaying, syncMediaSession)
+  watch([isPlaying, () => currentTrack.value?.audioUrl], notifyLyricsPlayback, { flush: 'post' })
 
   function handleTimeUpdate(channel: AudioChannel) {
     if (channel !== backend.active()) return
@@ -745,6 +900,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       if (!isActive()) return
       duration.value = channel.duration() ?? 0
       flushPendingSeek(channel)
+      notifyLyricsPlayback()
     }
 
     channelSubscriptions.push(
@@ -762,7 +918,17 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         if (isActive()) isPlaying.value = true
       }),
       channel.on('playing', () => {
+        waitingChannels.delete(channel)
         if (isActive()) guardedStartBeatAnalysis()
+        if (isActive()) notifyLyricsPlayback()
+      }),
+      channel.on('waiting', () => {
+        waitingChannels.add(channel)
+        if (isActive()) notifyLyricsPlayback()
+      }),
+      channel.on('emptied', () => {
+        waitingChannels.delete(channel)
+        if (isActive()) notifyLyricsPlayback()
       }),
       channel.on('pause', () => {
         if (!isActive() || transition.isPreparing()) return
@@ -786,6 +952,25 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         handleActiveChannelError(channel)
       }),
     )
+    for (const event of [
+      'timeupdate',
+      'play',
+      'pause',
+      'ended',
+      'seeking',
+      'seeked',
+      'ratechange',
+      'canplay',
+      'loadeddata',
+      'error',
+    ] as const) {
+      channelSubscriptions.push(
+        channel.on(event, () => {
+          if (event === 'canplay' || event === 'loadeddata') waitingChannels.delete(channel)
+          if (isActive()) notifyLyricsPlayback()
+        }),
+      )
+    }
   }
 
   function handleActiveChannelError(channel: AudioChannel) {
@@ -829,6 +1014,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   onBeforeUnmount(() => {
     try {
       disposed = true
+      lyricPlaybackListeners.clear()
+      waitingChannels.clear()
       invalidatePlayback()
 
       // 清理所有挂起的 timeout
@@ -874,7 +1061,23 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
 
   return {
     beatLevel,
+    listeningStats: listening.stats,
+    clearListeningHistory: listening.clear,
+    getPlaybackSeconds: () => backend.active().currentTime(),
+    getLyricsPlaybackState,
+    subscribeLyricsPlayback,
     beatBuildStatus: preanalysis.status,
+    beatDebug: debugSnapshot ?? shallowRef(null),
+    beatSchedulerDebug: preanalysis.debugSnapshot ?? shallowRef(null),
+    beatComparison: beatComparison.snapshot,
+    canCompareBeats: beatComparison.canStart,
+    startBeatComparison: beatComparison.start,
+    stopBeatComparison: beatComparison.stop,
+    beatComparisonRecording: beatComparison.recordingStats,
+    exportBeatComparison,
+    beatComparisonExporting: comparisonDownload.exporting,
+    beatComparisonExportError: comparisonDownload.error,
+    audioPreloadDebug: audioPreloadDebug.state,
     retryBeatBuild: preanalysis.retry,
     spectrumLevels,
     spectrumAvailable,

@@ -3,10 +3,10 @@
   import { storeToRefs } from 'pinia'
   import { computed } from 'vue'
   import { BEAT_FLASH_RATE_STEPS, sanitizeBeatFlashRate } from '../core/analysis/beat-envelope'
+  import type { BeatBuildStatus } from '../core/analysis/beat-timeline'
   import { formatTrackDisplayTitle } from '../core/library/tracks'
   import type { LyricProviderSource, LyricStatus, Track } from '../core/types'
   import { APP_VERSION } from '../generated/app-version'
-  import type { BeatBuildStatus } from '../core/analysis/beat-timeline'
   import { usePlayerStore, type ResettableSettingKey } from '../stores/player'
   import Collapse from './Collapse.vue'
   import BeatAnalysisSettings from './BeatAnalysisSettings.vue'
@@ -17,8 +17,11 @@
   import SleepTimerControl from './SleepTimerControl.vue'
   import SongInfoValue from './SongInfoValue.vue'
   import ToggleSwitch from './ToggleSwitch.vue'
+  import ListeningStatsSection from './ListeningStatsSection.vue'
+  import type { ListeningStatsSummary } from '../platform/web/listening-history'
 
   const REPO_URL = 'https://github.com/abloom25/Meliora'
+  const debugSettingsAvailable = import.meta.env.DEV
 
   const store = usePlayerStore()
   const { settings } = storeToRefs(store)
@@ -110,10 +113,12 @@
 
   const props = defineProps<{
     playModeText: string
-    beatBuild?: BeatBuildStatus
     sleepTimer: SleepTimerState
     capabilities: SettingsCapabilities
     songInfo?: SongInfoState
+    beatBuild?: BeatBuildStatus
+    listeningStats?: ListeningStatsSummary
+    clearListeningHistory?: () => Promise<void>
   }>()
 
   const LYRIC_SOURCE_LABELS: Record<LyricProviderSource, string> = {
@@ -255,6 +260,13 @@
         </dl>
       </div>
     </section>
+
+    <ListeningStatsSection
+      v-if="listeningStats && clearListeningHistory"
+      :stats="listeningStats"
+      :track="songInfo?.track"
+      :on-clear="clearListeningHistory"
+    />
 
     <section class="settings-section">
       <SettingsSectionHeader title="播放" resettable @reset="store.resetSettings(PLAYBACK_KEYS)" />
@@ -455,6 +467,15 @@
           :step="10"
         />
       </Collapse>
+    </section>
+
+    <section v-if="debugSettingsAvailable" class="settings-section">
+      <SettingsSectionHeader title="调试" />
+      <SettingToggleRow
+        v-model="settings.debugPanelEnabled"
+        label="播放器调试面板"
+        description="开启后可从顶部查看播放与预分析状态"
+      />
     </section>
 
     <section class="settings-section about-section">

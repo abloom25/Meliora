@@ -6,7 +6,21 @@
   // 超时没等到第二次点击就自动退回,避免按钮长期停在"待确认"的样子误导人
   const CONFIRM_TIMEOUT_MS = 4000
 
-  withDefaults(defineProps<{ title: string; resettable?: boolean }>(), { resettable: false })
+  withDefaults(
+    defineProps<{
+      title: string
+      resettable?: boolean
+      resetLabel?: string
+      confirmLabel?: string
+      resetDisabled?: boolean
+    }>(),
+    {
+      resettable: false,
+      resetLabel: '恢复默认',
+      confirmLabel: '再次点击恢复',
+      resetDisabled: false,
+    },
+  )
 
   const emit = defineEmits<{ reset: [] }>()
 
@@ -41,10 +55,11 @@
       class="section-reset"
       :class="{ confirming }"
       type="button"
+      :disabled="resetDisabled"
       @click="handleClick"
     >
       <RotateCcw :size="13" />
-      <span>{{ confirming ? '再次点击恢复' : '恢复默认' }}</span>
+      <span>{{ confirming ? confirmLabel : resetLabel }}</span>
     </button>
   </header>
 </template>
@@ -104,6 +119,11 @@
 
   .section-reset:active {
     transform: scale(0.97);
+  }
+
+  .section-reset:disabled {
+    opacity: 0.45;
+    cursor: wait;
   }
 
   // 待确认态必须一眼可辨,否则两段式确认只是多点一次而已

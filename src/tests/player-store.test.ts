@@ -1,9 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createPinia, setActivePinia } from 'pinia'
+import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia'
+import { nextTick } from 'vue'
 import { loadTrackLyrics, registerTrackLyrics } from '../services/lyrics'
 import { migrateSettings, usePlayerStore } from '../stores/player'
 import { wireApplication } from '../app/composition-root'
 import type { PlayerSettings, Track } from '../core/types'
+
+let testPinia: Pinia | undefined
+
+function activateTestPinia() {
+  if (testPinia) disposePinia(testPinia)
+  testPinia = createPinia()
+  setActivePinia(testPinia)
+}
+
+beforeEach(activateTestPinia)
+afterEach(() => {
+  // Stop each store's watchers and debounce timer before the next test clears storage.
+  if (testPinia) disposePinia(testPinia)
+  testPinia = undefined
+  setActivePinia(undefined)
+  vi.restoreAllMocks()
+  vi.useRealTimers()
+  vi.unstubAllEnvs()
+})
 
 const tracks: Track[] = [
   {
@@ -31,7 +51,6 @@ const tracks: Track[] = [
 
 describe('player store', () => {
   beforeEach(() => {
-    setActivePinia(createPinia())
     // store 不再直接依赖服务层,歌词来源的搬运由组装点装上(与 main.ts 一致)
     wireApplication()
   })
@@ -192,11 +211,6 @@ describe('player store', () => {
 })
 
 describe('player store peekNext / peekPrevious', () => {
-  beforeEach(() => setActivePinia(createPinia()))
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
   it('peekNext returns null on an empty queue', () => {
     const store = usePlayerStore()
     store.settings.playMode = 'loop'
@@ -352,38 +366,6 @@ describe('player store peekNext / peekPrevious', () => {
 })
 
 describe('player settings migration', () => {
-  it('migrates removed BeatNet and invalid preferences to the available basic mode', () => {
-    expect(
-      migrateSettings({ beatAnalysisMode: 'beatnet' as PlayerSettings['beatAnalysisMode'] })
-        .beatAnalysisMode,
-    ).toBe('basic')
-    expect(migrateSettings({ beatAnalysisMode: 'basic' }).beatAnalysisMode).toBe('basic')
-    expect(migrateSettings({ volume: 0.4 }).beatAnalysisMode).toBe('basic')
-    expect(
-      migrateSettings({
-        beatAnalysisMode: 'unknown-model' as PlayerSettings['beatAnalysisMode'],
-      }).beatAnalysisMode,
-    ).toBe('basic')
-  })
-
-  it('preserves the manually selected Beat This model across settings loads and resets of unrelated options', () => {
-    for (const mode of ['beat-this-small', 'beat-this-standard'] as const) {
-      expect(migrateSettings({ beatAnalysisMode: mode }).beatAnalysisMode).toBe(mode)
-    }
-    localStorage.setItem(
-      'meliora:settings',
-      JSON.stringify({ beatAnalysisMode: 'beat-this-standard' }),
-    )
-    const store = usePlayerStore()
-    expect(store.settings.beatAnalysisMode).toBe('beat-this-standard')
-    store.resetSettings(['volume'])
-    expect(store.settings.beatAnalysisMode).toBe('beat-this-standard')
-    store.resetSettings(['beatAnalysisMode'])
-    expect(store.settings.beatAnalysisMode).toBe('basic')
-  })
-
-  beforeEach(() => setActivePinia(createPinia()))
-
   it('defaultSettings has settingsVersion 1', () => {
     const result = migrateSettings({})
     expect(result.settingsVersion).toBe(1)
@@ -391,6 +373,7 @@ describe('player settings migration', () => {
     expect(result.playMode).toBe('loop')
     expect(result.smoothTrackChange).toBe(true)
     expect(result.autoHideChrome).toBe(true)
+    expect(result.debugPanelEnabled).toBe(false)
     expect(result.lyricTranslation).toBe(true)
     expect(result.progressLyricPreview).toBe(false)
     expect(result.beatAnalysisMode).toBe('basic')
@@ -421,6 +404,40 @@ describe('player settings migration', () => {
     expect(result.volume).toBe(0.5)
   })
 
+  it('migrates removed model and invalid preferences to the available basic mode', () => {
+    expect(
+      migrateSettings({ beatAnalysisMode: 'beatnet' as PlayerSettings['beatAnalysisMode'] })
+        .beatAnalysisMode,
+    ).toBe('basic')
+    expect(
+      migrateSettings({ beatAnalysisMode: 'madmom-onset' as PlayerSettings['beatAnalysisMode'] })
+        .beatAnalysisMode,
+    ).toBe('basic')
+    expect(migrateSettings({ beatAnalysisMode: 'basic' }).beatAnalysisMode).toBe('basic')
+    expect(migrateSettings({ volume: 0.4 }).beatAnalysisMode).toBe('basic')
+    expect(
+      migrateSettings({
+        beatAnalysisMode: 'unknown-model' as PlayerSettings['beatAnalysisMode'],
+      }).beatAnalysisMode,
+    ).toBe('basic')
+  })
+
+  it.each(['beat-this-small', 'beat-this-standard'] as const)(
+    'preserves manually selected %s across settings loads and unrelated resets',
+    (selectedMode) => {
+      expect(migrateSettings({ beatAnalysisMode: selectedMode }).beatAnalysisMode).toBe(
+        selectedMode,
+      )
+      localStorage.setItem('meliora:settings', JSON.stringify({ beatAnalysisMode: selectedMode }))
+      const store = usePlayerStore()
+      expect(store.settings.beatAnalysisMode).toBe(selectedMode)
+      store.resetSettings(['volume'])
+      expect(store.settings.beatAnalysisMode).toBe(selectedMode)
+      store.resetSettings(['beatAnalysisMode'])
+      expect(store.settings.beatAnalysisMode).toBe('basic')
+    },
+  )
+
   it('loadSettings migrates persisted legacy data via the store', () => {
     localStorage.setItem('meliora:settings', JSON.stringify({ volume: 0.4, playMode: 'single' }))
     const store = usePlayerStore()
@@ -429,6 +446,61 @@ describe('player settings migration', () => {
     expect(store.settings.volume).toBe(0.4)
     expect(store.settings.playMode).toBe('single')
     expect(store.settings.autoHideChrome).toBe(true)
+    expect(store.settings.debugPanelEnabled).toBe(false)
+  })
+
+  it('only enables the debug panel for an explicit boolean preference', () => {
+    for (const value of [undefined, null, 'true', 1, {}, false]) {
+      expect(migrateSettings({ debugPanelEnabled: value as boolean }).debugPanelEnabled).toBe(false)
+    }
+    expect(migrateSettings({ debugPanelEnabled: true }).debugPanelEnabled).toBe(true)
+  })
+
+  it('discards a persisted debug opt-in outside development', () => {
+    vi.stubEnv('DEV', false)
+    localStorage.setItem('meliora:settings', JSON.stringify({ debugPanelEnabled: true }))
+    expect(migrateSettings({ debugPanelEnabled: true }).debugPanelEnabled).toBe(false)
+    const store = usePlayerStore()
+    expect(store.settings.debugPanelEnabled).toBe(false)
+    store.$dispose()
+  })
+
+  it('persists the debug opt-in and preserves it when unrelated settings are reset', async () => {
+    vi.useFakeTimers()
+    const store = usePlayerStore()
+    store.settings.debugPanelEnabled = true
+    store.resetSettings(['volume'])
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(JSON.parse(localStorage.getItem('meliora:settings')!).debugPanelEnabled).toBe(true)
+
+    activateTestPinia()
+    const restored = usePlayerStore()
+    expect(restored.settings.debugPanelEnabled).toBe(true)
+    restored.settings.debugPanelEnabled = false
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(JSON.parse(localStorage.getItem('meliora:settings')!).debugPanelEnabled).toBe(false)
+  })
+
+  it('flushes and cancels pending saves before replacing a disposed store', async () => {
+    vi.useFakeTimers()
+    const schedule = vi.spyOn(window, 'setTimeout')
+    const cancel = vi.spyOn(window, 'clearTimeout')
+    const store = usePlayerStore()
+    store.settings.volume = 0.4
+    await nextTick()
+    expect(schedule).toHaveBeenLastCalledWith(expect.any(Function), 200)
+    const pendingSave = schedule.mock.results.at(-1)?.value
+
+    activateTestPinia()
+    expect(cancel).toHaveBeenCalledWith(pendingSave)
+    const restored = usePlayerStore()
+    expect(restored.settings.volume).toBe(0.4)
+    restored.settings.volume = 0.8
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(JSON.parse(localStorage.getItem('meliora:settings')!).volume).toBe(0.8)
   })
 
   it('sanitizes invalid persisted settings instead of leaking NaN or out-of-range values', () => {

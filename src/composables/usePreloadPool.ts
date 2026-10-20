@@ -101,9 +101,9 @@ export function preloadCover(url?: string): Promise<void> {
   return ready
 }
 
-export async function preloadLyrics(track: Track) {
+export async function preloadLyrics(track: Track, signal?: AbortSignal) {
   try {
-    await loadTrackLyrics(track)
+    await loadTrackLyrics(track, signal ?? new AbortController().signal, undefined, 'background')
   } catch {
     // Lyrics failure must not block audio playback.
   }
@@ -149,6 +149,8 @@ export function usePreloadPool(options: PreloadPoolOptions) {
   // 失败记录的 TTL 与放行规则在核心层,这里只是持有它
   const failureLog = createTrackFailureLog()
   const pendingPreloadTimeouts = new Set<number>()
+  const lyricPreloads = new Map<PreloadSlot, AbortController>()
+  const lyricHandoffs = new Set<AbortController>()
   const isPoolUnmounted = ref(false)
   let publishedTargets: readonly BeatPreloadTarget[] = []
 
@@ -244,7 +246,37 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     return predictTrack('previous', true)
   }
 
+  function cancelSlotLyrics(slot: PreloadSlot): void {
+    lyricPreloads.get(slot)?.abort()
+    lyricPreloads.delete(slot)
+  }
+
+  function startSlotLyrics(slot: PreloadSlot, track: Track): void {
+    cancelSlotLyrics(slot)
+    const controller = new AbortController()
+    lyricPreloads.set(slot, controller)
+    void preloadLyrics(track, controller.signal).finally(() => {
+      if (lyricPreloads.get(slot) === controller) lyricPreloads.delete(slot)
+    })
+  }
+
+  /** Transfer ownership when audio handles rotate. Release incoming after foreground watchers attach. */
+  function transferLyricsForPromotion(slot: PreloadSlot, reverseSlot: PreloadSlot): () => void {
+    const incoming = lyricPreloads.get(slot)
+    lyricPreloads.delete(slot)
+    if (incoming) lyricHandoffs.add(incoming)
+    cancelSlotLyrics(reverseSlot)
+    if (!isPoolUnmounted.value && settings.value.preloadNextTrack && reverseSlot.track)
+      startSlotLyrics(reverseSlot, reverseSlot.track)
+    return () => {
+      if (!incoming) return
+      lyricHandoffs.delete(incoming)
+      incoming.abort()
+    }
+  }
+
   function clearSlot(slot: PreloadSlot, publish = true) {
+    cancelSlotLyrics(slot)
     if (slot.cleanup) {
       slot.cleanup()
       slot.cleanup = null
@@ -348,7 +380,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     if (direction === 'next') {
       void preloadCover(track.cover)
     }
-    void preloadLyrics(track)
+    startSlotLyrics(slot, track)
     return ready
   }
 
@@ -421,6 +453,8 @@ export function usePreloadPool(options: PreloadPoolOptions) {
       pendingPreloadTimeouts.clear()
     }
     clearPreloads()
+    for (const controller of lyricHandoffs) controller.abort()
+    lyricHandoffs.clear()
   })
 
   return {
@@ -435,6 +469,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     clearPreloads,
     resetSlotChannels,
     clearSlot,
+    transferLyricsForPromotion,
     clearPreloadMessage,
     findSlotByTrack,
     slotCanStart,

@@ -12,7 +12,7 @@ import { getFocusableEdges } from '../platform/web/dom'
 
 // 模块级 trap 栈:多个 trap 同时 active 时(如叠层抽屉/弹窗),
 // 只有最后激活的栈顶 trap 响应 Escape 与 Tab,避免一次按键触发所有 onClose。
-const trapStack: symbol[] = []
+const trapStack: { id: symbol; container: Ref<HTMLElement | null> }[] = []
 
 export function useFocusTrap(
   containerRef: Ref<HTMLElement | null>,
@@ -26,17 +26,17 @@ export function useFocusTrap(
   let focusTimer = 0
 
   function isTopTrap(): boolean {
-    return trapStack[trapStack.length - 1] === trapId
+    return trapStack[trapStack.length - 1]?.id === trapId
   }
 
   function pushTrap() {
-    const index = trapStack.indexOf(trapId)
+    const index = trapStack.findIndex((entry) => entry.id === trapId)
     if (index >= 0) trapStack.splice(index, 1)
-    trapStack.push(trapId)
+    trapStack.push({ id: trapId, container: containerRef })
   }
 
   function removeTrap() {
-    const index = trapStack.indexOf(trapId)
+    const index = trapStack.findIndex((entry) => entry.id === trapId)
     if (index >= 0) trapStack.splice(index, 1)
   }
 
@@ -130,7 +130,14 @@ export function useFocusTrap(
     if (triggerRef.value && typeof triggerRef.value.focus === 'function') {
       const trigger = triggerRef.value
       focusTimer = window.setTimeout(() => {
-        trigger.focus()
+        // 切换抽屉时，新抽屉已经接管焦点；嵌套弹层关闭仍可回到下层抽屉内部。
+        const currentTrap = trapStack[trapStack.length - 1]
+        if (
+          trigger.isConnected &&
+          (!currentTrap || currentTrap.container.value?.contains(trigger))
+        ) {
+          trigger.focus()
+        }
         focusTimer = 0
       }, 0)
     }

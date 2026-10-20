@@ -36,6 +36,7 @@ const defaultSettings: PlayerSettings = {
   progressLyricPreview: false,
   skipOnError: true,
   autoHideChrome: true,
+  debugPanelEnabled: false,
   equalizer: createDefaultEqualizer(),
   settingsVersion: CURRENT_SETTINGS_VERSION,
 }
@@ -78,6 +79,9 @@ export function migrateSettings(saved: Partial<PlayerSettings>): PlayerSettings 
     ),
     skipOnError: sanitizeBoolean(input.skipOnError, defaultSettings.skipOnError),
     autoHideChrome: sanitizeBoolean(input.autoHideChrome, defaultSettings.autoHideChrome),
+    debugPanelEnabled:
+      import.meta.env.DEV &&
+      sanitizeBoolean(input.debugPanelEnabled, defaultSettings.debugPanelEnabled),
     equalizer: sanitizeEqualizer(input.equalizer),
     settingsVersion: CURRENT_SETTINGS_VERSION,
   }

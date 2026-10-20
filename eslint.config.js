@@ -39,7 +39,9 @@ function coreImportRule(escapePrefix) {
   return ['error', { patterns }]
 }
 export default tseslint.config(
-  { ignores: ['dist', 'coverage', '.wrangler', 'public/models/beat-this/runtime-*/**'] },
+  {
+    ignores: ['dist', 'coverage', '.wrangler', '.meliora', 'public/models/beat-this/runtime-*/**'],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   ...vue.configs['flat/recommended'],
