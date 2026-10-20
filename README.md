@@ -39,7 +39,7 @@
 
 ### 歌词体验
 
-- 📜 **逐字歌词**:接入 Apple Music 规格的逐词歌词库,英文按词、中文按字随演唱推进点亮;
+- 📜 **逐字歌词**:接入 [AMLL TTML DB](https://github.com/amll-dev/amll-ttml-db) 社区逐词歌词库,英文按词、中文按字随演唱推进点亮;
   网易云与 QQ 曲目还会按歌曲 ID 获取平台原生 YRC/QRC,保留翻译与罗马音。
   三源并行、先到先显示,优先采用 AMLL,其次平台逐字歌词,没有逐字数据时回落为整行高亮;
   也支持增强型 LRC
@@ -51,6 +51,9 @@
 - 🪟 **歌词小窗**:Document Picture-in-Picture 独立浮窗,支持在外部应用时查看歌词
 - ⚡ **歌词性能**:长歌词按可见范围挂载,时间轴与布局局部更新;普通歌词等待时间边界,逐字扫光时才逐帧刷新,
   暂停或页面隐藏时停止相应任务,歌词小窗使用独立调度。歌词请求优先保障当前播放,取消过期预加载。
+
+歌词显示与动画效果参考了 [Apple Music-like Lyrics（AMLL）](https://github.com/amll-dev/applemusic-like-lyrics)
+的实现思路,包括弹簧滚动、逐字高亮、对唱与和声,以及前奏和间奏的三点等待动画,并结合 Meliora 的布局与渲染方式进行了适配。
 
 ### 播放控制
 
@@ -325,6 +328,17 @@ netlify/             Netlify Function 入口
 ---
 
 ## 🙏 致谢
+
+### 歌词效果与内容来源
+
+- [Apple Music-like Lyrics（AMLL）](https://github.com/amll-dev/applemusic-like-lyrics):感谢作者与贡献者公开歌词渲染和动画实现,为 Meliora 的歌词效果提供参考。
+- [AMLL TTML DB](https://github.com/amll-dev/amll-ttml-db):感谢社区的逐词歌词制作、校对与维护者,以及 AMLL API 和镜像服务的维护者,让播放器能够获取更丰富的逐字歌词。
+- [Meting](https://github.com/metowolf/Meting) 及兼容 API 的维护者:感谢远程歌单解析工具与接口服务,用于获取歌曲信息、播放地址、封面和普通歌词。
+- [网易云音乐](https://music.163.com/) 与 [QQ 音乐](https://y.qq.com/):感谢音乐与歌词资源。Meliora 当前支持通过 Meting 解析这两个平台的公开歌单,并按歌曲 ID 获取网易云 YRC、QQ QRC 及可用的翻译与罗马音。
+- [Robotxm / ESLyric-LyricsSource](https://github.com/Robotxm/ESLyric-LyricsSource):QQ QRC 解码实现改编自该项目,保留原作者署名、GPL-3.0 许可及其对 [LDDC](https://github.com/chenmozhijin/LDDC) 的上游致谢。
+- 感谢音乐创作者、歌词贡献者,以及提供本地或自托管音频、封面和歌词的用户。
+
+### 开发支持
 
 特别感谢 [@OnyxAxisOwO](https://github.com/OnyxAxisOwO) 提供 Opus 5 与 Fable 5.1。
 
