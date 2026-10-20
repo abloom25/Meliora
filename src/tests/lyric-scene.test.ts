@@ -103,6 +103,40 @@ describe('resolveLyricScene', () => {
 })
 
 describe('createLyricTimeline', () => {
+  it('advances long lyrics without rereading timings and keeps sparse snapshots independent', () => {
+    let reads = 0
+    const lines: LyricLine[] = Array.from({ length: 10000 }, (_, row) => ({
+      get time() {
+        reads += 1
+        return Math.floor(row / 2) * 2
+      },
+      get endTime() {
+        reads += 1
+        return Math.floor(row / 2) * 2 + 1
+      },
+      background: row % 2 === 1,
+      text: String(row),
+    }))
+    const timeline = createLyricTimeline(lines)
+    const initialReads = reads
+    const first = timeline.read(0)
+    const open = first.openHarmonies
+    expect(open).toEqual([1])
+    expect(Object.isFrozen(open)).toBe(true)
+    expect(timeline.read(0.5)).toBe(first)
+    for (let time = 1; time < 100; time += 1) timeline.read(time)
+    expect(timeline.read(9000).active).toEqual([9000, 9001])
+    expect(timeline.read(4).openHarmonies).toEqual([5])
+    expect(timeline.read(5).openHarmonies).toEqual([])
+    expect(reads).toBe(initialReads)
+    expect(first.openHarmonies).toBe(open)
+    expect(first.active).toEqual([0, 1])
+    expect(first.harmonyOpen[1]).toBe(true)
+    expect(first.harmonyOpen[5]).toBe(false)
+    expect(timeline.nextBoundary(4)).toBe(5)
+    expect(timeline.nextBoundary(9999)).toBeNull()
+  })
+
   it('changes scenes at exact starts and ends while retaining overlapping voices', () => {
     const timeline = createLyricTimeline(duetLines)
     expect(timeline.read(-0.001).active).toEqual([])

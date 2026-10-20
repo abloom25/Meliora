@@ -1,8 +1,12 @@
 import { httpFetch } from './http'
 import {
+  acquireLyricsRequest,
+  initializeLyricsPriority,
+  inheritLyricsPriority,
+  subscribeLyricsPriority,
+} from './lyrics-requests'
+import {
   WORD_LYRICS_API_URL,
-  WORD_LYRICS_MAX_CONCURRENT_REQUESTS,
-  WORD_LYRICS_MAX_QUEUED_REQUESTS,
   WORD_LYRICS_MIRRORS,
   WORD_LYRICS_NEGATIVE_TTL_MS,
   WORD_LYRICS_PLATFORMS,
@@ -101,55 +105,18 @@ export function resetWordLyricsCache(): void {
   wordLyricsCache.clear()
 }
 
-let activeRequests = 0
-const requestWaiters: Array<() => void> = []
-
-function acquireRequest(signal: AbortSignal): Promise<() => void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted || requestWaiters.length >= WORD_LYRICS_MAX_QUEUED_REQUESTS) {
-      reject(new Error('Word lyrics request cancelled or queue full'))
-      return
-    }
-    const onAbort = () => {
-      const index = requestWaiters.indexOf(start)
-      if (index >= 0) requestWaiters.splice(index, 1)
-      reject(signal.reason)
-    }
-    const start = () => {
-      signal.removeEventListener('abort', onAbort)
-      if (signal.aborted) {
-        reject(signal.reason)
-        requestWaiters.shift()?.()
-        return
-      }
-      activeRequests += 1
-      let released = false
-      resolve(() => {
-        if (released) return
-        released = true
-        activeRequests -= 1
-        requestWaiters.shift()?.()
-      })
-    }
-    if (activeRequests < WORD_LYRICS_MAX_CONCURRENT_REQUESTS) start()
-    else {
-      signal.addEventListener('abort', onAbort, { once: true })
-      requestWaiters.push(start)
-    }
-  })
-}
-
 /** 单请求超时加整个查询预算。超时包含读 body,不受 fetch 是否正确响应 abort 影响。 */
 async function fetchText(
   url: string,
   signal: AbortSignal,
 ): Promise<{ status: number; text: string }> {
-  const release = await acquireRequest(signal)
+  const release = await acquireLyricsRequest(signal)
   if (signal.aborted) {
     release()
     throw signal.reason
   }
   const controller = new AbortController()
+  inheritLyricsPriority(controller.signal, signal)
   const cancel = () => controller.abort(signal.reason)
   signal.addEventListener('abort', cancel, { once: true })
   if (signal.aborted) cancel()
@@ -260,6 +227,7 @@ async function fetchMirrors(
   signal: AbortSignal,
 ): Promise<LookupResult> {
   const controller = new AbortController()
+  inheritLyricsPriority(controller.signal, signal)
   const cancel = () => controller.abort(signal.reason)
   signal.addEventListener('abort', cancel, { once: true })
   if (signal.aborted) cancel()
@@ -385,12 +353,14 @@ async function loadCachedOrRequest(
 
 function subscribe(entry: PendingLyrics, signal?: AbortSignal): Promise<LyricLine[] | null> {
   if (signal?.aborted) return Promise.resolve(null)
+  const releasePriority = subscribeLyricsPriority(entry.controller.signal, signal)
   entry.subscribers += 1
   return new Promise((resolve) => {
     let released = false
     const finish = (lines: LyricLine[] | null) => {
       if (released) return
       released = true
+      releasePriority()
       signal?.removeEventListener('abort', onAbort)
       entry.subscribers -= 1
       if (!entry.subscribers && !entry.settled) entry.controller.abort()
@@ -420,6 +390,8 @@ export function loadWordLyrics(
   if (existing && !existing.controller.signal.aborted) return subscribe(existing, signal)
 
   const controller = new AbortController()
+  initializeLyricsPriority(controller.signal)
+  const releaseInitialPriority = subscribeLyricsPriority(controller.signal, signal)
   const timer = setTimeout(() => controller.abort(), WORD_LYRICS_QUERY_TIMEOUT_MS)
   const entry: PendingLyrics = {
     controller,
@@ -435,5 +407,7 @@ export function loadWordLyrics(
       if (pendingLyrics.get(key) === entry) pendingLyrics.delete(key)
     })
   pendingLyrics.set(key, entry)
-  return subscribe(entry, signal)
+  const result = subscribe(entry, signal)
+  releaseInitialPriority()
+  return result
 }

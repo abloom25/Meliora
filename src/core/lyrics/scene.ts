@@ -1,5 +1,6 @@
 import type { LyricLine } from '../types'
 import { findActiveLyricIndices } from './lyrics'
+import { createLyricTimeIndex } from './time-index'
 
 // 歌词面板的纯逻辑层:给定歌词与播放位置,算出"此刻该亮哪些行、锚点是谁、
 // 哪些和声行该露出来";给定各行高度,算出每一行在版面里的纵坐标。
@@ -14,6 +15,8 @@ export interface LyricScene {
   anchor: number
   /** 各行的和声展开状态。非和声行恒为 false */
   harmonyOpen: boolean[]
+  /** Sparse immutable open rows; indexed timelines materialize harmonyOpen only on demand. */
+  openHarmonies?: readonly number[]
 }
 
 // 高亮色/模糊过渡的基准时长,行间隔短于它时按比例压缩
@@ -56,7 +59,7 @@ export function resolveLyricScene(
 ): LyricScene {
   // 找不到所属主句的和声(文件本身异常)一律常驻显示,不然它永远出不来
   const harmonyOpen = lines.map((line, index) => Boolean(line.background) && !parents.has(index))
-  if (!lines.length) return { active: [], held: false, anchor: -1, harmonyOpen }
+  if (!lines.length) return { active: [], held: false, anchor: -1, harmonyOpen, openHarmonies: [] }
 
   const next = findActiveLyricIndices(lines as LyricLine[], time)
   const activeSet = new Set(next.indices)
@@ -68,31 +71,39 @@ export function resolveLyricScene(
     held: next.held,
     anchor: anchorOf(lines, next.indices),
     harmonyOpen,
+    openHarmonies: harmonyOpen.flatMap((open, index) => (open ? [index] : [])),
   }
 }
 
 export interface LyricTimeline {
   /** 返回共享的区间快照,调用方不应修改其中的数组。歌词内容变化后需重建时间轴。 */
   read: (time: number) => LyricScene
+  nextBoundary: (time: number) => number | null
 }
 
 /**
  * 场景只会在行首 / 行尾发生变化,逐字进度不参与场景计算。
  * 预先排序这些边界,同一区间内直接复用场景,避免每个动画帧扫描整首歌词。
- * seek 或越过边界时才重新解析,继续沿用对唱、无结束时间与无序行的既有语义。
- * 只保存当前区间,不预生成全部场景(每个场景的 harmonyOpen 都与全曲等长)。
+ * 顺播只消费跨过的事件,远跳/倒退用区间索引定位,保留对唱与无结束时间的语义。
+ * 只保存当前区间的稀疏快照,旧的 harmonyOpen 数组仅在兼容调用方读取时生成。
  */
 export function createLyricTimeline(
   lines: readonly LyricLine[],
   parents: ReadonlyMap<number, number> = harmonyParentsOf(lines),
 ): LyricTimeline {
-  const times = new Set<number>()
-  for (const line of lines) {
-    const { time, endTime } = line
-    if (time !== null && Number.isFinite(time)) times.add(time)
-    if (endTime !== undefined && Number.isFinite(endTime)) times.add(endTime)
+  const index = createLyricTimeIndex(lines)
+  const children = new Map<number, number[]>()
+  const orphans: number[] = []
+  for (let row = 0; row < lines.length; row += 1) {
+    if (!lines[row]!.background) continue
+    const parent = parents.get(row)
+    if (parent === undefined) orphans.push(row)
+    else {
+      const group = children.get(parent) ?? []
+      group.push(row)
+      children.set(parent, group)
+    }
   }
-  const boundaries = [...times].sort((left, right) => left - right)
   let from = Number.NEGATIVE_INFINITY
   let until = Number.POSITIVE_INFINITY
   let cached: LyricScene | null = null
@@ -102,22 +113,43 @@ export function createLyricTimeline(
     // 且不能让异常时钟读数覆盖有限时间的缓存。
     if (!Number.isFinite(time)) return resolveLyricScene(lines, time, parents)
     if (cached && time >= from && time < until) return cached
-
-    // upper_bound:行首在精确边界处已开始,行尾在精确边界处已结束。
-    let low = 0
-    let high = boundaries.length
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2)
-      if (boundaries[middle]! <= time) low = middle + 1
-      else high = middle
+    const interval = index.interval(time)
+    from = interval.from
+    until = interval.until
+    if (!index.supported) cached = resolveLyricScene(lines, time, parents)
+    else {
+      const next = index.read(time)
+      const open = new Set(orphans)
+      for (const row of next.indices) {
+        if (lines[row]?.background) open.add(row)
+        if (!next.held) for (const child of children.get(row) ?? []) open.add(child)
+      }
+      const openHarmonies = Object.freeze([...open].sort((a, b) => a - b))
+      let dense: boolean[] | null = null
+      cached = {
+        active: next.indices,
+        held: next.held,
+        anchor: anchorOf(lines, next.indices),
+        get harmonyOpen() {
+          if (!dense) {
+            dense = new Array<boolean>(lines.length).fill(false)
+            for (const row of openHarmonies) dense[row] = true
+          }
+          return dense
+        },
+        openHarmonies,
+      }
     }
-    from = boundaries[low - 1] ?? Number.NEGATIVE_INFINITY
-    until = boundaries[low] ?? Number.POSITIVE_INFINITY
-    cached = resolveLyricScene(lines, time, parents)
     return cached
   }
 
-  return { read }
+  return { read, nextBoundary: index.nextBoundary }
+}
+
+export function isLyricHarmonyOpen(scene: LyricScene, index: number): boolean {
+  return scene.openHarmonies
+    ? scene.openHarmonies.includes(index)
+    : Boolean(scene.harmonyOpen[index])
 }
 
 export function sameLyricScene(left: LyricScene, right: LyricScene): boolean {

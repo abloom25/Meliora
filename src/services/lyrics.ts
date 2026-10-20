@@ -6,10 +6,19 @@ import { mergeLyricAnnotations } from '../core/lyrics'
 import { parseAnyLyrics } from '../core/lyrics'
 import { getWordLyricsCacheToken, loadWordLyrics, type WordLyricsQuery } from './lyrics-db'
 import { getNativeLyricsCacheToken, loadNativeLyrics, toNativeLyricsQuery } from './native-lyrics'
+import {
+  acquireLyricsRequest,
+  initializeLyricsPriority,
+  subscribeLyricsPriority,
+} from './lyrics-requests'
+import type { RequestPriority } from '../core/util/priority-request-queue'
 
 interface LyricsCacheEntry {
   promise: Promise<string>
   ready: boolean
+  settled: boolean
+  subscribers: number
+  controller: AbortController
 }
 
 interface TrackLyricsCacheEntry {
@@ -94,89 +103,85 @@ function trackLyricsKey(track: Track): Track {
 }
 
 export function loadLyricsText(url: string, signal?: AbortSignal): Promise<string> {
-  const existing = lyricsCache.get(url)
-  if (existing) return withAbortSignal(existing.promise, signal, existing.ready)
   if (signal?.aborted) return Promise.reject(createAbortReason(signal))
-
-  // 本地 controller 只负责缓存层请求超时。调用方 abort 只取消自己的等待,
-  // 不取消共享 fetch,避免快速切歌时把同 URL 的预加载/后续请求一起误伤。
-  // 超时通过 abort(reason) 标记为可区分的超时错误,不会以 AbortError 形式暴露给订阅者。
+  const existing = lyricsCache.get(url)
+  if (existing && !existing.controller.signal.aborted) return subscribeText(existing, signal, url)
   const controller = new AbortController()
+  initializeLyricsPriority(controller.signal)
+  const entry: LyricsCacheEntry = {
+    ready: false,
+    settled: false,
+    subscribers: 0,
+    controller,
+    promise: Promise.resolve(''),
+  }
+  // Subscribe before starting IO so speculative requests enter the shared budget at low priority.
+  lyricsCache.set(url, entry)
+  const releasePriority = subscribeLyricsPriority(controller.signal, signal)
   const timer = setTimeout(
     () => controller.abort(createLyricsTimeoutError()),
     LYRICS_FETCH_TIMEOUT_MS,
   )
-
-  const entry: LyricsCacheEntry = {
-    ready: false,
-    promise: Promise.resolve(''),
-  }
-
-  // 清理本次缓存层请求占用的资源。
-  const cleanup = () => {
-    clearTimeout(timer)
-  }
-
-  entry.promise = fetchLyricsText(url, controller.signal)
-    .then((text) => {
+  entry.promise = (async () => {
+    const release = await acquireLyricsRequest(controller.signal)
+    try {
+      controller.signal.throwIfAborted()
+      const text = await new Promise<string>((resolve, reject) => {
+        const abort = () => reject(controller.signal.reason)
+        controller.signal.addEventListener('abort', abort, { once: true })
+        Promise.resolve()
+          .then(() => fetchLyricsText(url, controller.signal))
+          .then(resolve, reject)
+          .finally(() => controller.signal.removeEventListener('abort', abort))
+      })
+      controller.signal.throwIfAborted()
       entry.ready = true
-      cleanup()
       return text
-    })
-    .catch((error) => {
-      // 超时或外部 abort 触发时，从 in-flight 缓存中移除该 URL。
-      // 规范实现下 fetch 会以 signal.reason reject;不透传 reason 的环境里
-      // 本地 controller 中止只会产生 AbortError,这里统一归一为 abort 时记录的原因,
-      // 保证超时始终以 LyricsTimeoutError 而不是 AbortError 暴露给订阅者。
-      if (lyricsCache.get(url) === entry) lyricsCache.delete(url)
-      cleanup()
-      if (
-        controller.signal.aborted &&
-        error instanceof DOMException &&
-        error.name === 'AbortError'
-      ) {
-        throw controller.signal.reason ?? error
-      }
-      throw error
-    })
-
-  lyricsCache.set(url, entry)
-  return withAbortSignal(entry.promise, signal, false)
-}
-
-function withAbortSignal(
-  promise: Promise<string>,
-  signal: AbortSignal | undefined,
-  alreadyReady: boolean,
-): Promise<string> {
-  return withAbortSignalGeneric(promise, signal, alreadyReady)
-}
-
-function withAbortSignalGeneric<T>(
-  promise: Promise<T>,
-  signal: AbortSignal | undefined,
-  alreadyReady: boolean,
-): Promise<T> {
-  if (!signal) return promise
-  if (signal.aborted) return Promise.reject(createAbortReason(signal))
-  if (alreadyReady) return promise
-
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      cleanup()
-      reject(createAbortReason(signal))
+    } finally {
+      release()
     }
-    const cleanup = () => signal.removeEventListener('abort', onAbort)
-    signal.addEventListener('abort', onAbort, { once: true })
-    promise.then(
-      (text) => {
-        cleanup()
-        resolve(text)
-      },
-      (error) => {
-        cleanup()
-        reject(error)
-      },
+  })()
+    .catch((error: unknown) => {
+      if (lyricsCache.get(url) === entry) lyricsCache.delete(url)
+      throw controller.signal.aborted ? controller.signal.reason : error
+    })
+    .finally(() => {
+      entry.settled = true
+      clearTimeout(timer)
+    })
+  const result = subscribeText(entry, signal, url)
+  releasePriority()
+  return result
+}
+
+function subscribeText(
+  entry: LyricsCacheEntry,
+  signal: AbortSignal | undefined,
+  url: string,
+): Promise<string> {
+  if (entry.ready) return entry.promise
+  const releasePriority = subscribeLyricsPriority(entry.controller.signal, signal)
+  entry.subscribers += 1
+  return new Promise((resolve, reject) => {
+    let finished = false
+    const finish = (error: unknown, text?: string) => {
+      if (finished) return
+      finished = true
+      signal?.removeEventListener('abort', abort)
+      releasePriority()
+      entry.subscribers -= 1
+      if (!entry.subscribers && !entry.settled && !entry.ready) {
+        if (lyricsCache.get(url) === entry) lyricsCache.delete(url)
+        entry.controller.abort()
+      }
+      if (error !== undefined) reject(error)
+      else resolve(text!)
+    }
+    const abort = () => finish(createAbortReason(signal!))
+    signal?.addEventListener('abort', abort, { once: true })
+    entry.promise.then(
+      (text) => finish(undefined, text),
+      (error: unknown) => finish(error),
     )
   })
 }
@@ -194,6 +199,7 @@ function attachTrackLyricsSubscriber(
   if (onProgress && entry.latestLines) onProgress(entry.latestLines)
   if (entry.ready) return entry.promise
 
+  const releasePriority = subscribeLyricsPriority(entry.controller.signal, signal)
   entry.subscribers += 1
   if (onProgress) entry.listeners.add(onProgress)
   let active = true
@@ -201,6 +207,7 @@ function attachTrackLyricsSubscriber(
   const release = () => {
     if (!active) return
     active = false
+    releasePriority()
     if (onProgress) entry.listeners.delete(onProgress)
     entry.subscribers = Math.max(0, entry.subscribers - 1)
     if (entry.subscribers === 0 && !entry.ready && !entry.settled) {
@@ -393,7 +400,9 @@ export function loadTrackLyrics(
   track: Track,
   signal?: AbortSignal,
   onProgress?: LyricsProgressListener,
+  priority: RequestPriority = 'foreground',
 ): Promise<LyricLine[]> {
+  if (priority === 'background' && signal) initializeLyricsPriority(signal, priority)
   const provider = trackLyricsProviders.get(trackLyricsKey(track))
   if (provider) {
     const existing = trackLyricsCache.get(provider.cacheKey)
@@ -404,6 +413,8 @@ export function loadTrackLyrics(
     if (signal?.aborted) return Promise.reject(createAbortReason(signal))
 
     const controller = new AbortController()
+    initializeLyricsPriority(controller.signal)
+    const releaseInitialPriority = subscribeLyricsPriority(controller.signal, signal)
     const entry: TrackLyricsCacheEntry = {
       cacheKey: provider.cacheKey,
       sourceToken: null,
@@ -443,7 +454,9 @@ export function loadTrackLyrics(
         throw error
       })
     trackLyricsCache.set(provider.cacheKey, entry)
-    return attachTrackLyricsSubscriber(entry, signal, onProgress)
+    const result = attachTrackLyricsSubscriber(entry, signal, onProgress)
+    releaseInitialPriority()
+    return result
   }
   return Promise.resolve([])
 }

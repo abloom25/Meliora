@@ -11,8 +11,10 @@ export const WORD_LYRICS_API_URL = 'https://api.amll.dev/v1/lyrics'
 export const WORD_LYRICS_POSITIVE_TTL_MS = 24 * 60 * 60 * 1000
 export const WORD_LYRICS_NEGATIVE_TTL_MS = 15 * 60 * 1000
 export const WORD_LYRICS_QUERY_TIMEOUT_MS = 8000
-export const WORD_LYRICS_MAX_CONCURRENT_REQUESTS = 4
-export const WORD_LYRICS_MAX_QUEUED_REQUESTS = 32
+// All lyric sources share this budget; speculative neighbors leave room for the current song.
+export const LYRICS_MAX_CONCURRENT_REQUESTS = 4
+export const LYRICS_MAX_BACKGROUND_REQUESTS = 2
+export const LYRICS_MAX_QUEUED_REQUESTS = 32
 
 export const NATIVE_LYRICS_API_URL = '/api/lyrics'
 export const NATIVE_LYRICS_POSITIVE_TTL_MS = 24 * 60 * 60 * 1000

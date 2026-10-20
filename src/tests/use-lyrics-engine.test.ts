@@ -2,6 +2,7 @@ import { mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { useLyricsEngine, type LyricsSceneInput } from '../composables/useLyricsEngine'
+import { VirtualLyricLayout } from '../core/lyrics/virtual-layout'
 
 // 视口 600px,锚点在 42% 处 = 252;行高 40、行距 30,行距 70 一行
 const VIEWPORT = 600
@@ -44,6 +45,7 @@ interface Harness {
   viewport: HTMLElement
   animated: { value: boolean }
   spring: { value: number }
+  debugEnabled: { value: boolean }
 }
 
 function createHarness(count: number, background: boolean[] = []): Harness {
@@ -51,6 +53,7 @@ function createHarness(count: number, background: boolean[] = []): Harness {
   let viewport: HTMLElement | undefined
   const animated = { value: true }
   const spring = { value: 1 }
+  const debugEnabled = { value: false }
   let engine!: ReturnType<typeof useLyricsEngine>
 
   const wrapper = mount(
@@ -62,6 +65,7 @@ function createHarness(count: number, background: boolean[] = []): Harness {
           isAnimated: () => animated.value,
           getSpringScale: () => spring.value,
           getGaps: () => ({ gap: GAP, harmonyGap: HARMONY_GAP }),
+          debugEnabled: () => debugEnabled.value,
         })
         return () =>
           h(
@@ -88,7 +92,7 @@ function createHarness(count: number, background: boolean[] = []): Harness {
   for (const [index, line] of lines.entries()) {
     defineReadonlyNumber(line, 'offsetHeight', background[index] ? HARMONY : LINE)
   }
-  return { wrapper, engine, lines, viewport: viewport!, animated, spring }
+  return { wrapper, engine, lines, viewport: viewport!, animated, spring, debugEnabled }
 }
 
 function sceneFor(count: number, focus: number, open: number[] = [], background: boolean[] = []) {
@@ -117,6 +121,39 @@ function expectNoCrossing(lines: HTMLElement[], minPitch: number) {
 }
 
 describe('useLyricsEngine', () => {
+  it('updates only changed offscreen harmony extents during long-lyric scenes and reverse seeks', () => {
+    const viewport = document.createElement('div')
+    defineReadonlyNumber(viewport, 'clientHeight', VIEWPORT)
+    const rows = Array.from({ length: 8 }, (_, index) => {
+      const row = document.createElement('button')
+      row.dataset.lyricIndex = String(index)
+      defineReadonlyNumber(row, 'offsetHeight', LINE)
+      viewport.append(row)
+      return row
+    })
+    const count = 20000
+    const background = Array.from({ length: count }, (_, index) => index === 1000 || index === 1500)
+    const engine = useLyricsEngine({
+      getViewport: () => viewport,
+      getLineElements: () => rows,
+      getLineCount: () => count,
+      getEstimatedHeight: () => LINE,
+      isAnimated: () => false,
+      getSpringScale: () => 1,
+      getGaps: () => ({ gap: GAP, harmonyGap: HARMONY_GAP }),
+    })
+    engine.setScene({ background, openHarmonies: [1000], focus: 0 }, 'none')
+    const writes = vi.spyOn(VirtualLyricLayout.prototype, 'set')
+    engine.setScene({ background, openHarmonies: [1500], focus: 1 }, 'none')
+    expect(writes.mock.calls.map(([index]) => index)).toEqual([1000, 1500])
+    writes.mockClear()
+    engine.setScene({ background, openHarmonies: [1500], focus: 2 }, 'none')
+    expect(writes).not.toHaveBeenCalled()
+    engine.setScene({ background, openHarmonies: [1000], focus: 0 }, 'none')
+    expect(writes.mock.calls.map(([index]) => index)).toEqual([1500, 1000])
+    engine.reset()
+  })
+
   beforeEach(() => {
     vi.useFakeTimers()
     rafCallbacks = []
@@ -138,6 +175,46 @@ describe('useLyricsEngine', () => {
     expect(lineY(lines[3]!)).toBeCloseTo(ANCHOR_Y + PITCH, 5)
     expect(lineY(lines[0]!)).toBeCloseTo(ANCHOR_Y - 2 * PITCH, 5)
     wrapper.unmount()
+  })
+
+  it('samples existing viewport and browsing state only when diagnostics are enabled', () => {
+    const { engine, lines, wrapper, debugEnabled } = createHarness(30)
+    try {
+      debugEnabled.value = true
+      engine.remeasure()
+      expect(engine.readDebugSnapshot()).toMatchObject({
+        mountedLineCount: 30,
+        stagedLineCount: 0,
+        visibleLineCount: 0,
+        anchorIndex: -1,
+      })
+      debugEnabled.value = false
+      engine.setScene(sceneFor(30, 0), 'none', { follow: true })
+      expect(engine.readDebugSnapshot()).toBeNull()
+      debugEnabled.value = true
+      const initial = engine.readDebugSnapshot()!
+      expect(initial.mountedLineCount).toBe(30)
+      expect(initial.stagedLineCount).toBe(onstage(lines).length)
+      expect(initial.visibleLineCount).toBe(6)
+      expect(initial.scrollMode).toBe('follow')
+      expect(initial.frameScheduled).toBe(false)
+      engine.browseBy(140, { snap: true })
+      expect(engine.readDebugSnapshot()).toMatchObject({ scrollMode: 'browse', anchorIndex: 0 })
+      engine.setScene(sceneFor(30, 10), 'spring', { follow: true })
+      expect(engine.readDebugSnapshot()?.frameScheduled).toBe(true)
+      engine.reset()
+      expect(engine.readDebugSnapshot()).toMatchObject({
+        mountedLineCount: 0,
+        visibleLineCount: 0,
+        anchorIndex: -1,
+        frameScheduled: false,
+        scrollMode: 'follow',
+      })
+      debugEnabled.value = false
+      expect(engine.readDebugSnapshot()).toBeNull()
+    } finally {
+      wrapper.unmount()
+    }
   })
 
   it('hides lines that are far outside the viewport and shows them again when they return', () => {
