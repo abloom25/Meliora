@@ -22,6 +22,7 @@ interface RateLimitResult {
 const MAX_ENTRIES = 10_000
 const attempts = new Map<string, RateLimitEntry>()
 const activeWork = new Map<string, number>()
+let nextPruneAt = 0
 
 function clientKey(trustedClientIp?: string): string {
   const normalized = trustedClientIp?.trim()
@@ -29,17 +30,11 @@ function clientKey(trustedClientIp?: string): string {
 }
 
 function pruneExpired(now: number): void {
+  if (now < nextPruneAt) return
+  nextPruneAt = now + 30_000
   for (const [key, entry] of attempts) {
     if (entry.resetAt <= now && entry.blockedUntil <= now) {
       attempts.delete(key)
-    }
-  }
-  // 防止伪造 IP/UA 组合撑爆 Map 导致 OOM:超容量时按 resetAt 升序淘汰最早到期的条目。
-  if (attempts.size > MAX_ENTRIES) {
-    const sorted = [...attempts.entries()].sort((a, b) => a[1].resetAt - b[1].resetAt)
-    const removeCount = attempts.size - MAX_ENTRIES
-    for (let i = 0; i < removeCount; i += 1) {
-      attempts.delete(sorted[i][0])
     }
   }
 }
@@ -53,6 +48,10 @@ export function consumeRateLimit(
 
   const id = `${key}:${clientKey(trustedClientIp)}`
   const existing = attempts.get(id)
+  // 达到容量时拒绝新身份，不能通过不断制造身份淘汰尚处于封禁期的条目。
+  if (!existing && attempts.size >= MAX_ENTRIES) {
+    return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil((nextPruneAt - now) / 1000)) }
+  }
 
   if (existing && existing.blockedUntil > now) {
     return {

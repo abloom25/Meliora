@@ -26,13 +26,21 @@ interface MusicApiTestResult {
 const TEST_TIMEOUT_MS = 8000
 const PLAYLIST_CONCURRENCY = 3
 
-async function fetchWithTimeout(url: string): Promise<Response> {
+async function fetchWithTimeout(url: string): Promise<{ response: Response; cleanup: () => void }> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS)
   try {
-    return await fetch(url, { signal: controller.signal, redirect: 'manual' })
-  } finally {
+    const response = await fetch(url, { signal: controller.signal, redirect: 'manual' })
+    return {
+      response,
+      cleanup: () => {
+        clearTimeout(timer)
+        controller.abort()
+      },
+    }
+  } catch (error) {
     clearTimeout(timer)
+    throw error
   }
 }
 
@@ -60,8 +68,11 @@ async function testPlaylistApi(
   config: ConfigPayload,
   playlist: ConfigPayload['playlists'][number],
 ): Promise<PlaylistApiCheck> {
+  let cleanup = () => {}
   try {
-    const response = await fetchWithTimeout(buildMetingPlaylistUrl(config.apiEndpoint, playlist))
+    const fetched = await fetchWithTimeout(buildMetingPlaylistUrl(config.apiEndpoint, playlist))
+    cleanup = fetched.cleanup
+    const response = fetched.response
     if (response.status >= 300 && response.status < 400) {
       return {
         server: playlist.server,
@@ -115,6 +126,8 @@ async function testPlaylistApi(
             ? '响应数据过大'
             : '请求失败',
     }
+  } finally {
+    cleanup()
   }
 }
 

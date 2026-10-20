@@ -1,7 +1,7 @@
 <script setup lang="ts">
   import { Loader2, Undo2 } from '@lucide/vue'
-  import { computed, onMounted, ref } from 'vue'
-  import { useRouter } from 'vue-router'
+  import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+  import { onBeforeRouteLeave, useRouter } from 'vue-router'
   import { useAdminAuth } from '../composables/useAdminAuth'
   import type { StagedUpload } from '../services/admin-api'
   import { useAdminApi } from '../composables/useAdminApi'
@@ -22,12 +22,13 @@
   import { useTimedMessage } from '../composables/useTimedMessage'
   import { useFileStagingState } from '../composables/useFileStagingState'
 
-  const { fetchConfig, saveConfig } = useAdminApi()
+  const { fetchConfigSnapshot, saveConfig } = useAdminApi()
 
   const router = useRouter()
   const { logout } = useAdminAuth()
   const config = ref<MusicConfig | null>(null)
   const savedConfig = ref<MusicConfig | null>(null)
+  const revision = ref('')
   const loading = ref(true)
   const saving = ref(false)
   const activeTab = ref('site')
@@ -37,6 +38,8 @@
   const showRevertConfirm = ref(false)
   const pendingExitAction = ref<'logout' | 'back' | null>(null)
   const stagedUploads = ref<StagedUpload[]>([])
+  let resolveRouteLeave: ((leave: boolean) => void) | null = null
+  let exitApproved = false
   const { activeFileStageCount } = useFileStagingState()
 
   const hasConfig = computed(() => config.value !== null)
@@ -60,7 +63,37 @@
     const nextPaths = collectManagedAssetPaths(config.value)
     return [...collectManagedAssetPaths(savedConfig.value)].filter((path) => !nextPaths.has(path))
   })
-  const hasPendingWork = computed(() => hasUnsavedChanges.value || activeFileStageCount.value > 0)
+  const hasPendingWork = computed(
+    () => hasUnsavedChanges.value || activeFileStageCount.value > 0 || saving.value,
+  )
+
+  function handleBeforeUnload(event: BeforeUnloadEvent) {
+    if (!hasPendingWork.value || exitApproved) return
+    event.preventDefault()
+    event.returnValue = ''
+  }
+
+  onBeforeRouteLeave(() => {
+    if (!hasPendingWork.value || exitApproved) return true
+    resolveRouteLeave?.(false)
+    pendingExitAction.value = null
+    showExitConfirm.value = true
+    return new Promise<boolean>((resolve) => {
+      resolveRouteLeave = resolve
+    })
+  })
+  onMounted(() => window.addEventListener('beforeunload', handleBeforeUnload))
+  onBeforeUnmount(() => {
+    window.removeEventListener('beforeunload', handleBeforeUnload)
+    resolveRouteLeave?.(false)
+  })
+
+  function cancelExit() {
+    showExitConfirm.value = false
+    pendingExitAction.value = null
+    resolveRouteLeave?.(false)
+    resolveRouteLeave = null
+  }
 
   function stableStringify(value: unknown): string {
     if (Array.isArray(value)) {
@@ -113,10 +146,11 @@
 
   onMounted(async () => {
     loading.value = true
-    const loaded = await fetchConfig()
+    const loaded = await fetchConfigSnapshot()
     if (loaded) {
-      config.value = loaded
-      savedConfig.value = JSON.parse(JSON.stringify(loaded))
+      config.value = loaded.config
+      savedConfig.value = JSON.parse(JSON.stringify(loaded.config))
+      revision.value = loaded.revision
     } else {
       showMessage('配置加载失败', 'error')
     }
@@ -161,12 +195,23 @@
     }
     showSaveConfirm.value = false
     saving.value = true
-    const result = await saveConfig(config.value, referencedStagedUploads.value)
+    const submittedConfig = JSON.parse(JSON.stringify(config.value)) as MusicConfig
+    const submittedUploads = referencedStagedUploads.value.map((upload) => ({ ...upload }))
+    const result = await saveConfig(submittedConfig, submittedUploads, revision.value)
     saving.value = false
     if (result.ok) {
-      savedConfig.value = JSON.parse(JSON.stringify(config.value))
-      stagedUploads.value = []
-      showMessage('保存成功，配置和文件已提交，正在等待网站更新', 'success')
+      revision.value = result.revision || revision.value
+      savedConfig.value = submittedConfig
+      stagedUploads.value = stagedUploads.value.filter(
+        (upload) =>
+          !submittedUploads.some(
+            (submitted) => submitted.path === upload.path && submitted.blobSha === upload.blobSha,
+          ),
+      )
+      showMessage(
+        result.warning || '保存成功，配置和文件已提交，正在等待网站更新',
+        result.warning ? 'error' : 'success',
+      )
     } else {
       showMessage(result.error || '保存失败', 'error')
     }
@@ -199,10 +244,19 @@
   function doBack() {
     showExitConfirm.value = false
     pendingExitAction.value = null
-    void router.push('/')
+    exitApproved = true
+    void router.push('/').finally(() => {
+      exitApproved = false
+    })
   }
 
   function confirmExit() {
+    if (resolveRouteLeave) {
+      showExitConfirm.value = false
+      resolveRouteLeave(true)
+      resolveRouteLeave = null
+      return
+    }
     if (pendingExitAction.value === 'logout') {
       void doLogout()
     } else if (pendingExitAction.value === 'back') {
@@ -345,7 +399,7 @@
       cancel-text="留下"
       confirm-text="放弃更改并离开"
       danger
-      @cancel="showExitConfirm = false"
+      @cancel="cancelExit"
       @confirm="confirmExit"
     >
       <p>当前有未保存的修改或仍在暂存的文件，离开后这些内容会丢失。确定要离开吗?</p>

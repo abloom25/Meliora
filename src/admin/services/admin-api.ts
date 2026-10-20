@@ -6,6 +6,7 @@ import { getPlaybackSupportError } from '../../../shared/playback-support'
 
 export interface SaveResult {
   ok: boolean
+  revision?: string
   error?: string
   warning?: string
   message?: string
@@ -173,9 +174,25 @@ export function createAdminApi(dependencies: AdminApiDependencies = {}) {
     return result.ok ? result.data : null
   }
 
+  async function fetchConfigSnapshot(): Promise<{ config: MusicConfig; revision: string } | null> {
+    try {
+      const response = await fetchWithCsrf('/api/config', { credentials: 'include' })
+      if (!response.ok) {
+        if (response.status === 401) dependencies.onUnauthenticated?.()
+        return null
+      }
+      const revision = response.headers.get('X-Config-Revision')
+      if (!revision) return null
+      return { config: (await response.json()) as MusicConfig, revision }
+    } catch {
+      return null
+    }
+  }
+
   async function saveConfig(
     config: MusicConfig,
     uploads: StagedUpload[] = [],
+    revision?: string,
   ): Promise<SaveResult> {
     // 与服务端开发模式一致(server/core/config-handler.ts):
     // dev 下允许 http://localhost 等私网地址,避免前端误拦
@@ -187,12 +204,12 @@ export function createAdminApi(dependencies: AdminApiDependencies = {}) {
     const playbackError = getPlaybackSupportError(validation.config!)
     if (playbackError) return { ok: false, error: playbackError }
 
-    const result = await requestAdminJson<{ sha?: string }>(
+    const result = await requestAdminJson<{ sha?: string; revision?: string }>(
       '/api/config',
       {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config, uploads }),
+        body: JSON.stringify({ config, uploads, revision }),
       },
       { fallbackError: '保存失败' },
     )
@@ -203,11 +220,12 @@ export function createAdminApi(dependencies: AdminApiDependencies = {}) {
       if (!synced.ok) {
         return {
           ok: true,
+          revision: result.data.revision,
           warning: `后端配置已保存,但本地播放器配置同步失败:${synced.error || '未知错误'}`,
         }
       }
     }
-    return { ok: true }
+    return { ok: true, ...(result.data.revision ? { revision: result.data.revision } : {}) }
   }
 
   async function syncLocalGeneratedConfig(
@@ -376,6 +394,7 @@ export function createAdminApi(dependencies: AdminApiDependencies = {}) {
   }
   return {
     fetchConfig,
+    fetchConfigSnapshot,
     saveConfig,
     uploadFile,
     changePassword,

@@ -243,6 +243,12 @@
     clearLyricPreviewHover()
   }
 
+  watch(
+    () => [store.currentTrackId, store.currentTrack?.audioUrl],
+    () => cancelProgressDrag(),
+    { flush: 'sync' },
+  )
+
   function seekByKeyboard(event: KeyboardEvent) {
     if (!Number.isFinite(duration.value) || duration.value <= 0) return
     const step = event.shiftKey ? 10 : 5

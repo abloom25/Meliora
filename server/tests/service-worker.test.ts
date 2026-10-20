@@ -1,0 +1,97 @@
+import { readFile } from 'node:fs/promises'
+import { runInNewContext } from 'node:vm'
+import { join } from 'node:path'
+import { describe, expect, it, vi } from 'vitest'
+
+async function dispatchFetch(options: {
+  cached?: Response
+  network: Promise<Response>
+  cacheWrite?: () => Promise<void>
+  navigate?: boolean
+  url?: string
+  accept?: string
+  range?: string
+  destination?: string
+}) {
+  let handler!: (event: unknown) => void
+  let response!: Promise<Response>
+  const work: Promise<unknown>[] = []
+  const put = vi.fn(options.cacheWrite ?? (() => Promise.resolve()))
+  void options.network.catch(() => {})
+  const source = await readFile(join(process.cwd(), 'public/sw.js'), 'utf8')
+  runInNewContext(source, {
+    self: {
+      location: { origin: 'https://example.com' },
+      addEventListener(name: string, callback: typeof handler) {
+        if (name === 'fetch') handler = callback
+      },
+    },
+    caches: { match: () => Promise.resolve(options.cached), open: () => Promise.resolve({ put }) },
+    fetch: () => options.network,
+    URL,
+    Response,
+  })
+  handler({
+    request: {
+      headers: new Headers({
+        ...(options.accept ? { accept: options.accept } : {}),
+        ...(options.range ? { range: options.range } : {}),
+      }),
+      method: 'GET',
+      url: options.url ?? 'https://example.com/assets/app.js',
+      destination: options.destination ?? 'script',
+      mode: options.navigate ? 'navigate' : 'cors',
+    },
+    respondWith(value: Promise<Response>) {
+      response = value
+    },
+    waitUntil(value: Promise<unknown>) {
+      work.push(value)
+    },
+  })
+  return { response, work, put }
+}
+
+describe('service worker background work', () => {
+  it('keeps Range requests outside the shell cache regardless of destination', async () => {
+    const event = await dispatchFetch({
+      url: 'https://example.com/recordings/song.mp3',
+      range: 'bytes=100-200',
+      destination: '',
+      network: Promise.resolve(new Response('audio', { status: 206 })),
+    })
+    expect(event.response).toBeUndefined()
+    expect(event.work).toHaveLength(0)
+    expect(event.put).not.toHaveBeenCalled()
+  })
+
+  it('keeps a cache-hit network refresh alive until cache writing completes', async () => {
+    let finish!: (response: Response) => void
+    const network = new Promise<Response>((resolve) => {
+      finish = resolve
+    })
+    const event = await dispatchFetch({ cached: new Response('cached'), network })
+    expect(await (await event.response).text()).toBe('cached')
+    expect(event.work.length).toBeGreaterThan(0)
+    finish(new Response('fresh'))
+    await Promise.all(event.work)
+    expect(event.put).toHaveBeenCalledTimes(1)
+  })
+
+  it('handles rejected cache writes without failing a successful network response', async () => {
+    const event = await dispatchFetch({
+      network: Promise.resolve(new Response('fresh')),
+      cacheWrite: () => Promise.reject(new Error('Quota exceeded')),
+    })
+    expect(await (await event.response).text()).toBe('fresh')
+    await expect(Promise.all(event.work)).resolves.toBeDefined()
+  })
+
+  it('returns an offline response when neither navigation network nor shell cache is available', async () => {
+    const event = await dispatchFetch({
+      network: Promise.reject(new Error('offline')),
+      navigate: true,
+    })
+    expect((await event.response).status).toBe(504)
+  })
+})

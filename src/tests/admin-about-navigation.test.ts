@@ -4,7 +4,7 @@ import DashboardView from '../admin/views/DashboardView.vue'
 import type { MusicConfig } from '../../shared/music-config'
 
 const adminApiMock = vi.hoisted(() => ({
-  fetchConfig: vi.fn(),
+  fetchConfigSnapshot: vi.fn(),
   saveConfig: vi.fn(),
   checkUpdate: vi.fn(),
   triggerUpdate: vi.fn(),
@@ -13,6 +13,7 @@ const adminApiMock = vi.hoisted(() => ({
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: vi.fn() }),
+  onBeforeRouteLeave: vi.fn(),
 }))
 
 vi.mock('../admin/composables/useAdminAuth', () => ({
@@ -47,7 +48,10 @@ describe('admin about navigation', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     document.body.innerHTML = ''
-    adminApiMock.fetchConfig.mockResolvedValue(validConfig())
+    adminApiMock.fetchConfigSnapshot.mockResolvedValue({
+      config: validConfig(),
+      revision: 'initial',
+    })
     adminApiMock.checkUpdate.mockResolvedValue({
       ok: false,
       error: '检查失败',

@@ -9,7 +9,7 @@ export interface UseTrackShareOptions {
   onShowNotice: (msg: string) => void
 }
 
-function copyText(value: string) {
+async function copyText(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(value)
   const textarea = document.createElement('textarea')
   textarea.value = value
@@ -17,9 +17,11 @@ function copyText(value: string) {
   textarea.style.opacity = '0'
   document.body.append(textarea)
   textarea.select()
-  document.execCommand('copy')
-  textarea.remove()
-  return Promise.resolve()
+  try {
+    if (!document.execCommand('copy')) throw new Error('Clipboard copy failed')
+  } finally {
+    textarea.remove()
+  }
 }
 
 export function useTrackShare(options: UseTrackShareOptions) {

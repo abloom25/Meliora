@@ -24,6 +24,34 @@ describe('admin-api', () => {
     vi.unstubAllGlobals()
   })
 
+  it('retains the read revision when saving and returns the new revision', async () => {
+    const config = validConfig()
+    const fetchMock = vi.fn().mockImplementation((url, init) => {
+      if (url === '/api/config' && !init?.method)
+        return Promise.resolve(
+          jsonResponse(config, { headers: { 'X-Config-Revision': 'read-revision' } }),
+        )
+      if (url === '/api/auth')
+        return Promise.resolve(
+          jsonResponse({ authenticated: true }, { headers: { 'X-CSRF-Token': 'csrf' } }),
+        )
+      return Promise.resolve(jsonResponse({ revision: 'saved-revision' }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { createAdminApi } = await import('../admin/services/admin-api')
+    const api = createAdminApi()
+    const snapshot = await api.fetchConfigSnapshot()
+    expect(snapshot).toEqual({ config, revision: 'read-revision' })
+    expect(await api.saveConfig(config, [], snapshot!.revision)).toMatchObject({
+      ok: true,
+      revision: 'saved-revision',
+    })
+    const saved = fetchMock.mock.calls.find(
+      ([url, init]) => url === '/api/config' && init?.method === 'PUT',
+    )
+    expect(JSON.parse(saved![1].body).revision).toBe('read-revision')
+  })
+
   it('rejects unsupported token configs locally before saving or testing', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
