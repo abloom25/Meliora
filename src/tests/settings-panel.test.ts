@@ -13,6 +13,7 @@ const modelActions = vi.hoisted(() => ({
   download: vi.fn(async () => true),
   cancel: vi.fn(),
   remove: vi.fn(async () => {}),
+  savedBytes: vi.fn(async () => ({ small: 0, standard: 0, runtime: 0 })),
 }))
 type ModelPhase = 'checking' | 'missing' | 'downloading' | 'ready' | 'error' | 'removing'
 const modelStatus = ref<
@@ -312,6 +313,9 @@ describe('SettingsPanel', () => {
     expect(modelActions.download).not.toHaveBeenCalled()
     await small!.trigger('click')
     expect(store.settings.beatAnalysisMode).toBe('basic')
+    expect(small!.attributes('aria-pressed')).toBe('true')
+    expect(basic!.attributes('aria-pressed')).toBe('false')
+    expect(analysis.get('.beat-analysis-heading .beat-analysis-size').text()).toBe('当前：基础模式')
     expect(analysis.get('.beat-model-card').text()).toContain('下载模型')
     expect(analysis.get('.beat-model-card').text()).toContain('首次下载另需 25.0 MB 运行组件')
     expect(modelActions.download).not.toHaveBeenCalled()

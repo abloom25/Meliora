@@ -4,6 +4,9 @@ import {
   selectBeatCacheEvictions,
   validPersistentCheckpoint,
   BEAT_RESULT_MAX_AGE_MS,
+  BEAT_RESULT_VERSION,
+  normalizeBeatCacheBudget,
+  groupBeatCacheEntries,
 } from '../core/analysis/beat-result-cache'
 import { createBeatCheckpoint } from '../core/analysis/beat-checkpoint'
 import { createBeatTimelineBuffer } from '../core/analysis/beat-timeline'
@@ -175,6 +178,72 @@ describe('persistent beat results', () => {
     expect(fixture.tables.get('results')?.size).toBe(0)
     expect(fixture.tables.get('metadata')?.size).toBe(0)
     expect(cache.status.value.cacheBytes).toBe(0)
+  })
+
+  it('prioritizes fixed songs but still expires incompatible and oversized results', () => {
+    const now = BEAT_RESULT_MAX_AGE_MS + 100
+    const meta = (key: string, bytes: number, pinned: boolean, updatedAt = now) => ({
+      key,
+      track: key,
+      bytes,
+      pinned,
+      updatedAt,
+      version: BEAT_RESULT_VERSION,
+    })
+    expect(
+      selectBeatCacheEvictions(
+        [
+          meta('recent', 5, false),
+          meta('pinned', 5, true, now - 1),
+          meta('expired-pinned', 1, true, 1),
+          { ...meta('old-version', 1, true), version: 'old' },
+        ],
+        now,
+        5,
+      ),
+    ).toEqual(expect.arrayContaining(['recent', 'expired-pinned', 'old-version']))
+    expect(
+      selectBeatCacheEvictions([meta('pinned', 50, true), meta('small', 4, false)], now, 5),
+    ).toEqual(['pinned'])
+    expect(normalizeBeatCacheBudget(NaN)).toBe(32 * 1024 * 1024)
+    expect(normalizeBeatCacheBudget(-1)).toBe(8 * 1024 * 1024)
+    expect(normalizeBeatCacheBudget(Infinity)).toBe(32 * 1024 * 1024)
+    expect(normalizeBeatCacheBudget(256 * 1024 * 1024)).toBe(128 * 1024 * 1024)
+  })
+
+  it('clears one song, prevents stale write resurrection and preserves other tracks', async () => {
+    indexedDbFixture()
+    const cache = createBeatResultStore()
+    await cache.store.set('one:small', 'one', checkpoint(), 0)
+    await cache.store.set('two:small', 'two', checkpoint(), 0)
+    const late = cache.store.set('one:standard', 'one', checkpoint(), 0)
+    await cache.removeTrack('one')
+    await late
+    await cache.store.set('one:late', 'one', checkpoint(), 0)
+    expect(await cache.store.get('one:small')).toBeNull()
+    expect(await cache.store.get('one:standard')).toBeNull()
+    expect(await cache.store.get('one:late')).toBeNull()
+    expect(await cache.store.get('two:small')).not.toBeNull()
+    expect(cache.status.value.cachedTracks).toBe(1)
+  })
+
+  it('retains pins when a checkpoint is updated and groups model variants by song', async () => {
+    indexedDbFixture()
+    const cache = createBeatResultStore()
+    await cache.store.set('one:small', 'one', checkpoint(), 0)
+    await cache.store.set('one:standard', 'one', checkpoint(), 0)
+    await cache.pinTrack('one', true)
+    await cache.store.set('one:small', 'one', checkpoint(), 0)
+    expect(cache.status.value.entries.every((entry) => entry.pinned)).toBe(true)
+    expect(groupBeatCacheEntries(cache.status.value.entries)).toMatchObject([
+      { track: 'one', variants: 2, pinned: true },
+    ])
+    await cache.store.set('one:basic', 'one', checkpoint(), 0)
+    expect(cache.status.value.entries.every((entry) => entry.pinned)).toBe(true)
+    await cache.pinTrack('one', false)
+    expect(cache.status.value.entries.every((entry) => !entry.pinned)).toBe(true)
+    await cache.setMaxBytes(8 * 1024 * 1024)
+    expect(cache.status.value.maxBytes).toBe(8 * 1024 * 1024)
   })
 
   it('does not repopulate after clear while a previous write is waiting for storage', async () => {

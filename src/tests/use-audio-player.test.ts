@@ -6,6 +6,7 @@ import { useAudioPlayer, type UseAudioPlayerOptions } from '../composables/useAu
 import { usePlayerStore } from '../stores/player'
 import { shouldUseIOSBackgroundSafeAudio } from '../platform/web/browser'
 import type { Track } from '../core/types'
+import { PLAYBACK_SESSION_KEY } from '../core/playback/session'
 import { useBeatAnalyser } from '../platform/web/useBeatAnalyser'
 
 const startBeatAnalysisMock = vi.fn()
@@ -835,11 +836,16 @@ describe('useAudioPlayer', () => {
       await Promise.resolve()
       expect(store.currentTrackId).toBe('3')
 
-      // 超过 TTL（5 分钟）后允许重试：上一首可以停在 track2 并成功播放
+      // 上一首按真实历史返回 track1，失败的 track2 不应混入播放历史。
       vi.setSystemTime(Date.now() + 5 * 60 * 1000 + 1000)
       await player.play()
       await Promise.resolve()
       await player.previous()
+      expect(store.currentTrackId).toBe('1')
+      // 前进先恢复历史中的 track3，再进入下一轮时 track2 可以正常重试。
+      await player.next(true)
+      await player.next(true)
+      await player.next(true)
       await Promise.resolve()
       await Promise.resolve()
       expect(store.currentTrackId).toBe('2')
@@ -965,6 +971,155 @@ describe('useAudioPlayer', () => {
       expect(player.preloadMessage.value).toContain('音频')
     } finally {
       HTMLAudioElement.prototype.play = originalPlay
+    }
+  })
+  function saveResume(position = 42): void {
+    localStorage.setItem(
+      PLAYBACK_SESSION_KEY,
+      JSON.stringify({
+        version: 1,
+        queueIds: ['1', '2', '3'],
+        customQueue: true,
+        currentTrackId: '1',
+        audioUrl: '/1.mp3',
+        position,
+        journey: { history: ['1'], historyIndex: 0, remaining: [], played: ['1'], priority: [] },
+      }),
+    )
+  }
+
+  it.each([false, true])(
+    'seeking ends the outgoing fade while preserving incoming startup (pending: %s)',
+    async (pendingStart) => {
+      vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+      vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(1)
+      vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+      const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+      vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined)
+      vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined)
+      const { player, wrapper, store } = mountPlayer()
+      try {
+        store.settings.preloadNextTrack = false
+        store.settings.smoothTrackChange = true
+        await player.play()
+        const getAudio = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0].getActiveAudio
+        const outgoing = getAudio()
+        const oldPause = vi.spyOn(outgoing, 'pause')
+        let finishStart: (() => void) | undefined
+        if (pendingStart)
+          play.mockImplementationOnce(
+            () =>
+              new Promise<void>((resolve) => {
+                finishStart = resolve
+              }),
+          )
+        await player.selectAndPlay(tracks[1]!, tracks)
+        await Promise.resolve()
+        const incoming = getAudio()
+        Object.defineProperty(incoming, 'duration', { configurable: true, value: 120 })
+        expect(incoming).not.toBe(outgoing)
+        expect(incoming.volume).toBe(0)
+        oldPause.mockClear()
+        const starts = startBeatAnalysisMock.mock.calls.length
+        player.seek(45)
+        expect(incoming.currentTime).toBe(45)
+        expect(incoming.volume).toBeCloseTo(store.settings.volume)
+        expect(oldPause).toHaveBeenCalledOnce()
+        expect(outgoing.volume).toBe(0)
+        if (pendingStart) {
+          finishStart!()
+          await Promise.resolve()
+          await Promise.resolve()
+          expect(startBeatAnalysisMock.mock.calls.length).toBeGreaterThan(starts)
+        }
+        expect(incoming.volume).toBeCloseTo(store.settings.volume)
+        expect(store.isPlaying).toBe(true)
+        expect(store.currentTime).toBe(45)
+      } finally {
+        wrapper.unmount()
+      }
+    },
+  )
+
+  it('restores the position after metadata without autoplay and keeps the prompt until play succeeds', async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    saveResume()
+    const { wrapper, player, store } = mountPlayer()
+    try {
+      const audio = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0].getActiveAudio()
+      expect(play).not.toHaveBeenCalled()
+      expect(store.isPlaying).toBe(false)
+      expect(store.currentTime).toBe(42)
+      audio.dispatchEvent(new Event('timeupdate'))
+      expect(store.currentTime).toBe(42)
+      Object.defineProperty(audio, 'duration', { configurable: true, value: 180 })
+      audio.dispatchEvent(new Event('loadedmetadata'))
+      expect(audio.currentTime).toBe(42)
+      expect(store.hasResumePosition).toBe(true)
+      window.dispatchEvent(new Event('pagehide'))
+      expect(JSON.parse(localStorage.getItem(PLAYBACK_SESSION_KEY)!).position).toBe(42)
+      await player.play()
+      expect(store.hasResumePosition).toBe(false)
+      expect(audio.currentTime).toBe(42)
+      expect(store.isPlaying).toBe(true)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('cancels a delayed resume seek when the current source is replaced', () => {
+    saveResume()
+    const { wrapper, store } = mountPlayer()
+    try {
+      const audio = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0].getActiveAudio()
+      store.setTracks([{ ...tracks[0]!, audioUrl: '/replacement.mp3' }, tracks[1]!, tracks[2]!])
+      Object.defineProperty(audio, 'duration', { configurable: true, value: 180 })
+      audio.dispatchEvent(new Event('loadedmetadata'))
+      expect(audio.currentTime).toBe(0)
+      expect(store.hasResumePosition).toBe(false)
+      expect(store.isPlaying).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('cancels a delayed resume seek after selecting another queued track and keeps queue edits', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    saveResume()
+    const { wrapper, player, store } = mountPlayer()
+    try {
+      const analyser = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0]
+      const previous = analyser.getActiveAudio()
+      store.removeQueuedTrack('3')
+      await player.selectQueuedAndPlay(tracks[1]!)
+      Object.defineProperty(previous, 'duration', { configurable: true, value: 180 })
+      previous.dispatchEvent(new Event('loadedmetadata'))
+      expect(store.currentTrackId).toBe('2')
+      expect(store.currentTime).toBe(0)
+      expect(analyser.getActiveAudio().currentTime).toBe(0)
+      expect(store.queue.map((track) => track.id)).toEqual(['1', '2'])
+      expect(store.hasResumePosition).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('lets an explicit queue selection interrupt an automatic switch awaiting preload', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    const { wrapper, player, store } = mountPlayer()
+    try {
+      store.settings.preloadNextTrack = false
+      store.settings.smoothTrackChange = false
+      store.selectTrack(tracks[0]!, tracks)
+      await player.play()
+      const automatic = player.next(false)
+      await player.selectQueuedAndPlay(tracks[2]!)
+      await automatic
+      expect(store.currentTrackId).toBe('3')
+      expect(store.isPlaying).toBe(true)
+      expect(store.queue.map((track) => track.id)).toEqual(['1', '2', '3'])
+    } finally {
+      wrapper.unmount()
     }
   })
 })

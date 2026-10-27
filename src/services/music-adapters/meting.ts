@@ -66,8 +66,8 @@ export const metingMusicAdapter: MusicProviderAdapter<MetingPlaylistConfig> = {
     const sourceKey = `${playlist.server}:${playlist.playlistId}`
     return payload
       .filter(isMetingTrack)
-      .map((track, index) => {
-        const mapped = mapMetingTrack(track, sourceKey, index)
+      .map((track) => {
+        const mapped = mapMetingTrack(track, sourceKey)
         if (mapped) {
           mapped.audioUrl = resolveMusicRequestUrl(mapped.audioUrl)
           if (mapped.cover) mapped.cover = resolveMusicRequestUrl(mapped.cover)
@@ -88,6 +88,7 @@ export const metingMusicAdapter: MusicProviderAdapter<MetingPlaylistConfig> = {
           }
           registerTrackLyrics(mapped, {
             cacheKey: `meting:${JSON.stringify([lyricsUrl, wordLyricsCacheKey(wordQuery)])}`,
+            combined: { lyricsUrl, wordQuery },
             priority: 10,
             isCached: () =>
               (!lyricsUrl || hasCachedLyrics(lyricsUrl)) &&

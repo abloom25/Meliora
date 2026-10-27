@@ -1499,22 +1499,32 @@
   }
   .library-drawer :deep(.track-panel) {
     padding: 10px 16px 6px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
   }
   .library-drawer :deep(.track-header) {
-    padding-block: 0 6px;
+    padding-block: 0 2px;
     flex: none;
     gap: 12px;
   }
-  .library-drawer :deep(.track-header > div) {
+  .library-drawer :deep(.track-heading) {
     display: flex;
     align-items: baseline;
     gap: 10px;
   }
-  .library-drawer :deep(.track-header h2) {
+  .library-drawer :deep(.library-title) {
     font-size: 18px;
   }
   .library-drawer :deep(.list-toolbar) {
     flex: none;
+  }
+  .library-drawer :deep(.library-navigation) {
+    min-height: 44px;
+    margin-bottom: 4px;
+  }
+  .library-drawer :deep(.track-list) {
+    min-height: 66px;
   }
   .library-drawer :deep(.search-box input) {
     height: 44px;
@@ -1552,32 +1562,41 @@
     z-index: 58;
   }
 
-  // 极矮窗口中仍允许关闭已打开的曲库面板,搜索与关闭按钮共用一行。
+  // 极矮窗口保留关闭、分类与搜索；高度不足时整体可滚动，列表仍至少保留一行。
   &.short-landscape {
     .library-drawer :deep(.track-panel) {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 44px;
-      grid-template-rows: auto minmax(0, 1fr);
-      column-gap: 8px;
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto auto minmax(66px, 1fr);
       padding: 6px 12px 2px;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
     }
     .library-drawer :deep(.track-header) {
-      grid-area: 1 / 2;
+      grid-area: 1 / 1;
       padding: 0;
     }
-    .library-drawer :deep(.track-header > div) {
+    .library-drawer :deep(.track-heading p) {
       display: none;
     }
+    .library-drawer :deep(.library-title) {
+      font-size: 16px;
+    }
     .library-drawer :deep(.list-toolbar) {
-      grid-area: 1 / 1;
+      grid-area: 2 / 1;
+      position: static;
       margin: 0;
       padding: 0;
+    }
+    .library-drawer :deep(.library-navigation) {
+      margin-bottom: 2px;
     }
     .library-drawer :deep(.search-row) {
       margin: 0;
     }
     .library-drawer :deep(.track-list) {
-      grid-area: 2 / 1 / 3 / -1;
+      grid-area: 3 / 1;
       padding-block: 0;
       mask-image: none;
     }

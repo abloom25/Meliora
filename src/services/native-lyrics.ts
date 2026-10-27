@@ -48,6 +48,7 @@ interface NativeLookup {
 
 const cachedLyrics = new LruCache<string, CachedNativeLyrics>(LYRICS_CACHE_CAPACITY)
 const pendingLyrics = new Map<string, PendingNativeLyrics>()
+const bypassSavedLyrics = new Set<string>()
 let cacheStore: LyricsCacheStore = webLyricsCacheStore
 
 export function toNativeLyricsQuery(query: {
@@ -80,6 +81,23 @@ export function resetNativeLyricsCache(): void {
   for (const entry of pendingLyrics.values()) entry.controller.abort()
   pendingLyrics.clear()
   cachedLyrics.clear()
+}
+
+export async function invalidateNativeLyrics(query: NativeLyricsQuery): Promise<void> {
+  const key = nativeLyricsCacheKey(query)
+  bypassSavedLyrics.add(key)
+  pendingLyrics.get(key)?.controller.abort()
+  pendingLyrics.delete(key)
+  cachedLyrics.delete(key)
+  const store = cacheStore
+  try {
+    await store.set(
+      { cacheVersion: 1, key, text: null, updatedAt: 0, expiresAt: 1 },
+      store.generation,
+    )
+  } catch {
+    // 持久层不可用时仍允许本次网络刷新。
+  }
 }
 
 function isNativeData(value: unknown, source: NativeLyricsSource): value is NativeLyricsData {
@@ -206,8 +224,9 @@ async function loadSavedOrRequest(
   signal: AbortSignal,
 ): Promise<LyricLine[] | null> {
   const store = cacheStore
-  const saved = await readSaved(key, store, signal)
-  if (signal.aborted) return null
+  const generation = store.generation
+  const saved = bypassSavedLyrics.has(key) ? null : await readSaved(key, store, signal)
+  if (signal.aborted || store.generation !== generation) return null
   if (isLyricsCacheRecord(saved) && saved.key === key && saved.expiresAt > Date.now()) {
     try {
       const data: unknown = saved.text === null ? null : JSON.parse(saved.text)
@@ -221,22 +240,27 @@ async function loadSavedOrRequest(
     }
   }
   const result = await requestNative(query, signal)
-  if (signal.aborted) return null
+  if (signal.aborted || store.generation !== generation) return null
   if (result.definitive) {
+    bypassSavedLyrics.delete(key)
     const updatedAt = Date.now()
     const expiresAt =
       updatedAt + (result.lines ? NATIVE_LYRICS_POSITIVE_TTL_MS : NATIVE_LYRICS_NEGATIVE_TTL_MS)
     cachedLyrics.set(key, { lines: result.lines, expiresAt })
     void Promise.resolve()
-      .then(() =>
-        store.set({
-          cacheVersion: 1,
-          key,
-          text: result.text,
-          updatedAt,
-          expiresAt,
-        }),
-      )
+      .then(() => {
+        if (!signal.aborted)
+          return store.set(
+            {
+              cacheVersion: 1,
+              key,
+              text: result.text,
+              updatedAt,
+              expiresAt,
+            },
+            generation,
+          )
+      })
       .catch(() => undefined)
   }
   return result.lines

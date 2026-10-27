@@ -2,10 +2,20 @@ import { httpFetch } from './http'
 import { toRaw } from 'vue'
 import { LruCache } from '../core/util/lru-cache'
 import type { LyricLine, LyricProviderSource, Track } from '../core/types'
-import { mergeLyricAnnotations } from '../core/lyrics'
+import { mergeLyricAnnotations, shiftLyricTimings } from '../core/lyrics'
 import { parseAnyLyrics } from '../core/lyrics'
-import { getWordLyricsCacheToken, loadWordLyrics, type WordLyricsQuery } from './lyrics-db'
-import { getNativeLyricsCacheToken, loadNativeLyrics, toNativeLyricsQuery } from './native-lyrics'
+import {
+  getWordLyricsCacheToken,
+  invalidateWordLyrics,
+  loadWordLyrics,
+  type WordLyricsQuery,
+} from './lyrics-db'
+import {
+  getNativeLyricsCacheToken,
+  invalidateNativeLyrics,
+  loadNativeLyrics,
+  toNativeLyricsQuery,
+} from './native-lyrics'
 import {
   acquireLyricsRequest,
   initializeLyricsPriority,
@@ -39,6 +49,25 @@ const lyricsCache = new LruCache<string, LyricsCacheEntry>(64)
 const trackLyricsCache = new LruCache<string, TrackLyricsCacheEntry>(64)
 const trackLyricsProviders = new WeakMap<Track, TrackLyricsProvider>()
 const lyricsSources = new WeakMap<LyricLine[], LyricProviderSource>()
+const pendingControllers = new Set<AbortController>()
+const revalidateLyricsUrls = new Set<string>()
+
+export type LyricsSourceSelection = 'auto' | LyricProviderSource
+
+export function offsetLyrics(lines: LyricLine[], milliseconds: number): LyricLine[] {
+  const shifted = shiftLyricTimings(lines, milliseconds / 1000)
+  const source = getLyricsSource(lines)
+  if (source) recordLyricsSource(shifted, source)
+  return shifted
+}
+
+/** 清除内存和在飞请求，不解除曲目注册，也不影响已显示的歌词。 */
+export function resetTrackLyricsCache(): void {
+  for (const controller of pendingControllers) controller.abort()
+  pendingControllers.clear()
+  lyricsCache.clear()
+  trackLyricsCache.clear()
+}
 
 /** 只读实际加载结果的来源,未知提供者与空歌词都不猜测。 */
 export function getLyricsSource(lines: LyricLine[]): LyricProviderSource | null {
@@ -73,9 +102,14 @@ export function isLyricsTimeoutError(error: unknown): boolean {
 export type LyricsTextFetcher = (url: string, signal: AbortSignal) => Promise<string>
 
 const fetchLyricsTextViaHttp: LyricsTextFetcher = async (url, signal) => {
-  const response = await httpFetch(url, { cache: 'force-cache', signal })
+  const response = await httpFetch(url, {
+    cache: revalidateLyricsUrls.has(url) ? 'reload' : 'force-cache',
+    signal,
+  })
   if (!response.ok) throw new Error('Lyrics request failed')
-  return response.text()
+  const text = await response.text()
+  revalidateLyricsUrls.delete(url)
+  return text
 }
 
 let fetchLyricsText: LyricsTextFetcher = fetchLyricsTextViaHttp
@@ -87,6 +121,9 @@ export function setLyricsTextFetcher(fetcher: LyricsTextFetcher | null): void {
 
 export interface TrackLyricsProvider {
   cacheKey: string
+  /** 组合源描述只用于用户展开后的选择/刷新，不增加默认加载请求。 */
+  combined?: CombinedLyricsOptions
+  lyricsUrl?: string
   /** 来源固定的提供者可声明此字段;组合提供者按实际胜出的分支记录来源。 */
   source?: LyricProviderSource
   priority?: number
@@ -107,6 +144,7 @@ export function loadLyricsText(url: string, signal?: AbortSignal): Promise<strin
   const existing = lyricsCache.get(url)
   if (existing && !existing.controller.signal.aborted) return subscribeText(existing, signal, url)
   const controller = new AbortController()
+  pendingControllers.add(controller)
   initializeLyricsPriority(controller.signal)
   const entry: LyricsCacheEntry = {
     ready: false,
@@ -146,6 +184,7 @@ export function loadLyricsText(url: string, signal?: AbortSignal): Promise<strin
       throw controller.signal.aborted ? controller.signal.reason : error
     })
     .finally(() => {
+      pendingControllers.delete(controller)
       entry.settled = true
       clearTimeout(timer)
     })
@@ -368,6 +407,119 @@ export function registerTrackLyrics(track: Track, provider: TrackLyricsProvider)
   trackLyricsProviders.set(trackLyricsKey(track), provider)
 }
 
+export interface TrackLyricsChoice {
+  source: LyricProviderSource
+  lines: LyricLine[]
+}
+
+function providerSources(provider: TrackLyricsProvider): LyricProviderSource[] {
+  if (!provider.combined) return provider.source ? [provider.source] : []
+  const { wordQuery, lyricsUrl } = provider.combined
+  const native = wordQuery ? toNativeLyricsQuery(wordQuery) : null
+  return [
+    ...(wordQuery ? ['amll' as const] : []),
+    ...(native ? [native.source] : []),
+    ...(lyricsUrl ? ['meting' as const] : []),
+  ]
+}
+
+function selectedProvider(
+  provider: TrackLyricsProvider,
+  source: LyricsSourceSelection,
+): TrackLyricsProvider {
+  if (source === 'auto' || !provider.combined || !providerSources(provider).includes(source))
+    return provider
+  const { wordQuery, lyricsUrl } = provider.combined
+  const native = wordQuery ? toNativeLyricsQuery(wordQuery) : null
+  const cacheToken =
+    source === 'amll' && wordQuery
+      ? () => getWordLyricsCacheToken(wordQuery)
+      : native && source === native.source
+        ? () => getNativeLyricsCacheToken(native)
+        : undefined
+  return {
+    cacheKey: `${provider.cacheKey}:source:${source}`,
+    source,
+    cacheToken,
+    cacheable: cacheToken ? () => cacheToken() !== null : undefined,
+    load: async (signal) => {
+      const automatic = trackLyricsCache.peek(provider.cacheKey)
+      if (
+        automatic?.ready &&
+        automatic.latestLines &&
+        isTrackLyricsCacheCurrent(provider, automatic) &&
+        getLyricsSource(automatic.latestLines) === source
+      )
+        return automatic.latestLines
+      let lines =
+        source === 'amll' && wordQuery
+          ? ((await loadWordLyrics(wordQuery, signal)) ?? [])
+          : native && source === native.source
+            ? ((await loadNativeLyrics(native, signal)) ?? [])
+            : lyricsUrl
+              ? await loadLrcLyrics(lyricsUrl, signal)
+              : []
+      // 用户锁定主时间轴仍保留已缓存的译文；没有缓存时不额外请求其他来源。
+      if (lines.length && source === 'amll' && native && getNativeLyricsCacheToken(native)) {
+        const donor = await loadNativeLyrics(native, signal)
+        if (donor) lines = mergeLyricAnnotations(lines, donor)
+      }
+      if (lines.length && source !== 'meting' && lyricsUrl && hasCachedLyrics(lyricsUrl))
+        lines = mergeLyricAnnotations(lines, await loadLrcLyrics(lyricsUrl, signal))
+      return lines
+    },
+  }
+}
+
+/** 仅在用户展开来源列表时调用；底层复用自动加载的缓存与在飞请求。 */
+export async function loadTrackLyricsChoices(
+  track: Track,
+  signal?: AbortSignal,
+): Promise<TrackLyricsChoice[]> {
+  const provider = trackLyricsProviders.get(trackLyricsKey(track))
+  if (!provider) return []
+  const choices = await Promise.all(
+    providerSources(provider).map(async (source) => {
+      try {
+        const lines = await loadTrackLyrics(track, signal, undefined, 'foreground', source)
+        return lines.length ? { source, lines } : null
+      } catch {
+        return null
+      }
+    }),
+  )
+  if (signal?.aborted) throw createAbortReason(signal)
+  return choices.filter((choice): choice is TrackLyricsChoice => choice !== null)
+}
+
+/** 删除本曲的来源缓存，后续加载重新验证网络；不清除其他曲目或用户选择。 */
+export async function invalidateTrackLyrics(track: Track): Promise<void> {
+  const provider = trackLyricsProviders.get(trackLyricsKey(track))
+  if (!provider) return
+  const keys = [
+    provider.cacheKey,
+    ...providerSources(provider).map((source) => `${provider.cacheKey}:source:${source}`),
+  ]
+  for (const key of keys) {
+    trackLyricsCache.get(key)?.controller.abort()
+    trackLyricsCache.delete(key)
+  }
+  const url = provider.lyricsUrl ?? provider.combined?.lyricsUrl
+  if (url) {
+    lyricsCache.get(url)?.controller.abort()
+    lyricsCache.delete(url)
+    revalidateLyricsUrls.add(url)
+  }
+  const query = provider.combined?.wordQuery
+  if (query) {
+    const native = toNativeLyricsQuery(query)
+    await Promise.all([
+      invalidateWordLyrics(query),
+      ...(native ? [invalidateNativeLyrics(native)] : []),
+    ])
+  }
+}
+
 export function transferTrackLyricsProvider(source: Track, target: Track) {
   const targetKey = trackLyricsKey(target)
   const provider = trackLyricsProviders.get(trackLyricsKey(source))
@@ -401,9 +553,11 @@ export function loadTrackLyrics(
   signal?: AbortSignal,
   onProgress?: LyricsProgressListener,
   priority: RequestPriority = 'foreground',
+  source: LyricsSourceSelection = 'auto',
 ): Promise<LyricLine[]> {
   if (priority === 'background' && signal) initializeLyricsPriority(signal, priority)
-  const provider = trackLyricsProviders.get(trackLyricsKey(track))
+  const registered = trackLyricsProviders.get(trackLyricsKey(track))
+  const provider = registered ? selectedProvider(registered, source) : undefined
   if (provider) {
     const existing = trackLyricsCache.get(provider.cacheKey)
     if (existing && (!existing.ready || isTrackLyricsCacheCurrent(provider, existing))) {
@@ -413,6 +567,7 @@ export function loadTrackLyrics(
     if (signal?.aborted) return Promise.reject(createAbortReason(signal))
 
     const controller = new AbortController()
+    pendingControllers.add(controller)
     initializeLyricsPriority(controller.signal)
     const releaseInitialPriority = subscribeLyricsPriority(controller.signal, signal)
     const entry: TrackLyricsCacheEntry = {
@@ -435,6 +590,7 @@ export function loadTrackLyrics(
     entry.promise = provider
       .load(controller.signal, publish)
       .then((lines) => {
+        controller.signal.throwIfAborted()
         entry.ready = true
         entry.settled = true
         entry.sourceToken = provider.cacheToken?.() ?? null
@@ -453,6 +609,7 @@ export function loadTrackLyrics(
           trackLyricsCache.delete(provider.cacheKey)
         throw error
       })
+      .finally(() => pendingControllers.delete(controller))
     trackLyricsCache.set(provider.cacheKey, entry)
     const result = attachTrackLyricsSubscriber(entry, signal, onProgress)
     releaseInitialPriority()

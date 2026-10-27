@@ -4,6 +4,7 @@ import { defineComponent, h, ref, type Ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import {
   preloadCover,
+  setCoverDecoder,
   usePreloadPool,
   type PreloadPoolOptions,
 } from '../composables/usePreloadPool'
@@ -25,6 +26,9 @@ const defaultSettings: PlayerSettings = {
   playMode: 'loop',
   smoothTrackChange: true,
   preloadNextTrack: true,
+  adaptivePerformance: true,
+  tabCoordination: true,
+  syncTabPlayback: false,
   dynamicBackground: true,
   beatFlash: true,
   beatAnalysisMode: 'basic',
@@ -37,6 +41,8 @@ const defaultSettings: PlayerSettings = {
   lyricAnimation: true,
   lyricSpring: 1,
   lyricTranslation: true,
+  lyricRomanization: true,
+  lyricWindowScale: null,
   progressLyricPreview: false,
   skipOnError: true,
   autoHideChrome: true,
@@ -57,6 +63,10 @@ class MockImage {
 
   decode() {
     return MockImage.decodeHandlers.get(this.src)?.() ?? Promise.resolve()
+  }
+
+  removeAttribute(name: string) {
+    if (name === 'src') this.src = ''
   }
 }
 
@@ -130,6 +140,26 @@ function failNextSlot(
 }
 
 describe('usePreloadPool', () => {
+  it('keeps a neighbor in the queue after a network preload failure and avoids immediate retry storms', async () => {
+    vi.useFakeTimers()
+    const { pool, backend, store, wrapper } = mountPool(ref({ ...defaultSettings }))
+    try {
+      store.selectTrack(tracks[0]!, tracks)
+      const ready = pool.loadSlot('next', tracks[1]!)
+      const audio = backend.elementOf(pool.preloadSlots.next.channel)
+      Object.defineProperty(audio, 'error', { configurable: true, value: { code: 2 } })
+      audio.dispatchEvent(new Event('error'))
+      await expect(ready).resolves.toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(pool.predictNextTrack(false)?.id).toBe('2')
+      expect(pool.preloadSlots.next.track).toBeNull()
+      window.dispatchEvent(new Event('online'))
+      await vi.advanceTimersByTimeAsync(1)
+      expect(pool.preloadSlots.next.track?.id).toBe('2')
+    } finally {
+      wrapper.unmount()
+    }
+  })
   beforeEach(() => {
     setActivePinia(createPinia())
     MockImage.instances = []
@@ -141,6 +171,8 @@ describe('usePreloadPool', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.useRealTimers()
+    setCoverDecoder(null)
   })
 
   it('cancels obsolete neighbor lyrics after audio readiness without cancelling a foreground subscriber', async () => {
@@ -291,6 +323,33 @@ describe('usePreloadPool', () => {
       { direction: 'previous', source: '/1.mp3', title: 'One' },
     ])
     expect(pool.preloadSlots.next.track).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('does not let an old loaded target override an edited queue or play-next request', () => {
+    const { pool, store, wrapper } = mountPool(ref({ ...defaultSettings }))
+    store.selectTrack(tracks[0]!, tracks)
+    pool.preloadAdjacentTracks()
+    expect(pool.preloadSlots.next.track?.id).toBe('2')
+    store.moveQueuedTrack('3', '2')
+    expect(pool.predictNextTrack(true)?.id).toBe('3')
+    store.enqueueTrack(tracks[3]!, true)
+    expect(pool.predictNextTrack(true)?.id).toBe('4')
+    expect(store.nextTrack(true)?.id).toBe('4')
+    wrapper.unmount()
+  })
+
+  it('retains failed-track skips across queue edits but retries a replaced audio source', () => {
+    const { pool, store, wrapper } = mountPool(ref({ ...defaultSettings }))
+    store.selectTrack(tracks[0]!, tracks)
+    pool.markTrackFailed('2')
+    store.moveQueuedTrack('4', '3')
+    expect(pool.isTrackFailed('2')).toBe(true)
+    store.setTracks(
+      tracks.map((track) => (track.id === '2' ? { ...track, audioUrl: '/two-new.mp3' } : track)),
+    )
+    expect(pool.isTrackFailed('2')).toBe(false)
+    expect(pool.predictNextTrack(true)?.id).toBe('2')
     wrapper.unmount()
   })
 
@@ -529,11 +588,43 @@ describe('usePreloadPool', () => {
   it('keeps the successful cover preload cache bounded by evicting old entries', async () => {
     const coverUrls = Array.from({ length: 70 }, (_, index) => `/covers/bounded-${index}.jpg`)
 
-    await Promise.all(coverUrls.map((url) => preloadCover(url)))
+    for (const url of coverUrls) await preloadCover(url)
     await preloadCover(coverUrls[0]!)
 
     expect(MockImage.instances).toHaveLength(71)
     expect(MockImage.instances.at(-1)?.src).toBe(coverUrls[0])
+  })
+
+  it('bounds hanging cover requests, aborts them on timeout and allows another attempt', async () => {
+    vi.useFakeTimers()
+    const urls = Array.from({ length: 5 }, (_, index) => `/covers/stalled-${index}.jpg`)
+    for (const url of urls) MockImage.decodeHandlers.set(url, () => new Promise(() => {}))
+    const pending = urls.map((url) => preloadCover(url))
+    expect(MockImage.instances).toHaveLength(4)
+    expect(preloadCover(urls[0])).toBe(pending[0])
+    await vi.advanceTimersByTimeAsync(9000)
+    await Promise.all(pending)
+    expect(MockImage.instances.every((image) => image.src === '')).toBe(true)
+    MockImage.decodeHandlers.clear()
+    await preloadCover(urls[0])
+    await preloadCover(urls[4])
+    expect(MockImage.instances).toHaveLength(6)
+  })
+
+  it('contains synchronous decoder failures and times out decoders that ignore cancellation', async () => {
+    vi.useFakeTimers()
+    const decoder = vi.fn((): Promise<void> => {
+      throw new Error('decoder failed')
+    })
+    setCoverDecoder(decoder)
+    await expect(preloadCover('/covers/sync-failure.jpg')).resolves.toBeUndefined()
+    decoder.mockImplementation(() => new Promise(() => {}))
+    const pending = preloadCover('/covers/custom-stall.jpg')
+    await vi.advanceTimersByTimeAsync(9000)
+    await expect(pending).resolves.toBeUndefined()
+    decoder.mockResolvedValue(undefined)
+    await preloadCover('/covers/custom-stall.jpg')
+    expect(decoder).toHaveBeenCalledTimes(3)
   })
 
   it('clearFailedTrack removes the failure mark so the track can be predicted again', async () => {

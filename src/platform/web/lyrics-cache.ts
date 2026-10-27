@@ -3,6 +3,7 @@ import {
   LYRICS_CACHE_CAPACITY,
   type LyricsCacheRecord,
   type LyricsCacheStore,
+  type LyricsCacheStats,
 } from '../../core/platform/lyrics-cache'
 
 const DATABASE_NAME = 'meliora-lyrics'
@@ -12,6 +13,7 @@ const STORAGE_TIMEOUT_MS = 500
 /** IndexedDB 被禁用、升级被旧页阻塞或事务失败时,直接退回网络/内存缓存。 */
 export function createWebLyricsCacheStore(): LyricsCacheStore {
   let pending: Promise<IDBDatabase | null> | null = null
+  let generation = 0
 
   function open(): Promise<IDBDatabase | null> {
     if (pending) return pending
@@ -52,7 +54,11 @@ export function createWebLyricsCacheStore(): LyricsCacheStore {
         finish(null)
       }
     })
-    return pending
+    const attempt = pending
+    void attempt.then((database) => {
+      if (!database && pending === attempt) pending = null
+    })
+    return attempt
   }
 
   async function transact<T>(
@@ -94,17 +100,28 @@ export function createWebLyricsCacheStore(): LyricsCacheStore {
   }
 
   return {
-    get: (key) =>
-      transact<LyricsCacheRecord | null>('readonly', null, (store, setResult) => {
-        const request = store.get(key)
-        request.onsuccess = () => {
-          const value: unknown = request.result
-          if (isLyricsCacheRecord(value) && value.key === key) setResult(value)
-        }
-      }),
-    set: async (record) => {
-      if (!isLyricsCacheRecord(record)) return
+    get generation() {
+      return generation
+    },
+    get: async (key) => {
+      const epoch = generation
+      const value = await transact<LyricsCacheRecord | null>(
+        'readonly',
+        null,
+        (store, setResult) => {
+          const request = store.get(key)
+          request.onsuccess = () => {
+            const value: unknown = request.result
+            if (isLyricsCacheRecord(value) && value.key === key) setResult(value)
+          }
+        },
+      )
+      return epoch === generation ? value : null
+    },
+    set: async (record, epoch = generation) => {
+      if (epoch !== generation || !isLyricsCacheRecord(record)) return
       await transact('readwrite', undefined, (store) => {
+        if (epoch !== generation) return
         store.put(record)
         const request = store.count()
         request.onsuccess = () => {
@@ -122,6 +139,37 @@ export function createWebLyricsCacheStore(): LyricsCacheStore {
         }
       })
     },
+    clear: async () => {
+      generation += 1
+      const cleared = await transact('readwrite', false, (store, setResult) => {
+        store.clear()
+        setResult(true)
+      })
+      if (!cleared) throw new Error('歌词缓存未能清除，请检查浏览器存储权限后重试')
+    },
+    stats: () =>
+      transact<LyricsCacheStats>(
+        'readwrite',
+        { entries: 0, bytes: 0, storageAvailable: false },
+        (store, setResult) => {
+          let entries = 0
+          let bytes = 0
+          // Read one record at a time only when the management view requests inventory.
+          const cursor = store.openCursor()
+          cursor.onsuccess = () => {
+            if (!cursor.result) {
+              setResult({ entries, bytes, storageAvailable: true })
+              return
+            }
+            const record: unknown = cursor.result.value
+            if (isLyricsCacheRecord(record) && record.expiresAt > Date.now()) {
+              entries += 1
+              bytes += (record.key.length + (record.text?.length ?? 0)) * 2 + 32
+            } else store.delete(cursor.result.primaryKey)
+            cursor.result.continue()
+          }
+        },
+      ),
   }
 }
 

@@ -18,6 +18,7 @@
   import SongInfoValue from './SongInfoValue.vue'
   import ToggleSwitch from './ToggleSwitch.vue'
   import ListeningStatsSection from './ListeningStatsSection.vue'
+  import CacheManagementSection from './CacheManagementSection.vue'
   import type { ListeningStatsSummary } from '../platform/web/listening-history'
 
   const REPO_URL = 'https://github.com/abloom25/Meliora'
@@ -74,6 +75,10 @@
 
   const volumeLabel = computed(() => `${Math.round(settings.value.volume * 100)}%`)
   const lyricScaleLabel = computed(() => `${Math.round(settings.value.lyricScale * 100)}%`)
+  const resumeTimeLabel = computed(() => {
+    const time = Math.floor(store.resumePosition ?? 0)
+    return `${Math.floor(time / 60)}:${String(time % 60).padStart(2, '0')}`
+  })
   const lyricSpringLabel = computed(() => `×${settings.value.lyricSpring.toFixed(2)}`)
   const backgroundSaturationLabel = computed(
     () => `${Math.round(settings.value.backgroundSaturation * 100)}%`,
@@ -268,9 +273,13 @@
       :track="songInfo?.track"
       :on-clear="clearListeningHistory"
     />
+    <CacheManagementSection :current-track="songInfo?.track" />
 
     <section class="settings-section">
       <SettingsSectionHeader title="播放" resettable @reset="store.resetSettings(PLAYBACK_KEYS)" />
+      <p v-if="store.hasResumePosition" class="resume-hint">
+        上次听到 {{ resumeTimeLabel }}，点击播放后继续收听。
+      </p>
       <SettingSlider
         v-model="settings.volume"
         label="音量"
@@ -514,6 +523,12 @@
 </template>
 
 <style scoped lang="scss">
+  .resume-hint {
+    padding: 0 14px;
+    color: var(--text-subtle);
+    font-size: 0.73rem;
+    line-height: 1.6;
+  }
   .settings-scroll {
     flex: 1 1 auto;
     min-height: 0;

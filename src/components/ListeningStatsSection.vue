@@ -28,12 +28,6 @@
     const minutes = Math.floor(seconds / 60)
     return minutes < 60 ? `${minutes} 分钟` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
   }
-  const cacheSize = computed(() => {
-    const bytes = props.stats.cacheBytes
-    return bytes < 1024 * 1024
-      ? `${Math.ceil(bytes / 1024)} KB`
-      : `${(bytes / 1024 / 1024).toFixed(1)} MB`
-  })
   async function clear(): Promise<void> {
     if (clearing.value) return
     clearing.value = true
@@ -52,8 +46,8 @@
   <section class="settings-section listening-stats-section">
     <SettingsSectionHeader
       title="听歌统计"
-      :resettable="stats.trackedTracks.length > 0 || stats.cachedTracks > 0 || clearing || !!error"
-      :reset-label="clearing ? '正在清除' : '清除记录与缓存'"
+      :resettable="stats.trackedTracks.length > 0 || clearing || !!error"
+      :reset-label="clearing ? '正在清除' : '清除听歌记录'"
       confirm-label="再次点击清除"
       :reset-disabled="clearing"
       @reset="clear"
@@ -71,10 +65,6 @@
         <div>
           <dt>常听歌曲</dt>
           <dd>{{ stats.frequentTracks }} 首</dd>
-        </div>
-        <div>
-          <dt>节拍缓存</dt>
-          <dd>{{ stats.cachedTracks }} 首 · {{ cacheSize }}</dd>
         </div>
       </dl>
       <p v-if="current" class="listening-current">
@@ -94,7 +84,7 @@
       <p v-else class="listening-empty">播放音乐后，这里会逐渐记录你的常听歌曲。</p>
       <p class="listening-note">
         单次实际收听满 30 秒（短歌为半首）记一次，播放 2 次后优先缓存节拍结果。
-        统计仅保存在此浏览器，清除记录会同时清除节拍缓存。
+        统计仅保存在此浏览器。清除听歌记录不会删除歌词、模型或节拍缓存。
       </p>
       <p v-if="!stats.storageAvailable" class="listening-note" role="status">
         本地存储暂不可用，部分记录或缓存只能在本次打开期间保留。

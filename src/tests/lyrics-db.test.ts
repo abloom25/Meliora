@@ -9,6 +9,7 @@ import {
 import {
   getWordLyricsQueryKey,
   hasCachedWordLyrics,
+  invalidateWordLyrics,
   loadWordLyrics,
   resetWordLyricsCache,
   setWordLyricsCacheStore,
@@ -64,6 +65,48 @@ describe('loadWordLyrics', () => {
     setWordLyricsCacheStore(null)
     vi.unstubAllGlobals()
     vi.useRealTimers()
+  })
+
+  it('refreshes a single cached query without dropping another song', async () => {
+    const fetchMock = vi.fn(async () => hit())
+    vi.stubGlobal('fetch', fetchMock)
+    const other = { ...query, id: 'other' }
+    const first = await loadWordLyrics(query)
+    const second = await loadWordLyrics(other)
+    await flushPromises()
+    await invalidateWordLyrics(query)
+    expect(await loadWordLyrics(other)).toBe(second)
+    expect(await loadWordLyrics(query)).not.toBe(first)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not restore memory or persistence when storage is cleared during a request', async () => {
+    let generation = 0
+    const write = vi.fn(async () => undefined)
+    setWordLyricsCacheStore({
+      get generation() {
+        return generation
+      },
+      get: async () => null,
+      set: write,
+    })
+    let complete!: (response: Response) => void
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            complete = resolve
+          }),
+      ),
+    )
+    const pending = loadWordLyrics(query)
+    await flushPromises()
+    generation += 1
+    complete(hit())
+    expect(await pending).toBeNull()
+    expect(hasCachedWordLyrics(query)).toBe(false)
+    expect(write).not.toHaveBeenCalled()
   })
 
   it('queries the official platform ID endpoint and returns native timings', async () => {

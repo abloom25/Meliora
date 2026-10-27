@@ -66,6 +66,7 @@ type ApiResult = { ok: true; data: unknown } | { ok: false; missing: boolean }
 
 const wordLyricsCache = new LruCache<string, CachedLyrics>(LYRICS_CACHE_CAPACITY)
 const pendingLyrics = new Map<string, PendingLyrics>()
+const bypassSavedLyrics = new Set<string>()
 let cacheStore: LyricsCacheStore = webLyricsCacheStore
 
 /** 换平台/测试时替换持久缓存;传 null 恢复 IndexedDB。 */
@@ -103,6 +104,23 @@ export function resetWordLyricsCache(): void {
   for (const pending of pendingLyrics.values()) pending.controller.abort()
   pendingLyrics.clear()
   wordLyricsCache.clear()
+}
+
+export async function invalidateWordLyrics(query: WordLyricsQuery): Promise<void> {
+  const key = getWordLyricsQueryKey(query)
+  bypassSavedLyrics.add(key)
+  pendingLyrics.get(key)?.controller.abort()
+  pendingLyrics.delete(key)
+  wordLyricsCache.delete(key)
+  const store = cacheStore
+  try {
+    await store.set(
+      { cacheVersion: 1, key, text: null, updatedAt: 0, expiresAt: 1 },
+      store.generation,
+    )
+  } catch {
+    // 持久层不可用时仍允许本次网络刷新。
+  }
 }
 
 /** 单请求超时加整个查询预算。超时包含读 body,不受 fetch 是否正确响应 abort 影响。 */
@@ -308,6 +326,7 @@ async function loadCachedOrRequest(
 ): Promise<LyricLine[] | null> {
   // 捕获当前 store,避免测试/平台切换时一个旧请求写进新的存储。
   const store = cacheStore
+  const generation = store.generation
   try {
     const saved = await new Promise<unknown>((resolve) => {
       const finish = (value: unknown) => {
@@ -321,10 +340,10 @@ async function loadCachedOrRequest(
       if (signal.aborted) onAbort()
       else
         Promise.resolve()
-          .then(() => store.get(key))
+          .then(() => (bypassSavedLyrics.has(key) ? null : store.get(key)))
           .then(finish, () => finish(null))
     })
-    if (signal.aborted) return null
+    if (signal.aborted || store.generation !== generation) return null
     if (isLyricsCacheRecord(saved) && saved.key === key && saved.expiresAt > Date.now()) {
       const lines = saved.text === null ? null : nativeLines(saved.text)
       if (saved.text === null || lines) {
@@ -335,17 +354,24 @@ async function loadCachedOrRequest(
   } catch {
     // 隐私模式、存储损坏和桌面端实现失败都只影响缓存。
   }
-  if (signal.aborted) return null
+  if (signal.aborted || store.generation !== generation) return null
   const result = await requestWordLyrics(query, signal)
-  if (signal.aborted) return null
+  if (signal.aborted || store.generation !== generation) return null
   const lines = result.lines ?? null
   if (lines || result.definitive) {
+    bypassSavedLyrics.delete(key)
     const updatedAt = Date.now()
     const expiresAt =
       updatedAt + (lines ? WORD_LYRICS_POSITIVE_TTL_MS : WORD_LYRICS_NEGATIVE_TTL_MS)
     wordLyricsCache.set(key, { lines, expiresAt })
     void Promise.resolve()
-      .then(() => store.set({ cacheVersion: 1, key, text: result.text, updatedAt, expiresAt }))
+      .then(() => {
+        if (!signal.aborted)
+          return store.set(
+            { cacheVersion: 1, key, text: result.text, updatedAt, expiresAt },
+            generation,
+          )
+      })
       .catch(() => undefined)
   }
   return lines

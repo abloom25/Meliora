@@ -22,6 +22,29 @@
     { value: 'beat-this-small', label: 'Small' },
     { value: 'beat-this-standard', label: '标准版' },
   ] as const
+  const selectedModeIndex = computed(() =>
+    modeOptions.findIndex((option) => option.value === selectedMode.value),
+  )
+  const modelDetailsRef = ref<HTMLElement | null>(null)
+
+  function holdModelDetailsHeight(element: Element): void {
+    const container = modelDetailsRef.value
+    if (container) container.style.height = `${container.getBoundingClientRect().height}px`
+    // Outgoing controls must not activate against the newly selected model during the fade.
+    if (element instanceof HTMLElement) element.inert = true
+  }
+
+  function resizeModelDetails(element: Element): void {
+    const container = modelDetailsRef.value
+    if (container) container.style.height = `${element.getBoundingClientRect().height}px`
+  }
+
+  function releaseModelDetailsHeight(): void {
+    modelDetailsRef.value?.style.removeProperty('height')
+  }
+  const activeModeLabel = computed(
+    () => modeOptions.find((option) => option.value === store.settings.beatAnalysisMode)?.label,
+  )
   const selectedModelId = computed(() => {
     if (selectedMode.value === 'beat-this-small') return 'small'
     if (selectedMode.value === 'beat-this-standard') return 'standard'
@@ -309,7 +332,7 @@
   <div class="beat-analysis-settings">
     <div class="beat-analysis-heading">
       <strong>节奏识别</strong>
-      <span class="beat-analysis-size">智能预分析</span>
+      <span class="beat-analysis-size">当前：{{ activeModeLabel }}</span>
     </div>
     <div class="beat-analysis-modes" role="group" aria-label="节奏识别模式">
       <button
@@ -317,104 +340,121 @@
         :key="option.value"
         type="button"
         :data-mode="option.value"
-        :aria-pressed="store.settings.beatAnalysisMode === option.value"
-        :class="{ 'is-previewed': selectedMode === option.value }"
+        :aria-pressed="selectedMode === option.value"
         @click="selectMode(option.value)"
       >
-        <Check
-          v-if="store.settings.beatAnalysisMode === option.value"
-          :size="13"
-          aria-hidden="true"
-        />{{ option.label }}
+        {{ option.label }}
       </button>
+      <span
+        class="beat-mode-indicator"
+        :style="{ transform: `translateX(calc(${selectedModeIndex} * (100% + 4px)))` }"
+        aria-hidden="true"
+      />
     </div>
-    <div v-if="selectedModel && modelState" class="beat-model-card">
-      <div class="beat-analysis-heading">
-        <strong>{{ selectedModel.label }}</strong>
-        <span class="beat-analysis-size">下载 {{ modelSize }}</span>
-      </div>
-      <p class="beat-analysis-detail">
-        {{
-          selectedModelId === 'small' ? '轻量模型，优先推荐' : '更完整的模型，分析更耗时'
-        }}；结合原有算法控制高亮强弱。
-      </p>
-      <p class="beat-analysis-detail">首次下载另需 {{ runtimeSize }} 运行组件，两个模型共用。</p>
-      <p class="beat-analysis-status beat-model-status" role="status" aria-live="polite">
-        <LoaderCircle
-          v-if="['checking', 'downloading', 'removing'].includes(modelState.phase)"
-          class="beat-analysis-spinner"
-          :size="13"
-          aria-hidden="true"
-        />
-        <span>{{ modelStatusLabel }}</span>
-      </p>
-      <div class="beat-model-controls">
-        <div
-          v-if="modelState.phase === 'downloading'"
-          class="beat-analysis-progress beat-model-progress"
-          role="progressbar"
-          aria-label="模型下载进度"
-          :aria-valuenow="modelProgress"
-          :aria-valuemin="0"
-          :aria-valuemax="100"
-        >
-          <span :style="{ width: `${modelProgress}%` }" />
+    <div ref="modelDetailsRef" class="beat-model-details">
+      <Transition
+        name="beat-model-switch"
+        mode="out-in"
+        @before-leave="holdModelDetailsHeight"
+        @enter="resizeModelDetails"
+        @after-enter="releaseModelDetailsHeight"
+        @enter-cancelled="holdModelDetailsHeight"
+      >
+        <div :key="selectedMode" class="beat-mode-detail">
+          <div v-if="selectedModel && modelState" class="beat-model-card">
+            <div class="beat-analysis-heading">
+              <strong>{{ selectedModel.label }}</strong>
+              <span class="beat-analysis-size">下载 {{ modelSize }}</span>
+            </div>
+            <p class="beat-analysis-detail">
+              {{
+                selectedModelId === 'small' ? '轻量模型，优先推荐' : '更完整的模型，分析更耗时'
+              }}；结合原有算法控制高亮强弱。
+            </p>
+            <p class="beat-analysis-detail">
+              首次下载另需 {{ runtimeSize }} 运行组件，两个模型共用。
+            </p>
+            <p class="beat-analysis-status beat-model-status" role="status" aria-live="polite">
+              <LoaderCircle
+                v-if="['checking', 'downloading', 'removing'].includes(modelState.phase)"
+                class="beat-analysis-spinner"
+                :size="13"
+                aria-hidden="true"
+              />
+              <span>{{ modelStatusLabel }}</span>
+            </p>
+            <div class="beat-model-controls">
+              <div
+                v-if="modelState.phase === 'downloading'"
+                class="beat-analysis-progress beat-model-progress"
+                role="progressbar"
+                aria-label="模型下载进度"
+                :aria-valuenow="modelProgress"
+                :aria-valuemin="0"
+                :aria-valuemax="100"
+              >
+                <span :style="{ width: `${modelProgress}%` }" />
+              </div>
+              <div class="beat-analysis-actions">
+                <button
+                  v-if="modelState.phase === 'missing' || modelState.phase === 'error'"
+                  class="beat-analysis-action"
+                  type="button"
+                  :disabled="anotherDownload"
+                  @click="downloadModel"
+                >
+                  <Download :size="14" aria-hidden="true" />
+                  {{
+                    modelProgress > 0
+                      ? '继续下载'
+                      : modelState.phase === 'error'
+                        ? '重试下载'
+                        : '下载模型'
+                  }}
+                </button>
+                <button
+                  v-if="modelState.phase === 'downloading'"
+                  class="beat-analysis-action"
+                  type="button"
+                  @click="cancelDownload"
+                >
+                  <X :size="14" aria-hidden="true" />取消下载
+                </button>
+                <template
+                  v-if="
+                    modelState.phase === 'ready' ||
+                    modelState.phase === 'error' ||
+                    (modelState.phase === 'missing' && modelProgress > 0)
+                  "
+                >
+                  <button
+                    v-if="modelState.phase === 'ready' && !selectedIsActive"
+                    class="beat-analysis-action"
+                    type="button"
+                    @click="enableModel"
+                  >
+                    <Check :size="14" aria-hidden="true" />启用模型
+                  </button>
+                  <button class="beat-analysis-action" type="button" @click="removeModel">
+                    <Trash2 :size="14" aria-hidden="true" />删除模型
+                  </button>
+                </template>
+              </div>
+            </div>
+            <p v-if="!selectedIsActive" class="beat-analysis-detail">
+              {{
+                anotherDownload
+                  ? '另一个模型正在下载，可切换回该模型取消。'
+                  : '下载完成后点击启用；当前模式保持不变。'
+              }}
+            </p>
+          </div>
+          <p v-else class="beat-analysis-detail beat-basic-detail">
+            无需下载模型，使用原有节奏算法。
+          </p>
         </div>
-        <div class="beat-analysis-actions">
-          <button
-            v-if="modelState.phase === 'missing' || modelState.phase === 'error'"
-            class="beat-analysis-action"
-            type="button"
-            :disabled="anotherDownload"
-            @click="downloadModel"
-          >
-            <Download :size="14" aria-hidden="true" />
-            {{
-              modelProgress > 0
-                ? '继续下载'
-                : modelState.phase === 'error'
-                  ? '重试下载'
-                  : '下载模型'
-            }}
-          </button>
-          <button
-            v-if="modelState.phase === 'downloading'"
-            class="beat-analysis-action"
-            type="button"
-            @click="cancelDownload"
-          >
-            <X :size="14" aria-hidden="true" />取消下载
-          </button>
-          <template
-            v-if="
-              modelState.phase === 'ready' ||
-              modelState.phase === 'error' ||
-              (modelState.phase === 'missing' && modelProgress > 0)
-            "
-          >
-            <button
-              v-if="modelState.phase === 'ready' && !selectedIsActive"
-              class="beat-analysis-action"
-              type="button"
-              @click="enableModel"
-            >
-              <Check :size="14" aria-hidden="true" />启用模型
-            </button>
-            <button class="beat-analysis-action" type="button" @click="removeModel">
-              <Trash2 :size="14" aria-hidden="true" />删除模型
-            </button>
-          </template>
-        </div>
-      </div>
-      <p v-if="!selectedIsActive" class="beat-analysis-detail">
-        {{
-          anotherDownload
-            ? '另一个模型正在下载，可切换回该模型取消。'
-            : '下载完成后点击启用；当前模式保持不变。'
-        }}
-      </p>
+      </Transition>
     </div>
-    <p v-else class="beat-analysis-detail beat-basic-detail">无需下载模型，使用原有节奏算法。</p>
     <div class="beat-analysis-feedback" :aria-busy="busy">
       <p class="beat-analysis-status" role="status" aria-live="polite" aria-atomic="true">
         <LoaderCircle v-if="busy" class="beat-analysis-spinner" :size="13" aria-hidden="true" />
@@ -534,13 +574,12 @@
     text-decoration: none;
   }
   .beat-analysis-modes {
+    position: relative;
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 4px;
-    margin-top: 12px;
-    padding: 4px;
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.045);
+    margin-top: 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
   }
   .beat-analysis-modes button,
   .beat-analysis-action {
@@ -562,12 +601,74 @@
       color 220ms cubic-bezier(0.16, 1, 0.3, 1),
       border-color 220ms cubic-bezier(0.16, 1, 0.3, 1);
   }
-  .beat-analysis-modes button[aria-pressed='true'] {
-    background: rgba(255, 255, 255, 0.12);
-    color: rgba(255, 255, 255, 0.95);
+  .beat-analysis-modes button {
+    position: relative;
+    min-width: 0;
+    min-block-size: 44px;
+    padding: 10px 4px 13px;
+    border: 0;
+    border-radius: 0;
+    color: var(--text-subtle);
+    font-size: 0.77rem;
+    font-weight: 550;
+    white-space: nowrap;
+    transition: color 220ms cubic-bezier(0.16, 1, 0.3, 1);
+
+    &:hover {
+      color: var(--text-muted);
+    }
+    &[aria-pressed='true'] {
+      color: var(--text);
+    }
   }
-  .beat-analysis-modes button.is-previewed {
-    border-color: rgba(255, 255, 255, 0.18);
+  .beat-mode-indicator {
+    position: absolute;
+    inset: auto auto 0 0;
+    width: calc((100% - 8px) / 3);
+    height: 2px;
+    color: var(--text);
+    font-size: 0.77rem;
+    pointer-events: none;
+    transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1);
+
+    &::after {
+      content: '';
+      position: absolute;
+      inset: 0 auto 0 calc(50% - 0.65em);
+      width: 1.3em;
+      border-radius: 2px;
+      background: currentColor;
+      opacity: 0.9;
+    }
+  }
+  .beat-model-details {
+    overflow: clip;
+    transition: height 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .beat-mode-detail {
+    display: flow-root;
+  }
+  .beat-model-switch-enter-active,
+  .beat-model-switch-leave-active {
+    transition:
+      opacity 240ms cubic-bezier(0.16, 1, 0.3, 1),
+      filter 240ms cubic-bezier(0.16, 1, 0.3, 1),
+      transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .beat-model-switch-leave-active {
+    transition-duration: 180ms;
+    pointer-events: none;
+  }
+  .beat-model-switch-enter-from,
+  .beat-model-switch-leave-to {
+    opacity: 0;
+    filter: blur(3px);
+  }
+  .beat-model-switch-enter-from {
+    transform: translateY(6px);
+  }
+  .beat-model-switch-leave-to {
+    transform: translateY(-4px);
   }
   .beat-model-card {
     margin-top: 12px;
@@ -600,7 +701,6 @@
     opacity: 0.45;
     cursor: default;
   }
-  .beat-analysis-modes button:not(:disabled):hover,
   .beat-analysis-action:not(:disabled):hover {
     background: rgba(255, 255, 255, 0.15);
   }
@@ -608,6 +708,10 @@
   .beat-analysis-action:focus-visible {
     outline: 2px solid currentColor;
     outline-offset: 2px;
+  }
+  .beat-analysis-modes button:focus-visible {
+    outline-offset: -3px;
+    border-radius: 6px;
   }
   .beat-analysis-feedback {
     margin-top: 12px;
@@ -838,12 +942,16 @@
     }
   }
   @media (pointer: coarse) {
-    .beat-analysis-modes button,
     .beat-analysis-action {
-      min-block-size: 40px;
+      min-block-size: 44px;
     }
   }
   @media (prefers-reduced-motion: reduce) {
+    .beat-model-switch-enter-from,
+    .beat-model-switch-leave-to {
+      filter: none;
+      transform: none;
+    }
     .beat-analysis-spinner,
     .beat-analysis-completed-range,
     .beat-analysis-active-range,
@@ -851,6 +959,10 @@
       animation: none;
     }
     .beat-analysis-modes button,
+    .beat-mode-indicator,
+    .beat-model-details,
+    .beat-model-switch-enter-active,
+    .beat-model-switch-leave-active,
     .beat-analysis-action,
     .beat-analysis-completed-range,
     .beat-analysis-playhead,
@@ -861,10 +973,15 @@
     }
   }
   @media (prefers-contrast: more) {
-    .beat-analysis-modes,
-    .beat-analysis-modes button[aria-pressed='true'],
     .beat-analysis-action {
       outline: 1px solid currentColor;
+    }
+    .beat-analysis-modes button {
+      color: var(--text);
+    }
+    .beat-mode-indicator {
+      height: 3px;
+      opacity: 1;
     }
     .beat-analysis-status,
     .beat-analysis-position,

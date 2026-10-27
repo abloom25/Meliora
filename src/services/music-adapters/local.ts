@@ -20,6 +20,7 @@ export const localMusicAdapter: MusicProviderAdapter<LocalTrackConfig> = {
     if (lyricsUrl) {
       registerTrackLyrics(track, {
         cacheKey: `local:${lyricsUrl}`,
+        lyricsUrl,
         source: 'local',
         priority: 20,
         isCached: () => hasCachedLyrics(lyricsUrl),
@@ -33,6 +34,7 @@ export const localMusicAdapter: MusicProviderAdapter<LocalTrackConfig> = {
       }
       registerTrackLyrics(track, {
         cacheKey: `local:${wordLyricsCacheKey(wordQuery)}`,
+        combined: { wordQuery },
         // 用户上传的歌词和带平台 ID 的来源应优先于元数据搜索。
         priority: 0,
         isCached: () => hasCachedWordLyrics(wordQuery),

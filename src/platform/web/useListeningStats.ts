@@ -16,6 +16,7 @@ export function useListeningStats(options: {
   players: readonly HTMLAudioElement[]
   getActiveAudio: () => HTMLAudioElement
   isPlaying: Ref<boolean>
+  canRecord?: () => boolean
 }) {
   initializeListeningHistory()
   const counter = createListeningCounter()
@@ -24,6 +25,10 @@ export function useListeningStats(options: {
   let epoch = listeningHistoryGeneration()
   const stalled = new WeakSet<HTMLAudioElement>()
   function sample(event?: Event): void {
+    if (options.canRecord?.() === false) {
+      counter.reset()
+      return
+    }
     const audio = options.getActiveAudio()
     if (event?.target && event.target !== audio) return
     const current = options.track.value
@@ -96,6 +101,7 @@ export function useListeningStats(options: {
   return {
     stats: listeningStatsSummary,
     clear: clearListeningHistory,
+    flush: save,
     /** Explicit replay/previous-to-start intent; ordinary slider seeks do not reset a visit. */
     restartVisit: (): void => {
       counter.reset()

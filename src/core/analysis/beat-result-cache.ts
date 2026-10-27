@@ -10,6 +10,8 @@ export interface BeatResultMetadata {
   track: string
   bytes: number
   updatedAt: number
+  pinned?: boolean
+  version?: string
 }
 export interface BeatResultStore {
   readonly generation: number
@@ -60,7 +62,10 @@ export function selectBeatCacheEvictions(
   maxEntries = BEAT_RESULT_MAX_ENTRIES,
 ): string[] {
   const newest = [...entries].sort(
-    (a, b) => b.updatedAt - a.updatedAt || a.key.localeCompare(b.key),
+    (a, b) =>
+      Number(b.pinned === true) - Number(a.pinned === true) ||
+      b.updatedAt - a.updatedAt ||
+      a.key.localeCompare(b.key),
   )
   let bytes = 0
   let count = 0
@@ -69,6 +74,8 @@ export function selectBeatCacheEvictions(
       if (
         !Number.isFinite(entry.bytes) ||
         entry.bytes <= 0 ||
+        !Number.isFinite(entry.updatedAt) ||
+        (entry.version !== undefined && entry.version !== BEAT_RESULT_VERSION) ||
         entry.updatedAt < now - BEAT_RESULT_MAX_AGE_MS ||
         entry.updatedAt > now + 60_000 ||
         bytes + entry.bytes > maxBytes ||
@@ -80,4 +87,41 @@ export function selectBeatCacheEvictions(
       return false
     })
     .map((entry) => entry.key)
+}
+
+/** User limits remain bounded even when persisted settings are malformed. */
+export function normalizeBeatCacheBudget(bytes: unknown): number {
+  return typeof bytes === 'number' && Number.isFinite(bytes)
+    ? Math.round(Math.min(128, Math.max(8, bytes / 1024 / 1024))) * 1024 * 1024
+    : BEAT_RESULT_MAX_BYTES
+}
+
+export function groupBeatCacheEntries(entries: readonly BeatResultMetadata[]): Array<{
+  track: string
+  bytes: number
+  pinned: boolean
+  variants: number
+  updatedAt: number
+}> {
+  const tracks = new Map<
+    string,
+    { track: string; bytes: number; pinned: boolean; variants: number; updatedAt: number }
+  >()
+  for (const entry of entries) {
+    const group = tracks.get(entry.track) ?? {
+      track: entry.track,
+      bytes: 0,
+      pinned: false,
+      variants: 0,
+      updatedAt: 0,
+    }
+    group.bytes += entry.bytes
+    group.variants += 1
+    group.pinned ||= entry.pinned === true
+    group.updatedAt = Math.max(group.updatedAt, entry.updatedAt)
+    tracks.set(entry.track, group)
+  }
+  return [...tracks.values()].sort(
+    (a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt,
+  )
 }
