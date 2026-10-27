@@ -9,7 +9,11 @@ import type { BeatPreloadTarget } from '../core/analysis/beat-timeline'
 import { sanitizeBeatFlashRate } from '../core/analysis/beat-envelope'
 import { shouldUseIOSBackgroundSafeAudio } from '../platform/web/browser'
 import { createWebAudioBackend } from '../platform/web/audio-backend'
-import { describePlaybackFailure, resolveFailureAction } from '../core/audio/failure'
+import {
+  describePlaybackFailure,
+  resolveFailureAction,
+  type PlaybackFailureReason,
+} from '../core/audio/failure'
 import { previousMeansRestart, resolveSeek, shouldStartAutoCrossfade } from '../core/audio/timeline'
 import { useBeatAnalyser } from '../platform/web/useBeatAnalyser'
 import { useEqualizer } from './useEqualizer'
@@ -29,6 +33,12 @@ import { useBeatThisModels } from '../platform/web/useBeatThisModels'
 import { useJsonDownload } from '../platform/web/useJsonDownload'
 import { APP_VERSION } from '../generated/app-version'
 import { useListeningStats } from '../platform/web/useListeningStats'
+import { createPlaybackRecovery } from '../platform/web/playback-recovery'
+import { usePlaybackBudget } from '../platform/web/usePlaybackBudget'
+import { createPlaybackCoordinator } from '../platform/web/playback-coordinator'
+import { refreshListeningHistory } from '../platform/web/listening-history'
+import { usePlaybackPreferences } from '../platform/web/usePlaybackPreferences'
+import { createPlaybackSync } from '../platform/web/playback-sync'
 
 export interface UseAudioPlayerOptions {
   /** Only observe diagnostic data while its panel is visible. */
@@ -50,6 +60,11 @@ export interface UseAudioPlayerOptions {
 export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   const store = usePlayerStore()
   const { currentTrack, isPlaying, currentTime, duration, settings } = storeToRefs(store)
+  usePlaybackPreferences(settings)
+  const followingTab = ref(false)
+  const detachedTabPosition = ref<number | null>(null)
+  const localPlaying = computed(() => isPlaying.value && !followingTab.value)
+  let tabSync: ReturnType<typeof createPlaybackSync> | null = null
   const debugEnabled = computed(() => import.meta.env.DEV && options.debugEnabled?.value === true)
   const comparisonEnabled = computed(
     () => debugEnabled.value && options.beatComparisonEnabled?.value === true,
@@ -71,6 +86,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     createAudioGain()
   let automaticCrossfadeStarted = false
   let playbackVersion = 0
+  let allowInterruptedStart = false
   let disposed = false
   let committingSwitch = false
   let retiringChannel: AudioChannel | null = null
@@ -86,13 +102,59 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   let degradationWarned = false
   const lyricPlaybackListeners = new Set<() => void>()
   const waitingChannels = new Set<AudioChannel>()
+  const coordination = createPlaybackCoordinator({
+    onLost() {
+      listening.flush()
+      pauseLocal()
+      preloadMessage.value = '已在另一个页面播放'
+    },
+    onClaim: refreshListeningHistory,
+  })
+  coordination.setEnabled(settings.value.tabCoordination)
+  store.setPlaybackSessionGuard(coordination.canPersist)
+  let recoveryPosition: number | null = null
+  let recoveryAttempt = 0
+  let waitingTimeout: number | undefined
+  const recovery = createPlaybackRecovery({
+    retry: retryCurrentAudio,
+    onPhase(phase) {
+      if (phase === 'idle') {
+        if (store.errorMessage.startsWith('网络')) store.errorMessage = ''
+      } else if (phase === 'exhausted') {
+        recoveryAttempt += 1
+        backend.active().pause()
+        isPlaying.value = false
+        stopBeatAnalysis()
+        store.errorMessage = '网络暂时无法恢复，已保留进度，点击播放可重试'
+      } else {
+        store.errorMessage =
+          phase === 'offline' ? '网络已断开，连接恢复后继续播放' : '网络暂时中断，正在尝试恢复播放'
+      }
+    },
+  })
 
   function notifyLyricsPlayback(): void {
     if (disposed) return
     for (const listener of lyricPlaybackListeners) listener()
+    tabSync?.publish()
   }
 
   function getLyricsPlaybackState(): LyricPlaybackState {
+    const shared = followingTab.value ? tabSync?.read() : null
+    if (shared)
+      return {
+        timeSeconds: shared.position,
+        playing: shared.playing && shared.advancing,
+        playbackRate: shared.playbackRate,
+        seeking: shared.seeking,
+      }
+    if (detachedTabPosition.value !== null)
+      return {
+        timeSeconds: detachedTabPosition.value,
+        playing: false,
+        playbackRate: 1,
+        seeking: false,
+      }
     const channel = backend.active()
     const audio = backend.elementOf(channel)
     return {
@@ -132,12 +194,20 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   const { bindFilters: bindEqFilters } = useEqualizer({ settings })
   const beatVisuals = createBeatVisualRenderer(options)
   const listening = useListeningStats({
+    canRecord: coordination.owns,
     track: currentTrack,
     players: channels.map((channel) => backend.elementOf(channel)),
     getActiveAudio: () => backend.elementOf(backend.active()),
     isPlaying,
   })
   const adjacentBeatTargets = shallowRef<readonly BeatPreloadTarget[]>([])
+  const budget = usePlaybackBudget({
+    enabled: computed(() => settings.value.adaptivePerformance),
+    playing: localPlaying,
+    source: computed(() => currentTrack.value?.audioUrl ?? ''),
+    getActiveAudio: () => backend.elementOf(backend.active()),
+    subscribe: subscribeLyricsPlayback,
+  })
   const {
     beatLevel,
     spectrumLevels,
@@ -147,11 +217,14 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     resetBeatTracking,
     debugSnapshot,
   } = useBeatAnalyser({
+    resourcePressure: budget.pressure,
+    visualIntervalMs: budget.visualIntervalMs,
+    observeVisualFrame: budget.observeFrame,
     track: currentTrack,
     // 频谱要真实元素,这是 Web 后端的专有出口
     players: channels.map((channel) => backend.elementOf(channel)),
     getActiveAudio: () => backend.elementOf(backend.active()),
-    isPlaying,
+    isPlaying: localPlaying,
     debugEnabled,
     debugSampleIntervalMs: computed(() => (comparisonEnabled.value ? 1000 / 30 : 100)),
     mode: computed(() => settings.value.beatAnalysisMode),
@@ -160,9 +233,18 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     source: computed(() => currentTrack.value?.audioUrl ?? ''),
     durationSeconds: duration,
     adjacent: adjacentBeatTargets,
-    preloadEnabled: computed(() => settings.value.preloadNextTrack),
+    preloadEnabled: computed(
+      () =>
+        settings.value.preloadNextTrack &&
+        !followingTab.value &&
+        detachedTabPosition.value === null,
+    ),
     enabled: computed(
-      () => settings.value.beatFlash && !iosBackgroundSafeAudio && spectrumAvailable.value,
+      () =>
+        settings.value.beatFlash &&
+        !followingTab.value &&
+        !iosBackgroundSafeAudio &&
+        spectrumAvailable.value,
     ),
     unavailableReason: computed(() =>
       iosBackgroundSafeAudio
@@ -258,7 +340,11 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   } = usePreloadPool({
     backend,
     store,
-    settings,
+    settings: computed(() =>
+      followingTab.value || detachedTabPosition.value !== null
+        ? { ...settings.value, preloadNextTrack: false }
+        : settings.value,
+    ),
     transitionInProgress: () => transition.isPreparing() || retiringChannel !== null,
     isChannelProtected: (channel) => channel === retiringChannel,
     onTargetsChanged: (targets) => {
@@ -300,7 +386,14 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   )
 
   // 用户的新操作接管播放；旧 Promise、跳歌定时器和增益动画不再有写入权。
-  function invalidatePlayback(): void {
+  function invalidatePlayback(resetRecovery = true): void {
+    allowInterruptedStart = false
+    clearWaitingTimeout()
+    if (resetRecovery) {
+      recovery.cancel()
+      recoveryPosition = null
+    }
+    recoveryAttempt += 1
     const wasPreparing = transition.isPreparing()
     playbackVersion += 1
     pendingStart = null
@@ -380,16 +473,110 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     return describePlaybackFailure(channel.classifyFailure(error))
   }
 
+  function handleRecoverableFailure(channel: AudioChannel, reason: PlaybackFailureReason): boolean {
+    // Offline loads may fail before the browser has enough data to detect a format.
+    if (navigator.onLine === false && (reason === 'unsupported' || reason === 'unknown'))
+      reason = 'network'
+    if (reason !== 'network' && reason !== 'not-allowed') return false
+    const position = pendingSeekTime.value ?? (channel.currentTime() || currentTime.value)
+    const wantedPlayback = isPlaying.value
+    invalidatePlayback(reason !== 'network')
+    clearFailedTrack(currentTrack.value?.id ?? '')
+    if (reason === 'not-allowed' || !wantedPlayback) {
+      channel.pause()
+      isPlaying.value = false
+      stopBeatAnalysis()
+      store.errorMessage = describePlaybackFailure(reason)
+      return true
+    }
+    recoveryPosition = Math.max(0, position)
+    currentTime.value = recoveryPosition
+    waitingChannels.add(channel)
+    stopBeatAnalysis()
+    recovery.fail()
+    channel.pause()
+    notifyLyricsPlayback()
+    return true
+  }
+
+  function retryCurrentAudio(): void {
+    if (disposed || !currentTrack.value || !isPlaying.value) return recovery.cancel()
+    const channel = backend.active()
+    const position = recoveryPosition ?? currentTime.value
+    const attempt = ++recoveryAttempt
+    const version = playbackVersion
+    const isCurrent = () =>
+      !disposed &&
+      attempt === recoveryAttempt &&
+      version === playbackVersion &&
+      channel === backend.active()
+    channel.load(currentTrack.value.audioUrl)
+    channel.seek(position)
+    pendingSeekTime.value = channel.duration() === null ? position : null
+    currentTime.value = position
+    void channel
+      .play()
+      .then(() => {
+        if (!isCurrent()) return
+        recovery.settled()
+        recoveryPosition = null
+        waitingChannels.delete(channel)
+        isPlaying.value = true
+        store.clearResume()
+        guardedStartBeatAnalysis()
+        notifyLyricsPlayback()
+      })
+      .catch((error: unknown) => {
+        if (!isCurrent()) return
+        const reason = channel.classifyFailure(error)
+        if (handleRecoverableFailure(channel, reason)) return
+        recovery.cancel()
+        if (reason !== 'aborted') handleActiveChannelError(channel)
+      })
+  }
+
+  function clearWaitingTimeout(): void {
+    if (waitingTimeout === undefined) return
+    window.clearTimeout(waitingTimeout)
+    pendingPlayerTimeouts.delete(waitingTimeout)
+    waitingTimeout = undefined
+  }
+
+  function watchStarvedPlayback(channel: AudioChannel): void {
+    clearWaitingTimeout()
+    if (!isPlaying.value || recovery.active()) return
+    if (navigator.onLine === false) {
+      handleRecoverableFailure(channel, 'network')
+      return
+    }
+    waitingTimeout = schedulePlayerTimeout(() => {
+      waitingTimeout = undefined
+      if (channel === backend.active() && isPlaying.value && waitingChannels.has(channel)) {
+        handleRecoverableFailure(channel, 'network')
+      }
+    }, 12000)
+  }
+
   async function play(): Promise<void> {
     if (disposed) return
+    if (tabSync?.command({ action: 'play' })) return
+    const retryPosition = recoveryPosition ?? detachedTabPosition.value
+    detachedTabPosition.value = null
     invalidatePlayback()
     if (!currentTrack.value) {
       const first = store.queue[0] ?? store.tracks[0]
       if (!first) return
       store.selectTrack(first, store.queue.length ? store.queue : store.tracks)
     }
+    coordination.claim()
     const version = playbackVersion
     const channel = backend.active()
+    if (retryPosition !== null || channel.failed()) {
+      const position = retryPosition ?? currentTime.value
+      channel.load(currentTrack.value!.audioUrl)
+      channel.seek(position)
+      pendingSeekTime.value = channel.duration() === null ? position : null
+    }
     const source = channel.source()
     const trackId = currentTrack.value?.id
     const isCurrent = () =>
@@ -409,17 +596,24 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       guardedStartBeatAnalysis()
     } catch (error) {
       if (!isCurrent()) return
+      if (handleRecoverableFailure(channel, channel.classifyFailure(error))) return
+      allowInterruptedStart = channel.classifyFailure(error) === 'aborted'
       isPlaying.value = false
       store.errorMessage = describePlaybackError(error, channel)
     }
   }
 
-  function pause(): void {
+  function pauseLocal(): void {
     invalidatePlayback()
     clearPreloads()
     for (const channel of channels) channel.pause()
     isPlaying.value = false
     stopBeatAnalysis()
+  }
+
+  function pause(): void {
+    if (tabSync?.command({ action: 'pause' })) return
+    pauseLocal()
   }
 
   function toggle() {
@@ -438,6 +632,15 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   }
 
   function seek(time: number) {
+    if (!Number.isFinite(time)) return
+    if (tabSync?.command({ action: 'seek', position: Math.max(0, time) })) return
+    if (detachedTabPosition.value !== null) {
+      const target = Math.max(0, duration.value > 0 ? Math.min(time, duration.value) : time)
+      detachedTabPosition.value = target
+      currentTime.value = target
+      notifyLyricsPlayback()
+      return
+    }
     if (Number.isFinite(time) && transition.isPreparing()) invalidatePlayback()
     automaticCrossfadeStarted = false
     // 时长未知时通道会自己记下目标位置、等时长可用再落位;
@@ -455,9 +658,11 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     }
     store.clearResume()
     channel.seek(resolution.time)
+    if (recovery.active()) recoveryPosition = resolution.time
     currentTime.value = resolution.time
     pendingSeekTime.value = resolution.kind === 'pending' ? resolution.time : null
     notifyLyricsPlayback()
+    tabSync?.publish(true)
   }
 
   // 时长终于可用时,把界面上的进度对到通道真正落到的位置
@@ -501,6 +706,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   async function switchToTrack(track: Track, switchOptions: SwitchOptions): Promise<boolean> {
     const { shouldPlay, direction: requestedDirection, waitForReady, updateStore } = switchOptions
     if (disposed || transition.isPreparing()) return false
+    detachedTabPosition.value = null
+    if (shouldPlay) coordination.claim()
     invalidatePlayback()
     const controller = transition.begin()
     if (!controller) return false
@@ -519,31 +726,19 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
             : await loadSlot(direction, track)
         if (!transition.isCurrent(controller)) return false
         if (!ready) {
-          markTrackFailed(track.id)
-          // 预加载没就绪等同于取不到音频。跳不跳同样交给 core/audio/failure:
-          // 先标记失败再预测后继,没有实际后继(如 sequence 播到队尾)时它不会给出
-          // skip,提示也就不会与"其实已经停了"打架
-          const action = resolveFailureAction('network', {
-            // 本来就不打算出声的切换(静默换曲)谈不上"跳过"
-            skipOnError: shouldPlay && settings.value.skipOnError,
-            hasNextTrack: Boolean(predictNextTrack(false)),
-            canFallBack: false,
-          })
-          if (action.kind === 'skip') {
-            preloadMessage.value = action.notice
-            schedulePlayerTimeout(() => void next(false), 80)
-          } else {
+          clearFailedTrack(track.id)
+          if (!backend.active().ended()) {
             store.errorMessage = describePlaybackFailure('network')
-            // 准备失败时可能仍在旧曲末尾，也可能旧曲已经自然结束。
-            // 未结束的原曲继续播放；结束后必须提交真实的停止状态。
-            if (backend.active().ended()) {
-              isPlaying.value = false
-              stopBeatAnalysis()
-              syncMediaSession()
-            }
+            transition.release(controller)
+            return false
           }
-          transition.release(controller)
-          return false
+          // The previous song has ended. Commit the intended next song so its
+          // ordinary startup/recovery path owns offline waiting and retry.
+          clearSlot(slot)
+          slot.track = track
+          slot.ready = null
+          slot.channel.setGain(0)
+          slot.channel.load(track.audioUrl)
         }
       } else if (
         slot.track?.id !== track.id ||
@@ -637,8 +832,12 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         // 先把失败原因归一出来:后面的 clearSlot 会清掉通道的 src,
         // 事后再 classifyFailure 只会得到"没有可用的音频地址"这种不准确的结论
         const reason = incoming.classifyFailure(error)
+        if (handleRecoverableFailure(incoming, reason)) return
         // 后端主动中止不拉黑曲目，也不触发失败跳过。
         if (reason === 'aborted') {
+          // A CORS element replacement may abort the old startup and then emit
+          // play on the same logical channel. Explicit pause/takeover clears this.
+          allowInterruptedStart = true
           cancelGainAnimation(incoming)
           cancelGainAnimation(outgoing)
           incoming.setGain(1)
@@ -744,6 +943,14 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   }
 
   async function selectAndPlay(track: Track, queue: Track[]): Promise<void> {
+    if (
+      tabSync?.command({
+        action: 'select',
+        trackId: track.id,
+        queueIds: queue.map((item) => item.id),
+      })
+    )
+      return
     invalidatePlayback()
     await switchToTrack(track, {
       shouldPlay: true,
@@ -754,6 +961,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   }
 
   async function selectQueuedAndPlay(track: Track): Promise<void> {
+    if (tabSync?.command({ action: 'select', trackId: track.id })) return
     if (!store.queue.some((item) => item.id === track.id)) return
     invalidatePlayback()
     await switchToTrack(track, {
@@ -765,6 +973,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   }
 
   async function next(manual = true) {
+    if (manual && tabSync?.command({ action: 'next' })) return
     if (manual) invalidatePlayback()
     const track = predictNextTrack(manual)
     if (!track) {
@@ -781,6 +990,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   }
 
   async function previous() {
+    if (tabSync?.command({ action: 'previous' })) return
     invalidatePlayback()
     if (previousMeansRestart(backend.active().currentTime())) {
       listening.restartVisit()
@@ -801,7 +1011,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   const mediaSession = createMediaSession({
     currentTrack: () => currentTrack.value,
     isPlaying: () => isPlaying.value,
-    currentTime: () => backend.active().currentTime(),
+    currentTime: () => getLyricsPlaybackState().timeSeconds,
     play,
     pause,
     seek,
@@ -813,7 +1023,10 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   watch(
     () => [currentTrack.value, currentTrack.value?.audioUrl] as const,
     ([track], previousValue) => {
+      if (followingTab.value) return
       const previousTrack = previousValue?.[0]
+      if (detachedTabPosition.value !== null && previousTrack?.id === track?.id) return
+      detachedTabPosition.value = null
       if (!track) {
         stopPlaybackForMissingTrack()
         return
@@ -880,6 +1093,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   watch(
     () => store.queueVersion,
     () => {
+      if (followingTab.value) return
       if (!committingSwitch) invalidatePlayback()
       clearPreloads()
       scheduleAdjacentPreload()
@@ -890,7 +1104,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   watch([isPlaying, () => currentTrack.value?.audioUrl], notifyLyricsPlayback, { flush: 'post' })
 
   function handleTimeUpdate(channel: AudioChannel) {
-    if (channel !== backend.active()) return
+    if (followingTab.value || detachedTabPosition.value !== null || channel !== backend.active())
+      return
     if (pendingSeekTime.value === null) currentTime.value = channel.currentTime()
     const nextSlot = preloadSlots.next
     if (
@@ -914,7 +1129,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   const channelSubscriptions: Array<() => void> = []
 
   function bindChannel(channel: AudioChannel) {
-    const isActive = () => channel === backend.active()
+    const isActive = () =>
+      !followingTab.value && detachedTabPosition.value === null && channel === backend.active()
 
     const syncDuration = () => {
       if (!isActive()) return
@@ -932,26 +1148,58 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       }),
       channel.on('loadedmetadata', syncDuration),
       channel.on('canplay', () => {
-        if (isActive()) scheduleAdjacentPreload()
+        if (isActive()) {
+          clearWaitingTimeout()
+          scheduleAdjacentPreload()
+        }
       }),
       channel.on('play', () => {
-        if (isActive()) isPlaying.value = true
+        if (followingTab.value || detachedTabPosition.value !== null) {
+          channel.pause()
+          return
+        }
+        if (isActive() && isPlaying.value && coordination.canPersist()) coordination.claim()
+        if (isActive() && ((!isPlaying.value && !allowInterruptedStart) || !coordination.owns())) {
+          channel.pause()
+          return
+        }
+        if (isActive()) {
+          allowInterruptedStart = false
+          isPlaying.value = true
+        }
       }),
       channel.on('playing', () => {
+        if (followingTab.value || detachedTabPosition.value !== null) {
+          channel.pause()
+          return
+        }
+        if (isActive() && isPlaying.value && coordination.canPersist()) coordination.claim()
+        if (isActive() && ((!isPlaying.value && !allowInterruptedStart) || !coordination.owns())) {
+          channel.pause()
+          return
+        }
         waitingChannels.delete(channel)
+        if (isActive() && allowInterruptedStart) {
+          allowInterruptedStart = false
+          isPlaying.value = true
+        }
+        if (isActive()) clearWaitingTimeout()
+        if (isActive()) recovery.settled()
         if (isActive()) guardedStartBeatAnalysis()
         if (isActive()) notifyLyricsPlayback()
       }),
       channel.on('waiting', () => {
         waitingChannels.add(channel)
+        if (isActive()) watchStarvedPlayback(channel)
         if (isActive()) notifyLyricsPlayback()
+        if (isActive()) tabSync?.publish(true)
       }),
       channel.on('emptied', () => {
         waitingChannels.delete(channel)
         if (isActive()) notifyLyricsPlayback()
       }),
       channel.on('pause', () => {
-        if (!isActive() || transition.isPreparing()) return
+        if (!isActive() || transition.isPreparing() || recovery.active()) return
         // 自然播完时浏览器先派 pause 再派 ended:这里若把 isPlaying 置 false,
         // ended 里的 next(false) 会以 shouldPlay=false 切歌但不播放。
         // 手动暂停走 pause() 直接置位,不受这条守卫影响
@@ -960,7 +1208,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         stopBeatAnalysis()
       }),
       channel.on('ended', () => {
-        if (!isActive() || transition.isPreparing()) return
+        if (!isActive() || transition.isPreparing() || !isPlaying.value || !coordination.owns())
+          return
         if (settings.value.playMode === 'single') {
           replayCurrentTrack()
           return
@@ -968,7 +1217,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         void next(false)
       }),
       channel.on('error', () => {
-        if (!isActive()) return
+        if (!isActive() || !coordination.canPersist()) return
         handleActiveChannelError(channel)
       }),
     )
@@ -988,6 +1237,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         channel.on(event, () => {
           if (event === 'canplay' || event === 'loadeddata') waitingChannels.delete(channel)
           if (isActive()) notifyLyricsPlayback()
+          if (isActive() && event !== 'timeupdate') tabSync?.publish(true)
         }),
       )
     }
@@ -999,6 +1249,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       pendingStart.fail(new Error('media error'))
       return
     }
+    const reason = channel.classifyFailure(new Error('media error'))
+    if (handleRecoverableFailure(channel, reason)) return
     const failedTrack = currentTrack.value
     // 过渡期间失败也要释放锁,否则后续所有切歌都会被永久挡在入口
     const wasTransitioning = transition.isPreparing()
@@ -1010,7 +1262,6 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     }
     // 决策必须与随后调度的 next(false) 得出同一结果:先标记失败再预测后继,
     // 否则单曲循环下会预测到刚被拉黑的当前曲目,提示"正在继续播放"而实际已经停了
-    const reason = channel.classifyFailure(new Error('media error'))
     const action = resolveFailureAction(reason, {
       skipOnError: Boolean(failedTrack) && settings.value.skipOnError,
       hasNextTrack: Boolean(predictNextTrack(false)),
@@ -1031,7 +1282,100 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   for (const channel of channels) bindChannel(channel)
   mountActiveAudioForIOS()
 
+  tabSync = createPlaybackSync({
+    coordinator: coordination,
+    getSnapshot: () => {
+      const track = currentTrack.value
+      if (!track) return null
+      const clock = getLyricsPlaybackState()
+      return {
+        track,
+        position: pendingSeekTime.value ?? clock.timeSeconds,
+        duration: duration.value,
+        playing: isPlaying.value,
+        advancing: clock.playing,
+        playbackRate: clock.playbackRate,
+        seeking: clock.seeking,
+      }
+    },
+    onSnapshot(state) {
+      if (!followingTab.value) {
+        followingTab.value = true
+        listening.flush()
+        pauseLocal()
+        for (const channel of channels) channel.release()
+        pendingSeekTime.value = null
+        detachedTabPosition.value = null
+      }
+      store.setSyncedTrack(state.track)
+      store.clearResume()
+      currentTime.value = state.position
+      duration.value = state.duration
+      isPlaying.value = state.playing
+      store.errorMessage = ''
+      preloadMessage.value = ''
+      notifyLyricsPlayback()
+      syncMediaSession()
+      mediaSession.syncPosition(state.position, state.duration)
+    },
+    onTick(state) {
+      currentTime.value = state.position
+    },
+    onStop(state) {
+      // Leaving sync or losing the owner never starts audio without a user gesture.
+      pauseLocal()
+      detachedTabPosition.value = state.position
+      followingTab.value = false
+      currentTime.value = state.position
+      pendingSeekTime.value = null
+      notifyLyricsPlayback()
+    },
+    async onCommand(command) {
+      switch (command.action) {
+        case 'play':
+          await play()
+          break
+        case 'pause':
+          pause()
+          break
+        case 'seek':
+          seek(command.position)
+          break
+        case 'next':
+          await next()
+          break
+        case 'previous':
+          await previous()
+          break
+        case 'select': {
+          const track = store.tracks.find((item) => item.id === command.trackId)
+          if (!track) break
+          if (command.queueIds) {
+            const byId = new Map(store.tracks.map((item) => [item.id, item]))
+            const queue = command.queueIds
+              .map((id) => byId.get(id))
+              .filter((item): item is Track => !!item)
+            await selectAndPlay(track, queue)
+          } else await selectQueuedAndPlay(track)
+          break
+        }
+      }
+    },
+  })
+  watch(
+    () => [settings.value.tabCoordination, settings.value.syncTabPlayback] as const,
+    ([coordinated, sync]) => {
+      if (!coordinated || !sync) tabSync?.setEnabled(false)
+      coordination.setEnabled(coordinated)
+      if (coordinated && isPlaying.value && !followingTab.value) coordination.claim()
+      tabSync?.setEnabled(coordinated && sync)
+    },
+    { immediate: true, flush: 'post' },
+  )
+  watch([currentTrack, isPlaying, duration], () => tabSync?.publish(true), { flush: 'post' })
+
   const saveSession = () => {
+    if (!coordination.canPersist()) return
     if (pendingSeekTime.value === null && currentTrack.value) {
       const channel = backend.active()
       try {
@@ -1046,7 +1390,9 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   const handlePageHide = (): void => {
     saveSession()
     listening.flush()
-    pause()
+    tabSync?.release()
+    coordination.release()
+    pauseLocal()
   }
   window.addEventListener('pagehide', handlePageHide)
 
@@ -1055,7 +1401,10 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       window.removeEventListener('pagehide', handlePageHide)
       saveSession()
       listening.flush()
+      tabSync?.dispose()
+      coordination.dispose()
       disposed = true
+      recovery.dispose()
       lyricPlaybackListeners.clear()
       waitingChannels.clear()
       invalidatePlayback()
@@ -1105,7 +1454,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     beatLevel,
     listeningStats: listening.stats,
     clearListeningHistory: listening.clear,
-    getPlaybackSeconds: () => backend.active().currentTime(),
+    getPlaybackSeconds: () => getLyricsPlaybackState().timeSeconds,
     getLyricsPlaybackState,
     subscribeLyricsPlayback,
     beatBuildStatus: preanalysis.status,

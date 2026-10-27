@@ -21,6 +21,7 @@ import {
 import type { BeatAnalysisCheckpoint } from '../../core/analysis/beat-checkpoint'
 import type { BeatAnalysisMetrics } from '../../core/analysis/beat-preanalysis-protocol'
 import type { BeatAnalysisMode, Track } from '../../core/types'
+import type { PlaybackResourcePressure } from '../../core/playback/resource-budget'
 import { listeningTrackKey } from '../../core/playback/listening-stats'
 import { isFrequentListeningTrack } from './listening-history'
 import { BEAT_THIS_MODELS, type BeatThisModelId } from '../../core/analysis/beat-this-models'
@@ -46,6 +47,7 @@ const checkpoints = new WeakMap<BeatTimeline, BeatAnalysisCheckpoint>()
 const INTRO_SECONDS = 20
 
 export interface BeatPreanalysisOptions {
+  resourcePressure?: Readonly<Ref<PlaybackResourcePressure>>
   track?: Ref<Track | null>
   source: Ref<string>
   debugEnabled?: Ref<boolean>
@@ -654,6 +656,11 @@ export function useBeatPreanalysis(
   function reconcile(): void {
     try {
       if (disposed) return
+      if (options.resourcePressure?.value === 'buffering') {
+        decision = '音频缓冲不足，保存断点并优先加载音乐'
+        if (job) yieldJob(job, true)
+        return
+      }
       const waitingForForeground =
         !activePause && pauseNeedsForegroundBuffer(schedulingPauses.values().next().value)
       if (schedulingPauses.size && !waitingForForeground) {
@@ -705,6 +712,11 @@ export function useBeatPreanalysis(
         if (job && !foregroundJob) yieldJob(job)
         return
       }
+      if (options.resourcePressure?.value === 'constrained' && job && !foregroundJob) {
+        decision = '暂缓邻曲分析，优先保持播放流畅'
+        yieldJob(job, true)
+        return
+      }
       const duration = timeline.value?.durationSeconds ?? options.durationSeconds?.value ?? 0
       const remaining = Math.max(0, duration - state.timeSeconds)
       const available = coverage(timeline.value, state.timeSeconds)
@@ -730,6 +742,10 @@ export function useBeatPreanalysis(
       if (refilling) {
         decision = '当前歌曲低于水位，优先续建'
         begin(source, options.durationSeconds?.value)
+        return
+      }
+      if (options.resourcePressure?.value === 'constrained') {
+        decision = '当前高亮缓冲充足，暂缓邻曲分析'
         return
       }
       const ordered = [...targets()].sort(
@@ -829,6 +845,11 @@ export function useBeatPreanalysis(
       jobRevision.value += 1
       reconcile()
     },
+    { flush: 'sync' },
+  )
+  watch(
+    () => options.resourcePressure?.value,
+    () => reconcile(),
     { flush: 'sync' },
   )
   onBeforeUnmount(() => {

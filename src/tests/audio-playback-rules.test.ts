@@ -80,7 +80,11 @@ describe('playback failure', () => {
 
   it('skips to the next track when one actually exists', () => {
     expect(
-      resolveFailureAction('network', { skipOnError: true, hasNextTrack: true, canFallBack: true }),
+      resolveFailureAction('unsupported', {
+        skipOnError: true,
+        hasNextTrack: true,
+        canFallBack: true,
+      }),
     ).toEqual({ kind: 'skip', notice: SKIP_NOTICE })
   })
 

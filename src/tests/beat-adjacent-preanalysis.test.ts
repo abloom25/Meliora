@@ -15,6 +15,7 @@ import type {
   BeatTimelineBuilder,
 } from '../platform/web/beat-preanalysis'
 import { useBeatPreanalysis } from '../platform/web/useBeatPreanalysis'
+import type { PlaybackResourcePressure } from '../core/playback/resource-budget'
 
 function timeline(durationSeconds = 120, coveredSeconds?: number): BeatTimeline {
   const size = Math.ceil(durationSeconds * 60) + 1
@@ -87,6 +88,7 @@ function harness(
   const source = ref('/current.mp3')
   const adjacent = ref<readonly BeatPreloadTarget[]>(neighbors)
   const enabled = ref(true)
+  const resourcePressure = ref<PlaybackResourcePressure>('normal')
   const modelAvailable = ref(true)
   const preservePreviewOnUnavailable = ref(false)
   const unavailableReason = ref<string | null>(null)
@@ -151,6 +153,7 @@ function harness(
             source,
             adjacent,
             enabled,
+            resourcePressure,
             modelAvailable,
             preservePreviewOnUnavailable,
             unavailableReason,
@@ -187,6 +190,7 @@ function harness(
     source,
     adjacent,
     enabled,
+    resourcePressure,
     modelAvailable,
     preservePreviewOnUnavailable,
     unavailableReason,
@@ -216,6 +220,44 @@ afterEach(async () => {
 })
 
 describe('manual beat comparison resource lease', () => {
+  it('yields speculative work under load and resumes its saved checkpoint when pressure clears', async () => {
+    const h = harness()
+    await h.finishCurrent()
+    const neighbor = h.jobs.at(-1)!
+    expect(neighbor.source).toBe('/next.mp3')
+    const result = timeline(60, 10)
+    const saved = checkpoint(result, [0])
+    neighbor.dependencies.onCheckpoint?.(saved)
+    const yieldWorker = vi.fn(() => neighbor.complete(result))
+    neighbor.dependencies.subscribeYield?.(yieldWorker)
+    h.resourcePressure.value = 'constrained'
+    await flushPromises()
+    expect(yieldWorker).toHaveBeenCalledOnce()
+    expect(h.inFlight).toBe(0)
+    expect(h.controller.timeline.value).not.toBeNull()
+    h.resourcePressure.value = 'normal'
+    await flushPromises()
+    expect(h.jobs.at(-1)?.source).toBe('/next.mp3')
+    expect(h.jobs.at(-1)?.dependencies.checkpoint).toEqual(saved)
+    expect(h.maximumInFlight).toBe(1)
+  })
+
+  it('retains completed current highlights and resumes only after audio buffering recovers', async () => {
+    const h = harness([])
+    const job = await h.startCurrent()
+    const result = timeline(120, 50)
+    job.dependencies.onCheckpoint?.(checkpoint(result, [0]))
+    job.partial(result)
+    job.dependencies.subscribeYield?.(() => job.complete(result))
+    h.resourcePressure.value = 'buffering'
+    await flushPromises()
+    expect(h.inFlight).toBe(0)
+    expect(h.controller.timeline.value?.completedRanges).toEqual(result.completedRanges)
+    h.resourcePressure.value = 'normal'
+    await flushPromises()
+    expect(h.jobs).toHaveLength(2)
+    expect(h.jobs[1]?.dependencies.checkpoint?.completedWindows).toEqual([0])
+  })
   it('lets foreground refill reach its high watermark before granting a low-priority lease', async () => {
     const h = harness([])
     const current = await h.startCurrent()

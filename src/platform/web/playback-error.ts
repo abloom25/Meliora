@@ -16,6 +16,7 @@ export function classifyPlaybackError(
   const reason = error as DOMException | undefined
   if (reason?.name === 'AbortError') return 'aborted'
   if (reason?.name === 'NotAllowedError') return 'not-allowed'
+  if (reason?.name === 'NetworkError') return 'network'
 
   if (!audio.currentSrc && !audio.src) return 'missing-source'
   switch (audio.error?.code) {

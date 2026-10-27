@@ -37,6 +37,9 @@
     'smoothTrackChange',
     'preloadNextTrack',
     'skipOnError',
+    'adaptivePerformance',
+    'tabCoordination',
+    'syncTabPlayback',
   ]
   const LYRICS_KEYS: readonly ResettableSettingKey[] = [
     'lyricScale',
@@ -339,6 +342,23 @@
         @input="emit('sleepTimerInput', $event)"
         @change="emit('sleepTimerChange', $event)"
       />
+      <SettingToggleRow
+        v-model="settings.adaptivePerformance"
+        label="自动性能调整"
+        description="卡顿或缓冲时，自动降低背景动效和预分析负担"
+      />
+      <SettingToggleRow
+        v-model="settings.tabCoordination"
+        label="多标签页协调"
+        description="只让一个页面出声；关闭后，各页面独立播放"
+      />
+      <Collapse :expanded="settings.tabCoordination">
+        <SettingToggleRow
+          v-model="settings.syncTabPlayback"
+          label="同步所有标签页播放"
+          description="共享歌曲、歌词和进度，在任意页面控制播放"
+        />
+      </Collapse>
       <SettingToggleRow
         v-model="settings.skipOnError"
         label="失败后自动跳过"

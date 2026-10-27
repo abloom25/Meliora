@@ -12,6 +12,7 @@ import { useBeatPreanalysis } from './useBeatPreanalysis'
 import { useBeatThisModels } from './useBeatThisModels'
 import type { BeatAnalysisMode, Track } from '../../core/types'
 import type { BeatPlaybackState } from '../../core/analysis/beat-scheduling'
+import type { PlaybackResourcePressure } from '../../core/playback/resource-budget'
 import {
   BEAT_DEBUG_HISTORY_MS,
   BEAT_DEBUG_INTERVAL_MS,
@@ -53,6 +54,9 @@ const PULSE_WEIGHTS = [0.28, 0.2, 0.12, 0.06, 0.03]
 const SEEK_SETTLE_MS = 180
 
 export interface BeatAnalyserOptions {
+  resourcePressure?: Readonly<Ref<PlaybackResourcePressure>>
+  visualIntervalMs?: Readonly<Ref<number>>
+  observeVisualFrame?: (now: number) => void
   track?: Ref<Track | null>
   debugEnabled?: Ref<boolean>
   /** Higher diagnostic cadence only while the live comparison is visible. */
@@ -132,6 +136,7 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     }
   }
   const preanalysis = useBeatPreanalysis({
+    resourcePressure: options.resourcePressure,
     track: options.track,
     source: options.source ?? ref(''),
     debugEnabled: options.debugEnabled,
@@ -483,6 +488,12 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
   function updateBeatLevel() {
     const activeAudio = getActiveAudio()
     const now = performance.now()
+    options.observeVisualFrame?.(now)
+    const interval = options.visualIntervalMs?.value ?? 0
+    if (lastFrameAt && now - lastFrameAt < interval - 2) {
+      beatFrame = window.requestAnimationFrame(updateBeatLevel)
+      return
+    }
     const elapsedMs = lastFrameAt ? now - lastFrameAt : 1000 / 60
     const dt = clamp(elapsedMs / 1000, 0.001, 0.1)
     lastFrameAt = now

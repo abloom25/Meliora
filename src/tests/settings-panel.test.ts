@@ -90,6 +90,24 @@ describe('SettingsPanel', () => {
     }
   })
 
+  it('exposes simple performance, coordination and opt-in synchronization switches', async () => {
+    const { wrapper, store } = mountPanel()
+    try {
+      const playback = sectionByTitle(wrapper, '播放')!
+      expect(store.settings.adaptivePerformance).toBe(true)
+      expect(store.settings.tabCoordination).toBe(true)
+      expect(store.settings.syncTabPlayback).toBe(false)
+      await playback.get('input[aria-label="自动性能调整"]').setValue(false)
+      await playback.get('input[aria-label="同步所有标签页播放"]').setValue(true)
+      expect(store.settings.adaptivePerformance).toBe(false)
+      expect(store.settings.syncTabPlayback).toBe(true)
+      await playback.get('input[aria-label="多标签页协调"]').setValue(false)
+      expect(store.settings.tabCoordination).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('keeps the optional debug panel switch in its own section', async () => {
     const { wrapper, store } = mountPanel()
     try {
