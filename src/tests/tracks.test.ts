@@ -130,23 +130,69 @@ describe('track utilities', () => {
   })
 
   it('rejects incomplete Meting entries', () => {
-    expect(mapMetingTrack({ title: 'Missing URL' }, 'source', 0)).toBeNull()
-    expect(mapMetingTrack({ title: 'Song', author: '', url: '/audio' }, 'source', 1)).toMatchObject(
-      {
-        title: 'Song',
-        artist: '未知艺术家',
-        kind: 'meting',
-      },
-    )
+    expect(mapMetingTrack({ title: 'Missing URL' }, 'source')).toBeNull()
+    expect(mapMetingTrack({ title: 'Song', author: '', url: '/audio' }, 'source')).toMatchObject({
+      title: 'Song',
+      artist: '未知艺术家',
+      kind: 'meting',
+    })
   })
 
   it('lets providers split display title versions before tracks reach the player', () => {
     expect(
-      mapMetingTrack({ title: 'Song Title (Live) (Remastered)', url: '/audio' }, 'source', 0),
+      mapMetingTrack({ title: 'Song Title (Live) (Remastered)', url: '/audio' }, 'source'),
     ).toMatchObject({
       title: 'Song Title',
       titleVersions: ['Live', 'Remastered'],
     })
+  })
+
+  it('keeps actual Meting IDs stable across playlist ordering and expiring media links', () => {
+    const before = mapMetingTrack(
+      { title: 'Song', url: 'https://old-api.test/music?server=netease&type=url&id=123&token=old' },
+      'netease:first-playlist',
+    )!
+    const after = mapMetingTrack(
+      {
+        title: 'Updated title',
+        url: 'https://new-api.test/music?server=netease&type=url&id=123&token=new',
+      },
+      'netease:second-playlist',
+    )!
+    expect(before.id).toBe('meting:v2:netease:song:123')
+    expect(after.id).toBe(before.id)
+    expect(after.audioUrl).not.toBe(before.audioUrl)
+  })
+
+  it('uses platform lyrics IDs for direct media links and separates different recordings', () => {
+    const map = (id: string, index: number) =>
+      mapMetingTrack(
+        {
+          title: 'Song',
+          url: `https://cdn.test/${index}.mp3`,
+          lrc: `https://api.test?server=tencent&type=lrc&id=${id}`,
+        },
+        'tencent:playlist',
+      )!
+    expect(map('qq-song', 1).id).toBe(map('qq-song', 7).id)
+    expect(map('qq-song', 1).id).not.toBe(map('qq-live', 2).id)
+    const audioWins = mapMetingTrack(
+      {
+        title: 'Live',
+        url: '/music?server=tencent&type=url&id=live',
+        lrc: '/music?server=tencent&type=lrc&id=studio',
+      },
+      'tencent:playlist',
+    )!
+    expect(audioWins.id).toBe('meting:v2:tencent:song:live')
+  })
+
+  it('uses the complete audio resource when no platform identity is available', () => {
+    const map = (url: string) =>
+      mapMetingTrack({ title: 'Same Song', author: 'Same Artist', url }, 'netease:playlist')!
+    expect(map('/song.mp3?version=live').id).toBe(map('/song.mp3?version=live#play').id)
+    expect(map('/song.mp3?version=live').id).not.toBe(map('/song.mp3?version=remix').id)
+    expect(map('/song.mp3?token=old').id).not.toBe(map('/song.mp3?token=new').id)
   })
 
   it('creates short share ids without exposing media urls', () => {
@@ -157,7 +203,6 @@ describe('track utilities', () => {
         url: 'https://api.example.com/song/url?id=123&token=secret',
       },
       'netease:123',
-      0,
     )
 
     expect(track).not.toBeNull()

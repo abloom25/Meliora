@@ -3,20 +3,17 @@ import { loadTrackLyrics } from '../services/lyrics'
 import { usePlayerStore } from '../stores/player'
 import type { PlayerSettings, Track } from '../core/types'
 import { PRELOAD_TIMEOUTS, CACHE_CONSTANTS } from '../../shared/constants'
-import {
-  createTrackFailureLog,
-  predictPreloadTrack,
-  type PreloadDirection,
-} from '../core/audio/preload'
-import type { QueueState } from '../core/audio/queue'
+import { createTrackFailureLog, type PreloadDirection } from '../core/audio/preload'
 import type { AudioBackend, AudioChannel } from '../core/audio/backend'
 import type { BeatPreloadTarget } from '../core/analysis/beat-timeline'
+import { LruCache } from '../core/util/lru-cache'
 
 export type { PreloadDirection }
 
 const PRELOAD_READY_TIMEOUT = PRELOAD_TIMEOUTS.COVER
 const COVER_PRELOAD_CACHE_LIMIT = CACHE_CONSTANTS.COVER_PRELOAD_LIMIT
 const COVER_PRELOAD_CACHE_TTL = CACHE_CONSTANTS.COVER_PRELOAD_TTL
+const COVER_PRELOAD_CONCURRENCY = 4
 
 export interface PreloadSlot {
   /** 这一路预加载占用的播放通道。是稳定句柄,后端内部换实现不影响这里 */
@@ -55,25 +52,39 @@ function isCoverRecentlyPreloaded(url: string) {
 }
 
 /** 解码一张封面。默认走浏览器的 Image;桌面端可以换成自己的图片预热 */
-export type CoverDecoder = (url: string) => Promise<void>
+export type CoverDecoder = (url: string, signal?: AbortSignal) => Promise<void>
 
-const decodeViaImage: CoverDecoder = (url) => {
-  const image = new Image()
-  if (typeof image.decode === 'function') {
-    image.src = url
-    try {
-      return image.decode()
-    } catch (error) {
-      return Promise.reject(error)
+const decodeViaImage: CoverDecoder = (url, signal) =>
+  new Promise<void>((resolve, reject) => {
+    const image = new Image()
+    let settled = false
+    const finish = (error?: unknown): void => {
+      if (settled) return
+      settled = true
+      image.onload = image.onerror = null
+      signal?.removeEventListener('abort', abort)
+      if (error) reject(error)
+      else resolve()
     }
-  }
-  const loaded = new Promise<void>((resolve, reject) => {
-    image.onload = () => resolve()
-    image.onerror = () => reject(new Error('cover preload failed'))
+    const abort = (): void => {
+      image.removeAttribute('src')
+      finish(new DOMException('Cover preload cancelled', 'AbortError'))
+    }
+    if (signal?.aborted) return abort()
+    signal?.addEventListener('abort', abort, { once: true })
+    image.onerror = () => finish(new Error('cover preload failed'))
+    try {
+      if (typeof image.decode === 'function') {
+        image.src = url
+        void image.decode().then(() => finish(), finish)
+      } else {
+        image.onload = () => finish()
+        image.src = url
+      }
+    } catch (error) {
+      finish(error)
+    }
   })
-  image.src = url
-  return loaded
-}
 
 let decodeCover: CoverDecoder = decodeViaImage
 
@@ -88,15 +99,31 @@ export function preloadCover(url?: string): Promise<void> {
 
   const pending = coverPreloadInflight.get(url)
   if (pending) return pending
-
-  const ready = decodeCover(url)
-    .then(() => {
-      rememberPreloadedCover(url)
-    })
-    .catch(() => undefined)
-    .finally(() => {
-      coverPreloadInflight.delete(url)
-    })
+  // Optional warming must never build an unbounded queue during rapid switching.
+  if (coverPreloadInflight.size >= COVER_PRELOAD_CONCURRENCY) return Promise.resolve()
+  const controller = new AbortController()
+  const ready = new Promise<void>((resolve) => {
+    let settled = false
+    const finish = (success: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (success) rememberPreloadedCover(url)
+      else controller.abort()
+      resolve()
+    }
+    const timer = setTimeout(() => finish(false), PRELOAD_TIMEOUTS.COVER)
+    try {
+      void decodeCover(url, controller.signal).then(
+        () => finish(true),
+        () => finish(false),
+      )
+    } catch {
+      finish(false)
+    }
+  }).finally(() => {
+    coverPreloadInflight.delete(url)
+  })
   coverPreloadInflight.set(url, ready)
   return ready
 }
@@ -148,6 +175,8 @@ export function usePreloadPool(options: PreloadPoolOptions) {
   const preloadMessage = ref('')
   // 失败记录的 TTL 与放行规则在核心层,这里只是持有它
   const failureLog = createTrackFailureLog()
+  const failedSources = new Map<string, string>()
+  const transientFailures = new LruCache<string, { source: string; until: number }>(16)
   const pendingPreloadTimeouts = new Set<number>()
   const lyricPreloads = new Map<PreloadSlot, AbortController>()
   const lyricHandoffs = new Set<AbortController>()
@@ -209,33 +238,39 @@ export function usePreloadPool(options: PreloadPoolOptions) {
 
   function markTrackFailed(id: string) {
     failureLog.mark(id)
+    const source = store.tracks.find((track) => track.id === id)?.audioUrl
+    if (source !== undefined) failedSources.set(id, source)
     refreshTargets()
   }
 
   function clearFailedTrack(id: string) {
     failureLog.clear(id)
+    failedSources.delete(id)
     refreshTargets()
   }
 
   function isTrackFailed(id: string): boolean {
-    return failureLog.isFailed(id)
-  }
-
-  function queueState(): QueueState {
-    return {
-      queue: store.queue,
-      currentIndex: store.currentIndex,
-      playMode: store.settings.playMode,
+    if (!failureLog.isFailed(id)) {
+      failedSources.delete(id)
+      return false
     }
+    const failedSource = failedSources.get(id)
+    if (
+      failedSource !== undefined &&
+      store.tracks.find((track) => track.id === id)?.audioUrl !== failedSource
+    ) {
+      failureLog.clear(id)
+      failedSources.delete(id)
+      return false
+    }
+    return true
   }
 
   // 预测规则在核心层,与真正切歌时的选曲共用同一套,不会出现"预加载的和实际播的不是同一首"
   function predictTrack(direction: PreloadDirection, manual = false): Track | null {
-    return predictPreloadTrack(queueState(), store.currentTrack?.id ?? null, direction, {
-      manual,
-      isFailed: isTrackFailed,
-      cachedTrack: preloadSlots[direction].track,
-    })
+    return direction === 'next'
+      ? store.peekNext(manual, isTrackFailed)
+      : store.peekPrevious(isTrackFailed)
   }
 
   function predictNextTrack(manual = false): Track | null {
@@ -363,6 +398,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
       const ownsSlot = () => slot.channel === channel && slot.track === track && !settled
       const timeout = window.setTimeout(() => {
         if (!ownsSlot()) return finish(false)
+        transientFailures.set(track.id, { source: track.audioUrl, until: Date.now() + 15000 })
         finish(false)
         clearSlot(slot)
       }, PRELOAD_READY_TIMEOUT)
@@ -385,7 +421,8 @@ export function usePreloadPool(options: PreloadPoolOptions) {
   }
 
   function preloadAdjacentTracks() {
-    if (!settings.value.preloadNextTrack || transitionInProgress()) return
+    if (!settings.value.preloadNextTrack || transitionInProgress() || navigator.onLine === false)
+      return
     const previousTrack = predictPreviousTrack()
     const nextTrack = predictNextTrack()
     const sameNeighbor =
@@ -393,18 +430,23 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     // In a two-song queue both directions name the same song. Keep it in the
     // next slot instead of releasing and loading it twice on each refresh.
     if (previousTrack && previousTrack.id !== store.currentTrack?.id && !sameNeighbor) {
-      void loadSlot('previous', previousTrack)
+      if (canWarm(previousTrack)) void loadSlot('previous', previousTrack)
     } else {
       clearSlot(preloadSlots.previous)
     }
     if (nextTrack && nextTrack.id !== store.currentTrack?.id) {
-      void loadSlot('next', nextTrack)
+      if (canWarm(nextTrack)) void loadSlot('next', nextTrack)
     } else {
       clearSlot(preloadSlots.next)
     }
   }
 
   let scheduledHandle = 0
+
+  function canWarm(track: Track): boolean {
+    const failed = transientFailures.get(track.id)
+    return !failed || failed.source !== track.audioUrl || Date.now() >= failed.until
+  }
 
   function scheduleAdjacentPreload() {
     if (isPoolUnmounted.value) return
@@ -432,16 +474,34 @@ export function usePreloadPool(options: PreloadPoolOptions) {
         (candidate) => candidate.channel === channel && candidate.track,
       )
       if (!slot?.track) return
-      markTrackFailed(slot.track.id)
+      const reason = channel.classifyFailure(new Error('preload failed'))
+      if (
+        navigator.onLine === false ||
+        reason === 'network' ||
+        reason === 'not-allowed' ||
+        reason === 'aborted'
+      ) {
+        // An optional download failing says nothing about whether the song is playable.
+        transientFailures.set(slot.track.id, {
+          source: slot.track.audioUrl,
+          until: Date.now() + 15000,
+        })
+      } else markTrackFailed(slot.track.id)
       preloadMessage.value = '预加载歌曲暂时无法播放，当前播放不受影响'
       clearSlot(slot)
       scheduleAdjacentPreload()
     }),
   ])
   watch(() => settings.value.preloadNextTrack, refreshTargets, { flush: 'sync' })
+  const reconnect = (): void => {
+    transientFailures.clear()
+    scheduleAdjacentPreload()
+  }
+  window.addEventListener('online', reconnect)
 
   onBeforeUnmount(() => {
     isPoolUnmounted.value = true
+    window.removeEventListener('online', reconnect)
     for (const stop of stopTargetListeners) stop()
     if (scheduledHandle) {
       window.clearTimeout(scheduledHandle)

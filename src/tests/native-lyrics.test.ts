@@ -3,6 +3,7 @@ import { flushPromises } from '@vue/test-utils'
 import {
   getNativeLyricsCacheToken,
   hasCachedNativeLyrics,
+  invalidateNativeLyrics,
   loadNativeLyrics,
   nativeLyricsCacheKey,
   resetNativeLyricsCache,
@@ -58,6 +59,48 @@ describe('native platform lyrics', () => {
     setNativeLyricsCacheStore(null)
     vi.unstubAllGlobals()
     vi.useRealTimers()
+  })
+
+  it('refreshes only the requested platform song', async () => {
+    const fetchMock = vi.fn(async () => found())
+    vi.stubGlobal('fetch', fetchMock)
+    const other = { ...query, id: 'other' }
+    const first = await loadNativeLyrics(query)
+    const second = await loadNativeLyrics(other)
+    await flushPromises()
+    await invalidateNativeLyrics(query)
+    expect(await loadNativeLyrics(other)).toBe(second)
+    expect(await loadNativeLyrics(query)).not.toBe(first)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not resurrect a native lyric record after a concurrent storage clear', async () => {
+    let generation = 0
+    const write = vi.fn(async () => undefined)
+    setNativeLyricsCacheStore({
+      get generation() {
+        return generation
+      },
+      get: async () => null,
+      set: write,
+    })
+    let complete!: (response: Response) => void
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            complete = resolve
+          }),
+      ),
+    )
+    const pending = loadNativeLyrics(query)
+    await flushPromises()
+    generation += 1
+    complete(found())
+    expect(await pending).toBeNull()
+    expect(hasCachedNativeLyrics(query)).toBe(false)
+    expect(write).not.toHaveBeenCalled()
   })
 
   it('loads a same-origin YRC response and retains translation and romanization', async () => {

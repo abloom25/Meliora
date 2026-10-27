@@ -5,6 +5,7 @@ import { loadTrackLyrics, registerTrackLyrics } from '../services/lyrics'
 import { migrateSettings, usePlayerStore } from '../stores/player'
 import { wireApplication } from '../app/composition-root'
 import type { PlayerSettings, Track } from '../core/types'
+import { PLAYBACK_SESSION_KEY } from '../core/playback/session'
 
 let testPinia: Pinia | undefined
 
@@ -50,6 +51,26 @@ const tracks: Track[] = [
 ]
 
 describe('player store', () => {
+  it('blocks delayed and explicit session writes after this page loses playback ownership', async () => {
+    vi.useFakeTimers()
+    const store = usePlayerStore()
+    store.setTracks(tracks)
+    store.currentTrackId = '1'
+    store.currentTime = 20
+    store.persistPlaybackSession()
+    const saved = localStorage.getItem(PLAYBACK_SESSION_KEY)
+    store.setPlaybackSessionGuard(() => false)
+    store.currentTrackId = '2'
+    store.currentTime = 99
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(1500)
+    store.persistPlaybackSession()
+    expect(localStorage.getItem(PLAYBACK_SESSION_KEY)).toBe(saved)
+    store.setPlaybackSessionGuard(() => true)
+    store.persistPlaybackSession()
+    expect(JSON.parse(localStorage.getItem(PLAYBACK_SESSION_KEY)!).position).toBe(99)
+    vi.useRealTimers()
+  })
   beforeEach(() => {
     // store 不再直接依赖服务层,歌词来源的搬运由组装点装上(与 main.ts 一致)
     wireApplication()
@@ -147,7 +168,7 @@ describe('player store', () => {
     store.setTracks(nextTracks)
 
     expect(store.currentTrack).toBe(activeTrack)
-    expect(store.queue.map((track) => track.id)).toEqual(['3', '2', '4'])
+    expect(store.queue.map((track) => track.id)).toEqual(['3', '2'])
     expect(store.queue[1]).toBe(activeTrack)
     expect(store.tracks.map((track) => track.id)).toEqual(['2', '3', '4'])
     expect(store.currentTrackId).toBe('2')
@@ -365,7 +386,131 @@ describe('player store peekNext / peekPrevious', () => {
   })
 })
 
+describe('editable queue and resume', () => {
+  it('keeps removals and manual order across library refreshes', () => {
+    const store = usePlayerStore()
+    store.setTracks(tracks)
+    store.selectTrack(tracks[0]!, tracks)
+    expect(store.removeQueuedTrack('1')).toBe(false)
+    expect(store.removeQueuedTrack('2')).toBe(true)
+    expect(store.moveQueuedTrack('3', '1')).toBe(true)
+    store.setTracks(tracks)
+    expect(store.queue.map((track) => track.id)).toEqual(['3', '1'])
+    store.enqueueTrack(tracks[1]!, true)
+    expect(store.peekNext(true)?.id).toBe('2')
+    store.selectQueuedTrack(tracks[2]!)
+    expect(store.queue.map((track) => track.id)).toEqual(['3', '1', '2'])
+  })
+
+  it('preserves a stable shuffle round and real back/forward history', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.9)
+    const store = usePlayerStore()
+    store.setTracks(tracks)
+    store.selectTrack(tracks[0]!, tracks)
+    store.settings.playMode = 'shuffle'
+    expect(store.peekNext(true)?.id).toBe('3')
+    vi.mocked(Math.random).mockReturnValue(0)
+    expect(store.peekNext(true)?.id).toBe('3')
+    expect(store.nextTrack(true)?.id).toBe('3')
+    expect(store.nextTrack(true)?.id).toBe('2')
+    expect(store.previousTrack()?.id).toBe('3')
+    expect(store.previousTrack()?.id).toBe('1')
+    expect(store.nextTrack(true)?.id).toBe('3')
+    expect(store.nextTrack(true)?.id).toBe('2')
+  })
+
+  it('restores paused position, edited queue and shuffle plan through progressive loading', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.9)
+    const original = usePlayerStore()
+    original.setTracks(tracks)
+    original.selectTrack(tracks[1]!, tracks)
+    original.settings.playMode = 'shuffle'
+    original.moveQueuedTrack('3', '1')
+    original.currentTime = 42.25
+    const expectedNext = original.peekNext(true)?.id
+    activateTestPinia()
+
+    const restored = usePlayerStore()
+    expect(restored.isPlaying).toBe(false)
+    expect(restored.resumePosition).toBe(42.25)
+    restored.setTracks([tracks[0]!], { complete: false })
+    restored.persistPlaybackSession()
+    expect(JSON.parse(localStorage.getItem(PLAYBACK_SESSION_KEY)!).queueIds).toEqual([
+      '3',
+      '1',
+      '2',
+    ])
+    restored.setTracks([tracks[1]!], { complete: false })
+    expect(restored.currentTrack?.id).toBe('2')
+    expect(restored.getResumePosition(restored.currentTrack!)).toBe(42.25)
+    restored.setTracks(tracks)
+    expect(restored.queue.map((track) => track.id)).toEqual(['3', '1', '2'])
+    expect(restored.peekNext(true)?.id).toBe(expectedNext)
+    expect(restored.currentTime).toBe(42.25)
+  })
+
+  it('starts another usable shuffle round if all remaining songs have failed', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.9)
+    const store = usePlayerStore()
+    store.setTracks(tracks)
+    store.selectTrack(tracks[0]!, tracks)
+    store.settings.playMode = 'shuffle'
+    expect(store.nextTrack(true)?.id).toBe('3')
+    expect(store.peekNext(true, (id) => id === '2')?.id).toBe('1')
+    expect(store.peekNext(true, (id) => id === '2')?.id).toBe('1')
+  })
+
+  it('migrates an old Meting last-track identity independently of playlist position', () => {
+    localStorage.setItem(
+      'meliora:last-track',
+      'meting:netease:playlist123:7:https://old-api.test?server=netease&type=url&id=123&token=old',
+    )
+    const store = usePlayerStore()
+    expect(store.currentTrackId).toBe('meting:v2:netease:song:123')
+  })
+
+  it('discards a stored position when the same track receives a different audio source', () => {
+    const store = usePlayerStore()
+    store.setTracks(tracks)
+    store.selectTrack(tracks[0]!, tracks)
+    store.currentTime = 38
+    activateTestPinia()
+    const restored = usePlayerStore()
+    restored.setTracks([{ ...tracks[0]!, audioUrl: '/new.mp3' }])
+    expect(restored.hasResumePosition).toBe(false)
+    expect(restored.currentTime).toBe(0)
+  })
+
+  it('preserves a stable platform song bookmark when its CDN token changes', () => {
+    const track = {
+      ...tracks[0]!,
+      id: 'meting:v2:netease:song:123',
+      audioUrl: 'https://cdn.test/song?token=old',
+    }
+    const store = usePlayerStore()
+    store.setTracks([track])
+    store.selectTrack(track, [track])
+    store.currentTime = 38
+    activateTestPinia()
+    const restored = usePlayerStore()
+    restored.setTracks([{ ...track, audioUrl: 'https://cdn.test/song?token=new' }])
+    expect(restored.getResumePosition(restored.currentTrack!)).toBe(38)
+    expect(restored.hasResumePosition).toBe(true)
+    expect(restored.isPlaying).toBe(false)
+  })
+})
+
 describe('player settings migration', () => {
+  it('migrates romanization independently and keeps PiP scale optional', () => {
+    expect(migrateSettings({ lyricTranslation: false }).lyricRomanization).toBe(false)
+    expect(
+      migrateSettings({ lyricTranslation: false, lyricRomanization: true }).lyricRomanization,
+    ).toBe(true)
+    expect(migrateSettings({}).lyricWindowScale).toBeNull()
+    expect(migrateSettings({ lyricWindowScale: Number.NaN }).lyricWindowScale).toBeNull()
+    expect(migrateSettings({ lyricWindowScale: 10 }).lyricWindowScale).toBeNull()
+    expect(migrateSettings({ lyricWindowScale: 1.2 }).lyricWindowScale).toBe(1.2)
+  })
   it('defaults to responsive lyric scaling with settingsVersion 2', () => {
     const result = migrateSettings({})
     expect(result.settingsVersion).toBe(2)

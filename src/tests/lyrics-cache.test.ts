@@ -57,6 +57,30 @@ function indexedDbFixture() {
         put: (value: LyricsCacheRecord) => request(() => records.set(value.key, value)),
         count: () => request(() => records.size),
         delete: (key: string) => request(() => records.delete(key)),
+        clear: () => request(() => records.clear()),
+        openCursor: () => {
+          const values = [...records.entries()]
+          let position = 0
+          interface Cursor {
+            value: unknown
+            primaryKey: string
+            continue: () => void
+          }
+          const cursor: Request<Cursor | null> = { result: null, onsuccess: null }
+          const read = (): Cursor | null =>
+            position >= values.length
+              ? null
+              : {
+                  value: values[position]![1],
+                  primaryKey: values[position]![0],
+                  continue: () => {
+                    position += 1
+                    schedule(cursor, read)
+                  },
+                }
+          schedule(cursor, read)
+          return cursor
+        },
         index: (name: string) => {
           expect(name).toBe('updatedAt')
           return {
@@ -88,6 +112,9 @@ function indexedDbFixture() {
           }
         },
       }
+      queueMicrotask(() => {
+        if (!outstanding) transaction.oncomplete?.()
+      })
       return transaction
     }),
   }
@@ -152,6 +179,29 @@ describe('persistent lyric cache', () => {
     expect(await store.get('old')).toBeNull()
     await store.set({ ...record('huge'), text: 'x'.repeat(LYRICS_CACHE_MAX_TEXT_LENGTH + 1) })
     expect(fixture.records.has('huge')).toBe(false)
+  })
+
+  it('reports payload size, prunes expired entries and prevents writes crossing a clear', async () => {
+    const fixture = indexedDbFixture()
+    const store = createWebLyricsCacheStore()
+    await store.set(record('current', Date.now()))
+    await store.set(record('expired', 1))
+    const stats = await store.stats!()
+    expect(stats).toEqual({
+      entries: 1,
+      bytes: ('current'.length + 'lyrics'.length) * 2 + 32,
+      storageAvailable: true,
+    })
+    expect(fixture.records.has('expired')).toBe(false)
+    const epoch = store.generation
+    const pending = store.set(record('pending', Date.now()), epoch)
+    await store.clear!()
+    await pending
+    await store.set(record('late', Date.now()), epoch)
+    expect(fixture.records.size).toBe(0)
+    expect((await store.stats!()).entries).toBe(0)
+    await store.set(record('new', Date.now()), store.generation)
+    expect(fixture.records.has('new')).toBe(true)
   })
 
   it('falls back silently when IndexedDB is missing or denied', async () => {

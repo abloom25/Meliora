@@ -82,6 +82,9 @@ export interface PlayerSettings {
   playMode: PlayMode
   smoothTrackChange: boolean
   preloadNextTrack: boolean
+  adaptivePerformance: boolean
+  tabCoordination: boolean
+  syncTabPlayback: boolean
   dynamicBackground: boolean
   /** 背景随节奏闪光(与动态封面背景独立) */
   beatFlash: boolean
@@ -100,6 +103,9 @@ export interface PlayerSettings {
   /** 歌词牵引滚动的弹簧刚度系数(1 = 默认)。越大越紧绷、越快到位,越小越绵软 */
   lyricSpring: number
   lyricTranslation: boolean
+  lyricRomanization: boolean
+  /** null follows the main lyric scale; otherwise remembers an independent window scale. */
+  lyricWindowScale: number | null
   progressLyricPreview: boolean
   skipOnError: boolean
   autoHideChrome: boolean

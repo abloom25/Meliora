@@ -215,6 +215,14 @@ export function useBeatThisModels() {
     download,
     cancel,
     remove,
+    async savedBytes(): Promise<{ small: number; standard: number; runtime: number }> {
+      const [small, standard, runtime] = await Promise.all([
+        store('small').savedBytes(),
+        store('standard').savedBytes(),
+        sharedRuntime().savedBytes(),
+      ])
+      return { small, standard, runtime }
+    },
     runtimeBytes: BEAT_THIS_RUNTIME.bytes,
   }
 }

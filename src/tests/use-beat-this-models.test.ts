@@ -106,6 +106,18 @@ async function manager() {
 }
 
 describe('optional Beat This model manager', () => {
+  it('inventories completed and partial downloads without counting the shared runtime twice', async () => {
+    small.state.cached = true
+    standard.state.saved = 4
+    runtime.state.cached = true
+    const models = await manager()
+    expect(await models.module.useBeatThisModels().savedBytes()).toEqual({
+      small: 6,
+      standard: 4,
+      runtime: 3,
+    })
+    expect(fetch).not.toHaveBeenCalled()
+  })
   it('restores partial progress after reopening without implicit network requests', async () => {
     small.state.saved = 3
     runtime.state.saved = 1

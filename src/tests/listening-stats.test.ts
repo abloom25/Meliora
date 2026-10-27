@@ -166,12 +166,39 @@ describe('active-player listening history', () => {
       qualifiedPlays: 2,
       listenedSeconds: 60,
     })
-    vi.spyOn(beatResultCache.store, 'clear').mockRejectedValue(new Error('storage denied'))
-    await expect(clearListeningHistory()).rejects.toThrow('storage denied')
+    vi.spyOn(storage, 'removeItem').mockImplementationOnce(() => {})
+    await expect(clearListeningHistory()).rejects.toThrow('无法清除本机听歌统计')
     expect(listeningStatsSummary.value.trackedTracks).toHaveLength(1)
     expect(listeningStatsSummary.value.totalQualifiedPlays).toBe(2)
     expect(
       JSON.parse(storage.getItem('meliora:listening-history:v1')!).records[0].qualifiedPlays,
     ).toBe(2)
+  })
+
+  it('merges newly listened time into another page latest totals instead of overwriting them', () => {
+    const storage = createMemoryStore()
+    setSettingsStore(storage)
+    recordListening(track, 30, true)
+    const saved = JSON.parse(storage.getItem('meliora:listening-history:v1')!)
+    saved.records[0].qualifiedPlays = 7
+    saved.records[0].listenedSeconds = 210
+    storage.setItem('meliora:listening-history:v1', JSON.stringify(saved))
+    recordListening(track, 30, true)
+    expect(JSON.parse(storage.getItem('meliora:listening-history:v1')!).records[0]).toMatchObject({
+      qualifiedPlays: 8,
+      listenedSeconds: 240,
+    })
+    expect(listeningStatsSummary.value.totalListenedSeconds).toBe(240)
+  })
+
+  it('clears listening history independently from analysis caches', async () => {
+    setSettingsStore(createMemoryStore())
+    const clearCache = vi
+      .spyOn(beatResultCache.store, 'clear')
+      .mockRejectedValue(new Error('cache unavailable'))
+    recordListening(track, 30, true)
+    await clearListeningHistory()
+    expect(clearCache).not.toHaveBeenCalled()
+    expect(listeningStatsSummary.value.totalQualifiedPlays).toBe(0)
   })
 })

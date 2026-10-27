@@ -36,6 +36,8 @@ export {
 
 export { detectLyricFormat, parseAnyLyrics, type LyricSourceFormat } from './source'
 
+export { shiftLyricTimings } from './timing-offset'
+
 export { parseTtmlLyrics } from './ttml'
 
 export { looksLikeWordTimedLyrics, parseWordTimedLyrics } from './yrc'

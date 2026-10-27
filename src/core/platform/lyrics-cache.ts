@@ -9,8 +9,18 @@ export interface LyricsCacheRecord {
 
 /** 持久缓存是可选加速层。调用方必须容忍不可用或配额不足。 */
 export interface LyricsCacheStore {
+  readonly generation?: number
   get(key: string): Promise<LyricsCacheRecord | null>
-  set(record: LyricsCacheRecord): Promise<void>
+  set(record: LyricsCacheRecord, generation?: number): Promise<void>
+  clear?(): Promise<void>
+  stats?(): Promise<LyricsCacheStats>
+}
+
+export interface LyricsCacheStats {
+  entries: number
+  /** Estimated UTF-16 text payload; browser database overhead is excluded. */
+  bytes: number
+  storageAvailable: boolean
 }
 
 export const LYRICS_CACHE_CAPACITY = 128

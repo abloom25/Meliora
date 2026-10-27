@@ -1,15 +1,22 @@
-import { computed, onScopeDispose, ref, watch } from 'vue'
+import { computed, onScopeDispose, ref, shallowRef, watch } from 'vue'
 import { defineStore } from 'pinia'
 import type { BeatAnalysisMode, PlayMode, PlayerSettings, Track } from '../core/types'
 import { settingsStore } from '../platform/settings-store'
 import { createDefaultEqualizer, sanitizeEqualizer } from '../core/audio/equalizer'
-import {
-  nextPlayMode,
-  selectNextTrack,
-  selectPreviousTrack,
-  type QueueState,
-} from '../core/audio/queue'
+import { nextPlayMode } from '../core/audio/queue'
+import { normalizeTrackId } from '../core/library/track-id'
 import { sanitizeBeatFlashRate } from '../core/analysis/beat-envelope'
+import {
+  PLAYBACK_SESSION_KEY,
+  canResumePlayback,
+  emptyQueueJourney,
+  peekJourneyTrack,
+  prepareQueueJourney,
+  sanitizePlaybackSession,
+  visitQueueTrack,
+  type PlaybackSession,
+  type QueueJourney,
+} from '../core/playback/session'
 
 const SETTINGS_KEY = 'meliora:settings'
 const LAST_TRACK_KEY = 'meliora:last-track'
@@ -21,6 +28,9 @@ const defaultSettings: PlayerSettings = {
   playMode: 'loop',
   smoothTrackChange: true,
   preloadNextTrack: true,
+  adaptivePerformance: true,
+  tabCoordination: true,
+  syncTabPlayback: false,
   dynamicBackground: true,
   beatFlash: true,
   beatAnalysisMode: 'basic',
@@ -33,6 +43,8 @@ const defaultSettings: PlayerSettings = {
   lyricAnimation: true,
   lyricSpring: 1,
   lyricTranslation: true,
+  lyricRomanization: true,
+  lyricWindowScale: null,
   progressLyricPreview: false,
   skipOnError: true,
   autoHideChrome: true,
@@ -53,6 +65,12 @@ export function migrateSettings(saved: SavedPlayerSettings): PlayerSettings {
     playMode: sanitizePlayMode(input.playMode),
     smoothTrackChange: sanitizeBoolean(input.smoothTrackChange, defaultSettings.smoothTrackChange),
     preloadNextTrack: sanitizeBoolean(input.preloadNextTrack, defaultSettings.preloadNextTrack),
+    adaptivePerformance: sanitizeBoolean(
+      input.adaptivePerformance,
+      defaultSettings.adaptivePerformance,
+    ),
+    tabCoordination: sanitizeBoolean(input.tabCoordination, defaultSettings.tabCoordination),
+    syncTabPlayback: sanitizeBoolean(input.syncTabPlayback, defaultSettings.syncTabPlayback),
     dynamicBackground: sanitizeBoolean(input.dynamicBackground, defaultSettings.dynamicBackground),
     beatFlash: sanitizeBoolean(input.beatFlash, defaultSettings.beatFlash),
     beatAnalysisMode: sanitizeBeatAnalysisMode(input.beatAnalysisMode),
@@ -75,6 +93,17 @@ export function migrateSettings(saved: SavedPlayerSettings): PlayerSettings {
     lyricAnimation: sanitizeBoolean(input.lyricAnimation, defaultSettings.lyricAnimation),
     lyricSpring: sanitizeNumber(input.lyricSpring, defaultSettings.lyricSpring, 0.5, 2),
     lyricTranslation: sanitizeBoolean(input.lyricTranslation, defaultSettings.lyricTranslation),
+    lyricRomanization: sanitizeBoolean(
+      input.lyricRomanization,
+      sanitizeBoolean(input.lyricTranslation, defaultSettings.lyricTranslation),
+    ),
+    lyricWindowScale:
+      typeof input.lyricWindowScale === 'number' &&
+      Number.isFinite(input.lyricWindowScale) &&
+      input.lyricWindowScale >= 0.75 &&
+      input.lyricWindowScale <= 1.5
+        ? input.lyricWindowScale
+        : null,
     progressLyricPreview: sanitizeBoolean(
       input.progressLyricPreview,
       defaultSettings.progressLyricPreview,
@@ -134,16 +163,57 @@ function loadSettings(): PlayerSettings {
 }
 
 export const usePlayerStore = defineStore('player', () => {
+  let restored: PlaybackSession | null = null
+  try {
+    restored = sanitizePlaybackSession(
+      JSON.parse(settingsStore().getItem(PLAYBACK_SESSION_KEY) || 'null'),
+    )
+  } catch {
+    /* Invalid local data must not prevent playback. */
+  }
   const tracks = ref<Track[]>([])
   const queue = ref<Track[]>([])
+  let queueIds = restored?.queueIds ?? []
+  let customQueue = restored?.customQueue ?? false
+  let journey = restored?.journey ?? emptyQueueJourney()
   const queueVersion = ref(0)
   const currentTrackVersion = ref(0)
-  const currentTrackId = ref<string | null>(settingsStore().getItem(LAST_TRACK_KEY))
+  const lastTrackId = settingsStore().getItem(LAST_TRACK_KEY)
+  const currentTrackId = ref<string | null>(
+    restored?.currentTrackId ?? (lastTrackId ? normalizeTrackId(lastTrackId) : null),
+  )
   const isPlaying = ref(false)
-  const currentTime = ref(0)
+  const currentTime = ref(restored?.position ?? 0)
+  const resumePosition = ref(restored?.position ?? 0)
+  const hasResumePosition = computed(() => resumePosition.value > 0)
+  let resumeTrackId = restored?.currentTrackId ?? null
+  let resumeSource = restored?.audioUrl ?? ''
+  let sessionTimer = 0
+  let canPersistSession = (): boolean => true
+  function setPlaybackSessionGuard(guard: () => boolean): void {
+    canPersistSession = guard
+  }
   const duration = ref(0)
   const settings = ref<PlayerSettings>(loadSettings())
   const errorMessage = ref('')
+  // A newly opened follower can display metadata before its library finishes loading.
+  const syncedTrack = shallowRef<Track | null>(null)
+  function setSyncedTrack(track: Track): void {
+    const previous = syncedTrack.value
+    if (
+      !previous ||
+      previous.id !== track.id ||
+      previous.audioUrl !== track.audioUrl ||
+      previous.title !== track.title ||
+      previous.artist !== track.artist ||
+      previous.cover !== track.cover ||
+      previous.album !== track.album
+    )
+      syncedTrack.value = track
+    if (journey.history[journey.historyIndex] !== track.id)
+      journey = visitQueueTrack(journey, track.id, 'select')
+    currentTrackId.value = track.id
+  }
 
   const trackById = computed(() => new Map(tracks.value.map((track) => [track.id, track])))
   const queueIndexById = computed(
@@ -151,7 +221,10 @@ export const usePlayerStore = defineStore('player', () => {
   )
 
   const currentTrack = computed(() =>
-    currentTrackId.value ? (trackById.value.get(currentTrackId.value) ?? null) : null,
+    currentTrackId.value
+      ? (trackById.value.get(currentTrackId.value) ??
+        (syncedTrack.value?.id === currentTrackId.value ? syncedTrack.value : null))
+      : null,
   )
   const currentIndex = computed(() =>
     currentTrackId.value ? (queueIndexById.value.get(currentTrackId.value) ?? -1) : -1,
@@ -159,6 +232,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   function bumpQueueVersion() {
     queueVersion.value += 1
+    scheduleSessionSave()
   }
 
   function bumpCurrentTrackVersion() {
@@ -175,8 +249,12 @@ export const usePlayerStore = defineStore('player', () => {
 
   function setTracks(nextTracks: Track[], options: { complete?: boolean } = {}) {
     const activeTrack = currentTrack.value ?? undefined
+    const incomingTracks =
+      options.complete === false
+        ? [...new Map([...tracks.value, ...nextTracks].map((track) => [track.id, track])).values()]
+        : nextTracks
     const mergedTracks = activeTrack
-      ? nextTracks.map((track) => {
+      ? incomingTracks.map((track) => {
           if (track.id !== activeTrack.id) return track
           carryTrackSideData?.(track, activeTrack)
           // 渐进加载会复用当前对象，先复制，避免删除可选字段时连来源一起删掉。
@@ -189,16 +267,14 @@ export const usePlayerStore = defineStore('player', () => {
           bumpCurrentTrackVersion()
           return activeTrack
         })
-      : nextTracks
+      : incomingTracks
     const mergedTrackById = new Map(mergedTracks.map((track) => [track.id, track]))
-    const queuedIds = new Set<string>()
-    const syncedQueue = queue.value
-      .map((track) => mergedTrackById.get(track.id))
+    if (options.complete !== false) queueIds = queueIds.filter((id) => mergedTrackById.has(id))
+    if (!customQueue)
+      queueIds = [...new Set([...queueIds, ...mergedTracks.map((track) => track.id)])]
+    const syncedQueue = queueIds
+      .map((id) => mergedTrackById.get(id))
       .filter((track): track is Track => Boolean(track))
-    for (const track of syncedQueue) queuedIds.add(track.id)
-    for (const track of mergedTracks) {
-      if (!queuedIds.has(track.id)) syncedQueue.push(track)
-    }
 
     tracks.value = mergedTracks
     if (queue.value.length || syncedQueue.length) {
@@ -208,40 +284,104 @@ export const usePlayerStore = defineStore('player', () => {
     if (
       options.complete !== false &&
       currentTrackId.value &&
+      syncedTrack.value?.id !== currentTrackId.value &&
       !mergedTrackById.has(currentTrackId.value)
     ) {
       currentTrackId.value = null
+      clearResume()
+      currentTime.value = 0
     }
+    pruneJourney()
+    if (currentTrack.value && journey.history[journey.historyIndex] !== currentTrack.value.id)
+      journey = visitQueueTrack(journey, currentTrack.value.id, 'select')
+    if (currentTrack.value) getResumePosition(currentTrack.value)
   }
 
   function selectTrack(track: Track, sourceQueue: Track[] = tracks.value) {
-    queue.value = [...sourceQueue]
+    queue.value = [...new Map([...sourceQueue, track].map((item) => [item.id, item])).values()]
+    queueIds = queue.value.map((item) => item.id)
+    customQueue = true
+    journey = { ...journey, remaining: [], played: [], priority: [] }
+    pruneJourney()
     bumpQueueVersion()
-    setCurrentTrack(track)
+    setCurrentTrack(track, 'select')
   }
 
-  function setCurrentTrack(track: Track) {
+  function setCurrentTrack(track: Track, direction: 'next' | 'previous' | 'select') {
+    clearResume()
+    journey = visitQueueTrack(journey, track.id, direction)
     currentTrackId.value = track.id
     currentTime.value = 0
     duration.value = 0
     errorMessage.value = ''
+    scheduleSessionSave()
   }
 
-  // 选曲规则本身是纯的,放在 core/audio/queue;这里只负责把当前状态喂进去
-  function queueState(): QueueState {
-    return {
-      queue: queue.value,
-      currentIndex: currentIndex.value,
-      playMode: settings.value.playMode,
+  function pruneJourney() {
+    const allowed = new Set(queueIds)
+    const before = journey.history.slice(0, journey.historyIndex + 1)
+    journey = {
+      history: journey.history.filter((id) => allowed.has(id)),
+      historyIndex: before.filter((id) => allowed.has(id)).length - 1,
+      remaining: journey.remaining.filter((id) => allowed.has(id)),
+      played: journey.played.filter((id) => allowed.has(id)),
+      priority: journey.priority.filter((id) => allowed.has(id)),
     }
   }
 
-  function peekNext(manual = false): Track | null {
-    return selectNextTrack(queueState(), { manual })
+  function peek(
+    direction: 'next' | 'previous',
+    manual: boolean,
+    unavailable: (id: string) => boolean,
+  ): Track | null {
+    if (!queue.value.length) return null
+    const availableIds = queue.value.map((track) => track.id)
+    if (settings.value.playMode === 'shuffle' && direction === 'next') {
+      // Keep not-yet-loaded IDs in the round; progressive loading must not redraw it.
+      journey = prepareQueueJourney(journey, queueIds, currentTrackId.value, Math.random)
+      scheduleSessionSave()
+    }
+    const readPlannedId = () =>
+      peekJourneyTrack(
+        journey,
+        availableIds,
+        currentTrackId.value,
+        settings.value.playMode,
+        direction,
+        manual,
+        unavailable,
+      )
+    let id = readPlannedId()
+    if (
+      !id &&
+      direction === 'next' &&
+      settings.value.playMode === 'shuffle' &&
+      availableIds.some(
+        (candidate) => candidate !== currentTrackId.value && !unavailable(candidate),
+      )
+    ) {
+      // A round whose remaining songs all failed must not stop an otherwise usable queue.
+      journey = prepareQueueJourney(
+        { ...journey, remaining: [], played: currentTrackId.value ? [currentTrackId.value] : [] },
+        queueIds,
+        currentTrackId.value,
+        Math.random,
+      )
+      id = readPlannedId()
+      scheduleSessionSave()
+    }
+    return id ? (queue.value.find((track) => track.id === id) ?? null) : null
   }
 
-  function peekPrevious(): Track | null {
-    return selectPreviousTrack(queueState())
+  function peekNext(
+    manual = false,
+    unavailable: (id: string) => boolean = () => false,
+  ): Track | null {
+    return peek('next', manual, unavailable)
+  }
+
+  function peekPrevious(unavailable: (id: string) => boolean = () => false): Track | null {
+    return peek('previous', true, unavailable)
   }
 
   function nextTrack(manual = false, preferredTrackId?: string): Track | null {
@@ -256,7 +396,7 @@ export const usePlayerStore = defineStore('player', () => {
       }
     }
     if (!track) track = peekNext(manual)
-    if (track) setCurrentTrack(track)
+    if (track) setCurrentTrack(track, 'next')
     return track
   }
 
@@ -270,9 +410,132 @@ export const usePlayerStore = defineStore('player', () => {
     } else {
       track = peekPrevious()
     }
-    if (track) setCurrentTrack(track)
+    if (track) setCurrentTrack(track, 'previous')
     return track
   }
+
+  function enqueueTrack(track: Track, next = false): void {
+    if (!trackById.value.has(track.id)) return
+    customQueue = true
+    if (next && track.id !== currentTrackId.value) {
+      queueIds = queueIds.filter((id) => id !== track.id)
+      const after = currentTrackId.value ? queueIds.indexOf(currentTrackId.value) + 1 : 0
+      queueIds.splice(Math.max(0, after), 0, track.id)
+      journey = {
+        ...journey,
+        priority: [track.id, ...journey.priority.filter((id) => id !== track.id)],
+      }
+    } else if (!queueIds.includes(track.id)) queueIds.push(track.id)
+    rebuildEditedQueue()
+  }
+
+  function rebuildEditedQueue(): void {
+    queue.value = queueIds
+      .map((id) => trackById.value.get(id))
+      .filter((track): track is Track => Boolean(track))
+    pruneJourney()
+    bumpQueueVersion()
+  }
+
+  function removeQueuedTrack(id: string): boolean {
+    if (id === currentTrackId.value || !queueIds.includes(id)) return false
+    customQueue = true
+    queueIds = queueIds.filter((item) => item !== id)
+    rebuildEditedQueue()
+    return true
+  }
+
+  function moveQueuedTrack(fromId: string, toId: string): boolean {
+    const from = queueIds.indexOf(fromId)
+    const to = queueIds.indexOf(toId)
+    if (from < 0 || to < 0 || from === to) return false
+    customQueue = true
+    queueIds.splice(from, 1)
+    queueIds.splice(to, 0, fromId)
+    journey = { ...journey, priority: [] }
+    rebuildEditedQueue()
+    return true
+  }
+
+  function selectQueuedTrack(track: Track): void {
+    if (!queue.value.some((item) => item.id === track.id)) enqueueTrack(track)
+    if (queue.value.some((item) => item.id === track.id)) setCurrentTrack(track, 'select')
+  }
+
+  function captureQueueJourney(): QueueJourney {
+    return {
+      ...journey,
+      history: [...journey.history],
+      remaining: [...journey.remaining],
+      played: [...journey.played],
+      priority: [...journey.priority],
+    }
+  }
+
+  function restoreQueueJourney(saved: QueueJourney, track: Track | null): void {
+    journey = saved
+    pruneJourney()
+    if (track) currentTrackId.value = track.id
+    scheduleSessionSave()
+  }
+
+  function clearResume(): void {
+    resumePosition.value = 0
+    resumeTrackId = null
+    resumeSource = ''
+  }
+
+  function getResumePosition(track: Track): number | null {
+    if (!resumePosition.value) return null
+    if (!canResumePlayback(resumeTrackId, resumeSource, track)) {
+      clearResume()
+      currentTime.value = 0
+      return null
+    }
+    return resumePosition.value
+  }
+
+  function persistPlaybackSession(): void {
+    if (sessionTimer) window.clearTimeout(sessionTimer)
+    sessionTimer = 0
+    if (!canPersistSession()) return
+    const session: PlaybackSession = {
+      version: 1,
+      queueIds: [...queueIds],
+      customQueue,
+      currentTrackId: currentTrackId.value,
+      audioUrl: currentTrack.value?.audioUrl ?? resumeSource,
+      position: Number.isFinite(currentTime.value)
+        ? Math.max(0, resumePosition.value || currentTime.value)
+        : 0,
+      journey: captureQueueJourney(),
+    }
+    settingsStore().setItem(PLAYBACK_SESSION_KEY, JSON.stringify(session))
+    // The mode and its shuffle round must survive the same page-close boundary.
+    persistSettings()
+  }
+
+  function scheduleSessionSave(): void {
+    if (!canPersistSession()) return
+    if (!sessionTimer) sessionTimer = window.setTimeout(persistPlaybackSession, 1000)
+  }
+
+  watch([currentTime, currentTrackId], scheduleSessionSave)
+  watch(isPlaying, (playing) => {
+    if (!playing) persistPlaybackSession()
+  })
+  watch(
+    () => settings.value.playMode,
+    () => {
+      journey = {
+        ...journey,
+        remaining: [],
+        played: currentTrackId.value ? [currentTrackId.value] : [],
+      }
+      scheduleSessionSave()
+    },
+    { flush: 'sync' },
+  )
 
   function cyclePlayMode() {
     settings.value.playMode = nextPlayMode(settings.value.playMode)
@@ -285,10 +548,10 @@ export const usePlayerStore = defineStore('player', () => {
   // store 被 dispose(其 effect scope 销毁)时清理挂起的防抖定时器,
   // 并立即落盘尚未写入的设置,避免丢失最后一次修改。
   onScopeDispose(() => {
+    persistPlaybackSession()
     if (saveSettingsTimer) {
       window.clearTimeout(saveSettingsTimer)
       saveSettingsTimer = 0
-      persistSettings()
     }
   })
   watch(
@@ -300,6 +563,7 @@ export const usePlayerStore = defineStore('player', () => {
     { deep: true },
   )
   watch(currentTrackId, (value) => {
+    if (!canPersistSession()) return
     if (value) settingsStore().setItem(LAST_TRACK_KEY, value)
     else settingsStore().removeItem(LAST_TRACK_KEY)
   })
@@ -324,11 +588,24 @@ export const usePlayerStore = defineStore('player', () => {
     currentIndex,
     isPlaying,
     currentTime,
+    resumePosition,
+    hasResumePosition,
     duration,
     settings,
     errorMessage,
     setTracks,
+    setSyncedTrack,
     selectTrack,
+    enqueueTrack,
+    removeQueuedTrack,
+    moveQueuedTrack,
+    selectQueuedTrack,
+    captureQueueJourney,
+    restoreQueueJourney,
+    clearResume,
+    getResumePosition,
+    persistPlaybackSession,
+    setPlaybackSessionGuard,
     onTrackReplaced,
     peekNext,
     peekPrevious,

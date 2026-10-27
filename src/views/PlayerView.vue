@@ -24,6 +24,9 @@
   } from '@lucide/vue'
   import { hasTrackLyricsSource } from '../services/lyrics'
   import { usePlayerStore } from '../stores/player'
+  import { useLibraryStore } from '../stores/library'
+  import { selectLibraryTracks, type LibraryView } from '../core/library/personal-library'
+  import { filterTracks } from '../core/library/tracks'
   import { usePlayerLibrary } from '../composables/usePlayerLibrary'
   import { usePlayerArtwork } from '../composables/usePlayerArtwork'
   import { usePlayerPanels } from '../composables/usePlayerPanels'
@@ -147,6 +150,7 @@
     next,
     previous,
     selectAndPlay,
+    selectQueuedAndPlay,
     beatBuildStatus,
     retryBeatBuild,
     beatDebug,
@@ -237,8 +241,24 @@
   const lyricAvailability = ref<LyricAvailability>('unavailable')
   const lyricsSnapshot = shallowRef<LyricsSnapshot | null>(null)
   const notice = ref('')
-  const { runtimeConfig, query, loading, loadFailed, sourceWarning, filteredTracks, loadTracks } =
-    usePlayerLibrary({ showNotice, clearNotice })
+  const { runtimeConfig, query, loading, loadFailed, sourceWarning, loadTracks } = usePlayerLibrary(
+    { showNotice, clearNotice },
+  )
+  const library = useLibraryStore()
+  const libraryView = ref<LibraryView>('all')
+  const libraryTracks = computed(() =>
+    selectLibraryTracks(
+      tracks.value,
+      store.queue,
+      listeningStats.value.trackedTracks,
+      library.favorites,
+      libraryView.value,
+    ),
+  )
+  const filteredTracks = computed(() => filterTracks(libraryTracks.value, query.value))
+  const favoriteIds = computed(() =>
+    tracks.value.filter(library.isFavorite).map((track) => track.id),
+  )
   const {
     accent,
     accentSoft,
@@ -411,7 +431,28 @@
 
   function selectTrack(track: Track) {
     triggerHaptic('selection')
-    void selectAndPlay(track, filteredTracks.value)
+    if (libraryView.value === 'queue') void selectQueuedAndPlay(track)
+    else void selectAndPlay(track, filteredTracks.value)
+  }
+
+  function enqueueTrack(track: Track, next: boolean) {
+    const alreadyQueued = store.queue.some((item) => item.id === track.id)
+    store.enqueueTrack(track, next)
+    showNotice(
+      next
+        ? `下一首播放：${track.title}`
+        : alreadyQueued
+          ? '歌曲已在播放队列中'
+          : `已加入队列：${track.title}`,
+    )
+  }
+
+  function toggleFavorite(track: Track) {
+    showNotice(library.toggleFavorite(track) ? '已收藏歌曲' : '已取消收藏')
+  }
+
+  function removeQueuedTrack(id: string) {
+    if (store.removeQueuedTrack(id)) showNotice('已移出播放队列')
   }
 
   function toggleLyrics() {
@@ -829,7 +870,9 @@
         <TrackList
           ref="trackListRef"
           :tracks="filteredTracks"
-          :total="store.tracks.length"
+          :total="libraryTracks.length"
+          :view="libraryView"
+          :favorite-ids="favoriteIds"
           :current-track-id="currentTrackId"
           :is-playing="isPlaying"
           :loading="loading"
@@ -837,7 +880,12 @@
           :query="query"
           :spectrum-available="spectrumAvailable"
           @update:query="query = $event"
+          @update:view="libraryView = $event"
           @select="selectTrack"
+          @enqueue="enqueueTrack"
+          @favorite="toggleFavorite"
+          @remove="removeQueuedTrack"
+          @move="store.moveQueuedTrack"
           @reload="loadTracks"
         >
           <template v-if="isCompactLandscape" #header-actions>

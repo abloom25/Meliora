@@ -10,6 +10,7 @@ const FocusTrapHarness = defineComponent({
     autoFocus: { type: Boolean, default: true },
     initialFocusSelector: { type: String, default: '' },
     disableLast: { type: Boolean, default: false },
+    rovingTabs: { type: Boolean, default: false },
   },
   setup(props) {
     const containerRef = ref<HTMLElement | null>(null)
@@ -27,7 +28,14 @@ const FocusTrapHarness = defineComponent({
         h('button', { id: 'trigger' }, 'open'),
         props.open
           ? h('div', { id: 'drawer', ref: containerRef as unknown as string, tabindex: '-1' }, [
-              h('button', { id: 'first' }, 'first'),
+              props.rovingTabs
+                ? h('button', { id: 'inactive-category', role: 'tab', tabindex: -1 }, '全部')
+                : null,
+              h(
+                'button',
+                { id: 'first', role: props.rovingTabs ? 'tab' : undefined, tabindex: 0 },
+                'first',
+              ),
               h('button', { id: 'last', disabled: props.disableLast }, 'last'),
             ])
           : null,
@@ -41,6 +49,35 @@ const FocusTrapHarness = defineComponent({
 })
 
 describe('useFocusTrap', () => {
+  it('wraps Tab around the selected roving tab instead of a programmatically focusable inactive tab', async () => {
+    const wrapper = mount(FocusTrapHarness, {
+      props: { open: true, rovingTabs: true },
+      attachTo: document.body,
+    })
+    try {
+      await nextTick()
+      await nextTick()
+      const selected = wrapper.get<HTMLButtonElement>('#first').element
+      const last = wrapper.get<HTMLButtonElement>('#last').element
+      expect(document.activeElement).toBe(selected)
+      const backwards = new KeyboardEvent('keydown', {
+        key: 'Tab',
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+      selected.dispatchEvent(backwards)
+      expect(backwards.defaultPrevented).toBe(true)
+      expect(document.activeElement).toBe(last)
+      const forwards = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+      last.dispatchEvent(forwards)
+      expect(forwards.defaultPrevented).toBe(true)
+      expect(document.activeElement).toBe(selected)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it.each([
     { initialFocusSelector: '#last', disableLast: false, expected: 'last' },
     { initialFocusSelector: '#trigger', disableLast: false, expected: 'first' },

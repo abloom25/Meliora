@@ -241,7 +241,6 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   const {
     preloadSlots,
     preloadMessage,
-    failureLog,
     markTrackFailed,
     clearFailedTrack,
     isTrackFailed,
@@ -406,6 +405,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       if (!isCurrent()) return
       isPlaying.value = true
       store.errorMessage = ''
+      store.clearResume()
       guardedStartBeatAnalysis()
     } catch (error) {
       if (!isCurrent()) return
@@ -445,6 +445,15 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     const channel = backend.active()
     const resolution = resolveSeek(time, channel.duration())
     if (resolution.kind === 'ignore') return
+    if (retiringChannel) {
+      // End the audible overlap without cancelling the incoming play() result:
+      // it still owns startup failure handling and analysis initialization.
+      cancelGainAnimation(channel)
+      cancelGainAnimation(retiringChannel)
+      channel.setGain(1)
+      finishOutgoing(retiringChannel)
+    }
+    store.clearResume()
     channel.seek(resolution.time)
     currentTime.value = resolution.time
     pendingSeekTime.value = resolution.kind === 'pending' ? resolution.time : null
@@ -583,6 +592,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
 
       // 同步写入 reactivity：UI 立刻刷新到新歌（标题/封面/进度归零）。
       clearPreloadMessage()
+      const previousJourney = store.captureQueueJourney()
       committingSwitch = true
       try {
         updateStore()
@@ -661,7 +671,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
           clearSlot(reverseSlot)
           committingSwitch = true
           try {
-            store.previousTrack(oldTrack.id)
+            store.restoreQueueJourney(previousJourney, oldTrack)
           } finally {
             committingSwitch = false
           }
@@ -670,6 +680,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
           refreshTargets()
           mountActiveAudioForIOS()
         } else {
+          store.restoreQueueJourney(previousJourney, null)
           finishOutgoing(outgoing)
         }
         // 回退已经做完(store 也指回了旧曲目),此刻的 predictNextTrack(true) 才与
@@ -710,7 +721,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
           isPlaying.value = true
           store.errorMessage = ''
           guardedStartBeatAnalysis()
-          if (useCrossfade) {
+          if (useCrossfade && retiringChannel === outgoing) {
             const fadeInPromise =
               waitForReady && outgoing !== incoming
                 ? crossfadePlayers(outgoing, incoming)
@@ -742,6 +753,17 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     })
   }
 
+  async function selectQueuedAndPlay(track: Track): Promise<void> {
+    if (!store.queue.some((item) => item.id === track.id)) return
+    invalidatePlayback()
+    await switchToTrack(track, {
+      shouldPlay: true,
+      direction: 'next',
+      waitForReady: false,
+      updateStore: () => store.selectQueuedTrack(track),
+    })
+  }
+
   async function next(manual = true) {
     if (manual) invalidatePlayback()
     const track = predictNextTrack(manual)
@@ -765,21 +787,14 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       seek(0)
       return
     }
-    const queue = store.queue
-    // 无当前曲目时 currentIndex === -1:明确从队尾(-1 的上一首即队尾)开始往前找,
-    // 而不是沿用 (-1-1+len)%len = len-2 的怪异算术(会错误地跳到倒数第二首)。
-    const baseIndex = store.currentIndex < 0 ? queue.length : store.currentIndex
-    for (let offset = 1; offset <= queue.length; offset += 1) {
-      const index = (baseIndex - offset + queue.length) % queue.length
-      const candidate = queue[index]
-      if (!candidate || isTrackFailed(candidate.id)) continue
-      const switched = await switchToTrack(candidate, {
+    const candidate = store.peekPrevious(isTrackFailed)
+    if (candidate) {
+      await switchToTrack(candidate, {
         shouldPlay: isPlaying.value,
         direction: 'previous',
         waitForReady: false,
         updateStore: () => store.previousTrack(candidate.id),
       })
-      if (switched) return
     }
   }
 
@@ -814,7 +829,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         store.errorMessage = '当前歌曲没有可用的音频地址'
         return
       }
-      if (backend.active().source() === resolvedUrl) return
+      if (backend.active().source() === resolvedUrl && previousTrack?.id === track.id) return
       invalidatePlayback()
       mountActiveAudioForIOS()
       backend.active().load(track.audioUrl)
@@ -822,6 +837,12 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       automaticCrossfadeStarted = false
       // 切换到全新音频源时旧的 pending seek 时间也要丢弃
       pendingSeekTime.value = null
+      const resume = store.getResumePosition(track)
+      if (resume !== null) {
+        backend.active().seek(resume)
+        currentTime.value = resume
+        pendingSeekTime.value = backend.active().duration() === null ? resume : null
+      }
       syncMediaSession()
       scheduleAdjacentPreload()
       if (previousTrack && isPlaying.value) void play()
@@ -860,7 +881,6 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     () => store.queueVersion,
     () => {
       if (!committingSwitch) invalidatePlayback()
-      failureLog.clearAll()
       clearPreloads()
       scheduleAdjacentPreload()
     },
@@ -871,7 +891,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
 
   function handleTimeUpdate(channel: AudioChannel) {
     if (channel !== backend.active()) return
-    currentTime.value = channel.currentTime()
+    if (pendingSeekTime.value === null) currentTime.value = channel.currentTime()
     const nextSlot = preloadSlots.next
     if (
       isPlaying.value &&
@@ -1011,8 +1031,30 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   for (const channel of channels) bindChannel(channel)
   mountActiveAudioForIOS()
 
+  const saveSession = () => {
+    if (pendingSeekTime.value === null && currentTrack.value) {
+      const channel = backend.active()
+      try {
+        if (channel.source() === new URL(currentTrack.value.audioUrl, window.location.href).href)
+          currentTime.value = channel.currentTime()
+      } catch {
+        /* Invalid sources are handled by the track watcher. */
+      }
+    }
+    store.persistPlaybackSession()
+  }
+  const handlePageHide = (): void => {
+    saveSession()
+    listening.flush()
+    pause()
+  }
+  window.addEventListener('pagehide', handlePageHide)
+
   onBeforeUnmount(() => {
     try {
+      window.removeEventListener('pagehide', handlePageHide)
+      saveSession()
+      listening.flush()
       disposed = true
       lyricPlaybackListeners.clear()
       waitingChannels.clear()
@@ -1089,5 +1131,6 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     next,
     previous,
     selectAndPlay,
+    selectQueuedAndPlay,
   }
 }

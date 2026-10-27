@@ -7,14 +7,15 @@ import type { Track } from '../../core/types'
 import type { LocalTrackConfig } from '../../../shared/music-config'
 import { createTrackShareId } from '../../core/library/tracks'
 import { splitDisplayTitle } from '../../core/library/title'
+import { createMetingTrackId } from '../../core/library/track-id'
 import type { MetingTrack } from './types'
 
-export function mapMetingTrack(track: MetingTrack, sourceKey: string, index: number): Track | null {
+export function mapMetingTrack(track: MetingTrack, sourceKey: string): Track | null {
   if (!track.title?.trim() || !track.url?.trim()) return null
   const rawTitle = track.title.trim()
   const displayTitle = splitDisplayTitle(track.title)
   const mapped: Track = {
-    id: `meting:${sourceKey}:${index}:${track.url}`,
+    id: createMetingTrackId(sourceKey, track.url, track.lrc),
     title: displayTitle.title,
     titleVersions: displayTitle.versions.length ? displayTitle.versions : undefined,
     artist: track.author?.trim() || '未知艺术家',
