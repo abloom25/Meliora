@@ -195,6 +195,8 @@
     currentTime,
     debugEnabled,
     lyricAnimation: computed(() => settings.value.lyricAnimation),
+    lyricScale: computed(() => settings.value.lyricScale),
+    lyricWindowScale: computed(() => settings.value.lyricWindowScale),
   })
   const { canInstall, isInstalled, install, iosInstallAvailable } = usePwaInstall()
 
@@ -240,6 +242,8 @@
   const lyricsEnabled = ref(true)
   const lyricAvailability = ref<LyricAvailability>('unavailable')
   const lyricsSnapshot = shallowRef<LyricsSnapshot | null>(null)
+  const lyricsPanelRef = ref<InstanceType<typeof LyricsPanel> | null>(null)
+  const getCalibrationLyrics = () => lyricsPanelRef.value?.getCalibrationLyrics() ?? null
   const notice = ref('')
   const { runtimeConfig, query, loading, loadFailed, sourceWarning, loadTracks } = usePlayerLibrary(
     { showNotice, clearNotice },
@@ -720,6 +724,7 @@
 
       <Transition name="lyrics-panel-swap" mode="out-in">
         <LyricsPanel
+          ref="lyricsPanelRef"
           class="lyrics-column"
           :class="{ 'mobile-hidden': mobileView !== 'lyrics', 'lyrics-disabled': !lyricsVisible }"
           :active="lyricsPanelActive"
@@ -974,6 +979,8 @@
           :sleep-timer="settingsSleepTimer"
           :capabilities="settingsCapabilities"
           :song-info="settingsSongInfo"
+          :get-calibration-lyrics="getCalibrationLyrics"
+          :get-playback-state="getLyricsPlaybackState"
           :beat-build="beatBuildStatus"
           :listening-stats="listeningStats"
           :clear-listening-history="clearListeningHistory"

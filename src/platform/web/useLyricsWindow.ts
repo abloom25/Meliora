@@ -35,6 +35,9 @@ interface LyricsWindowOptions {
   subscribeLyricsPlayback?: (listener: () => void) => () => void
   /** 歌词动画开关。关掉后小窗同样停掉逐字扫光,整行一次性高亮 */
   lyricAnimation: Ref<boolean>
+  lyricScale?: Readonly<Ref<number>>
+  /** null/未设置时跟随主歌词比例。 */
+  lyricWindowScale?: Readonly<Ref<number | null>>
   debugEnabled?: Readonly<Ref<boolean>>
 }
 
@@ -60,7 +63,7 @@ interface CachedNodes {
 }
 
 const popupStyles = `
-  :root { color-scheme: dark; font-family: -apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif; --lyric-size: clamp(18px,min(5.4vw,6vh),38px); --line-gap: clamp(8px,2.2vh,18px); --cover-size: clamp(32px,min(11vw,10vh),56px); }
+  :root { color-scheme: dark; font-family: -apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif; --lyric-size: calc(clamp(18px,min(5.4vw,6vh),38px) * var(--lyric-scale,1)); --line-gap: clamp(8px,2.2vh,18px); --cover-size: clamp(32px,min(11vw,10vh),56px); }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   html,body { width: 100%; height: 100%; }
@@ -118,7 +121,7 @@ const popupStyles = `
     .lyrics { flex: 1; }
   }
   @media (max-height: 240px) {
-    :root { --lyric-size: clamp(16px,min(4.6vw,10vh),24px); --line-gap: 6px; --cover-size: 28px; }
+    :root { --lyric-size: calc(clamp(16px,min(4.6vw,10vh),24px) * var(--lyric-scale,1)); --line-gap: 6px; --cover-size: 28px; }
     main { gap: 8px; }
     h1 { font-size: 13px; }
     p { margin-top: 2px; font-size: 11px; }
@@ -160,6 +163,8 @@ export function useLyricsWindow({
   getLyricsPlaybackState,
   subscribeLyricsPlayback,
   lyricAnimation,
+  lyricScale,
+  lyricWindowScale,
   debugEnabled,
 }: LyricsWindowOptions) {
   const snapshot = shallowRef<LyricsSnapshot>({
@@ -453,10 +458,17 @@ export function useLyricsWindow({
       target.document.write(POPUP_HTML)
       target.document.close()
       target.document.documentElement.classList.toggle('apple-font', isApplePlatform())
+      writeLyricScale(target)
     } catch {
       // 极少数情况下 document.write 会抛错(如窗口已被回收),交给上层处理
       throw new Error('Failed to write lyrics window document')
     }
+  }
+
+  function writeLyricScale(target: Window): void {
+    const requested = lyricWindowScale?.value ?? lyricScale?.value ?? 1
+    const scale = Number.isFinite(requested) ? Math.max(0.75, Math.min(1.5, requested)) : 1
+    target.document.documentElement.style.setProperty('--lyric-scale', String(scale))
   }
 
   function waitForDocumentReady(target: Window): Promise<void> {
@@ -1337,6 +1349,14 @@ export function useLyricsWindow({
     stopKaraoke()
     startKaraoke()
   })
+  watch(
+    () => lyricWindowScale?.value ?? lyricScale?.value ?? 1,
+    () => {
+      if (!lyricsWindow) return
+      writeLyricScale(lyricsWindow)
+      resetLayout()
+    },
+  )
   watch(
     [
       () => currentTrack.value?.id,

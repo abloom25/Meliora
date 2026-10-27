@@ -18,8 +18,11 @@
   import SongInfoValue from './SongInfoValue.vue'
   import ToggleSwitch from './ToggleSwitch.vue'
   import ListeningStatsSection from './ListeningStatsSection.vue'
+  import SongLyricsSettings from './SongLyricsSettings.vue'
   import CacheManagementSection from './CacheManagementSection.vue'
   import type { ListeningStatsSummary } from '../platform/web/listening-history'
+  import type { LyricCalibrationContext } from '../core/lyrics/calibration'
+  import type { LyricPlaybackState } from '../core/lyrics/render-schedule'
 
   const REPO_URL = 'https://github.com/abloom25/Meliora'
   const debugSettingsAvailable = import.meta.env.DEV
@@ -40,6 +43,8 @@
     'lyricAnimation',
     'lyricSpring',
     'lyricTranslation',
+    'lyricRomanization',
+    'lyricWindowScale',
     'progressLyricPreview',
   ]
   const DISPLAY_KEYS: readonly ResettableSettingKey[] = ['autoHideChrome']
@@ -75,6 +80,18 @@
 
   const volumeLabel = computed(() => `${Math.round(settings.value.volume * 100)}%`)
   const lyricScaleLabel = computed(() => `${Math.round(settings.value.lyricScale * 100)}%`)
+  const separateWindowScale = computed({
+    get: () => settings.value.lyricWindowScale !== null,
+    set: (separate: boolean) => {
+      settings.value.lyricWindowScale = separate ? settings.value.lyricScale : null
+    },
+  })
+  const windowScale = computed({
+    get: () => settings.value.lyricWindowScale ?? settings.value.lyricScale,
+    set: (scale: number) => {
+      settings.value.lyricWindowScale = scale
+    },
+  })
   const resumeTimeLabel = computed(() => {
     const time = Math.floor(store.resumePosition ?? 0)
     return `${Math.floor(time / 60)}:${String(time % 60).padStart(2, '0')}`
@@ -125,6 +142,8 @@
     beatBuild?: BeatBuildStatus
     listeningStats?: ListeningStatsSummary
     clearListeningHistory?: () => Promise<void>
+    getCalibrationLyrics?: () => LyricCalibrationContext | null
+    getPlaybackState?: () => LyricPlaybackState
   }>()
 
   const LYRIC_SOURCE_LABELS: Record<LyricProviderSource, string> = {
@@ -265,6 +284,10 @@
           </div>
         </dl>
       </div>
+      <SongLyricsSettings
+        :get-calibration-lyrics="getCalibrationLyrics"
+        :get-playback-state="getPlaybackState"
+      />
     </section>
 
     <ListeningStatsSection
@@ -365,6 +388,28 @@
         label="歌词翻译"
         description="显示歌词中解析出的翻译文本"
       />
+      <SettingToggleRow
+        v-model="settings.lyricRomanization"
+        label="歌词罗马音"
+        description="独立显示歌词中已有的罗马音或音译"
+      />
+      <template v-if="capabilities.lyricsWindowSupported">
+        <SettingToggleRow
+          v-model="separateWindowScale"
+          label="小窗独立字号"
+          description="关闭后，小窗跟随上面的歌词缩放比例"
+        />
+        <Collapse :expanded="separateWindowScale">
+          <SettingSlider
+            v-model="windowScale"
+            label="小窗歌词缩放"
+            :value-text="`${Math.round(windowScale * 100)}%`"
+            :min="0.75"
+            :max="1.5"
+            :step="0.05"
+          />
+        </Collapse>
+      </template>
       <SettingToggleRow
         v-if="!capabilities.portableDevice"
         v-model="settings.progressLyricPreview"
