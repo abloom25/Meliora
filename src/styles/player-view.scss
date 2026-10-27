@@ -168,6 +168,52 @@
   align-items: center;
   gap: 4px;
 }
+.share-menu-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: var(--dropdown-item-radius, 14px);
+  corner-shape: squircle;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  &:hover:not(:disabled),
+  &:focus-visible {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text);
+  }
+  &:disabled {
+    opacity: 0.35;
+    cursor: default;
+  }
+}
+.lyric-share-tools-enter-active,
+.lyric-share-tools-leave-active {
+  transition:
+    opacity 240ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 240ms cubic-bezier(0.16, 1, 0.3, 1),
+    filter 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.lyric-share-tools-enter-from,
+.lyric-share-tools-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+  filter: blur(4px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .lyric-share-tools-enter-active,
+  .lyric-share-tools-leave-active,
+  .share-menu-option {
+    transition: none;
+  }
+}
 .nav-button,
 .bar-actions button {
   display: grid;
@@ -391,6 +437,9 @@
   bottom: 24px;
   width: calc((100% - clamp(96px, 16vw, 300px) - var(--layout-gap)) * 0.56);
   min-width: 0;
+  // The host owns the lyric stage bounds. A 100% child height would override
+  // the absolute top/bottom insets and put its sharing actions behind the dock.
+  height: auto;
   opacity: 1;
   transform: translateX(0) scale(1);
   transform-origin: left center;

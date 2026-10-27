@@ -30,13 +30,13 @@ function deferred() {
   return { promise, resolve }
 }
 
-function setup() {
+function setup(onOpenSharedTrack?: (track: Track, seconds: number | null) => void) {
   let library!: ReturnType<typeof usePlayerLibrary>
   const showNotice = vi.fn()
   const wrapper = mount(
     defineComponent({
       setup() {
-        library = usePlayerLibrary({ showNotice, clearNotice: vi.fn() })
+        library = usePlayerLibrary({ showNotice, clearNotice: vi.fn(), onOpenSharedTrack })
         return () => h('div')
       },
     }),
@@ -138,6 +138,83 @@ describe('player library lifecycle', () => {
       second.resolve({ tracks: [track], failedSources: 0 })
       await Promise.all([old, latest])
       expect(store.tracks[0]?.id).toBe(track.id)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('hands a late shared timestamp to the audio owner exactly once', async () => {
+    const pending = deferred()
+    let progress!: NonNullable<
+      import('../services/music').LoadConfiguredTracksOptions['onProgress']
+    >
+    vi.mocked(loadConfiguredTracks).mockImplementation((_config, options) => {
+      progress = options!.onProgress!
+      return pending.promise
+    })
+    const open = vi.fn()
+    const { library, wrapper } = setup(open)
+    window.history.replaceState(
+      null,
+      '',
+      `/?share=${createTrackShareId(track)}&t=80.125&view=lyrics#saved`,
+    )
+    try {
+      const loading = library.loadTracks()
+      progress({ tracks: [{ ...track, id: 'early', title: 'Early' }], failedSources: 0 })
+      expect(open).not.toHaveBeenCalled()
+      progress({ tracks: [track], failedSources: 0 })
+      expect(open).toHaveBeenCalledExactlyOnceWith(track, 80.125)
+      expect(window.location.search).toBe('?view=lyrics')
+      expect(window.location.hash).toBe('#saved')
+      pending.resolve({ tracks: [track], failedSources: 0 })
+      await loading
+      expect(open).toHaveBeenCalledTimes(1)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it.each(['', '&t=NaN', '&t=-10', '&t=Infinity', '&t=86401'])(
+    'opens a song without an unsafe or absent timestamp: %s',
+    async (time) => {
+      vi.mocked(loadConfiguredTracks).mockResolvedValue({ tracks: [track], failedSources: 0 })
+      const open = vi.fn()
+      const { library, wrapper } = setup(open)
+      window.history.replaceState(null, '', `/?share=${createTrackShareId(track)}${time}`)
+      try {
+        await library.loadTracks()
+        expect(open).toHaveBeenCalledExactlyOnceWith(track, null)
+        expect(window.location.search).toBe('')
+      } finally {
+        wrapper.unmount()
+      }
+    },
+  )
+
+  it('never treats a timestamp without a shared song as a seek request', async () => {
+    vi.mocked(loadConfiguredTracks).mockResolvedValue({ tracks: [track], failedSources: 0 })
+    const open = vi.fn()
+    const { library, wrapper } = setup(open)
+    window.history.replaceState(null, '', '/?t=80')
+    try {
+      await library.loadTracks()
+      expect(open).not.toHaveBeenCalled()
+      expect(window.location.search).toBe('?t=80')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('keeps legacy shared song selection paused when there is no audio owner', async () => {
+    vi.mocked(loadConfiguredTracks).mockResolvedValue({ tracks: [track], failedSources: 0 })
+    const { library, wrapper, store } = setup()
+    store.isPlaying = true
+    window.history.replaceState(null, '', `/?share=${createTrackShareId(track)}`)
+    try {
+      await library.loadTracks()
+      expect(store.currentTrackId).toBe(track.id)
+      expect(store.isPlaying).toBe(false)
     } finally {
       wrapper.unmount()
     }

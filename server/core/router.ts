@@ -31,6 +31,7 @@ import { UPLOAD_LIMITS } from '../../shared/constants'
 import { readJsonWithLimit, ResponseTooLargeError } from './read-json-with-limit'
 import { jsonResponse } from './http'
 import { getNativeLyrics } from './lyrics-handler'
+import { getShareCover } from './cover-handler'
 
 export interface RequestContext {
   /** 仅允许由部署适配器从平台保证可信的请求元数据中填充。 */
@@ -243,6 +244,7 @@ async function handleRequestInternal(
     if (path === '/api/lyrics') {
       return getNativeLyrics(request, context.clientIp)
     }
+    if (path === '/api/cover') return getShareCover(request, context.clientIp)
 
     if (path === '/api/login' && request.method === 'POST') {
       const rateLimit = consumeRateLimit(LOGIN_RATE_LIMIT, context.clientIp)

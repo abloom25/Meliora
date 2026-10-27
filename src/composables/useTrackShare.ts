@@ -1,6 +1,7 @@
 import type { Ref } from 'vue'
 import type { Track } from '../core/types'
-import { createTrackShareId, formatTrackDisplayTitle } from '../core/library/tracks'
+import { formatTrackDisplayTitle } from '../core/library/tracks'
+import { createTrackShareUrl } from '../platform/web/track-share'
 import type { HapticStyle } from '../platform/web/useHaptic'
 
 export interface UseTrackShareOptions {
@@ -32,16 +33,15 @@ export function useTrackShare(options: UseTrackShareOptions) {
     if (!track) return
     onTriggerHaptic('light')
 
-    const url = new URL(window.location.pathname, window.location.origin)
-    url.searchParams.set('share', createTrackShareId(track))
+    const url = createTrackShareUrl(track)
     const shareTitle = `${formatTrackDisplayTitle(track)} - ${track.artist}`
     const shareText = `Meliora: ${shareTitle}`
     const shareData = {
       title: shareTitle,
       text: shareText,
-      url: url.href,
+      url,
     }
-    const clipboardText = `${shareTitle}\n${url.href}`
+    const clipboardText = `${shareTitle}\n${url}`
 
     try {
       if (navigator.share && (!navigator.canShare || navigator.canShare(shareData))) {
