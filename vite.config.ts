@@ -9,6 +9,8 @@ import { generatePublicConfig } from './scripts/generate-public-config.mjs'
 import { publicMusicConfig } from './src/generated/public-config'
 import { DEV_MUSIC_PROXY_PREFIX } from './shared/dev-music-proxy'
 import { guardDevMusicProxy, isLocalConfigWriteAllowed } from './scripts/dev-request-guards'
+import { DEV_SHARE_COVER_PATH } from './shared/share-cover'
+import { getShareCover } from './server/core/cover-handler'
 
 const localDevConfigPath = join(process.cwd(), '.meliora/config.local.json')
 const beatRuntimeModule = createRequire(import.meta.url)
@@ -51,6 +53,30 @@ function melioraLocalConfigPlugin(): Plugin {
     apply: 'serve',
     configureServer(server) {
       server.middlewares.use(guardDevMusicProxy(musicApiEndpoint))
+      server.middlewares.use(DEV_SHARE_COVER_PATH, async (request, response) => {
+        const controller = new AbortController()
+        const cancel = (): void => {
+          if (!response.writableEnded) controller.abort()
+        }
+        response.once('close', cancel)
+        try {
+          const result = await getShareCover(
+            new Request(new URL(request.url ?? '/', 'http://localhost'), {
+              method: request.method,
+              signal: controller.signal,
+            }),
+            request.socket.remoteAddress,
+          )
+          if (controller.signal.aborted) return
+          response.statusCode = result.status
+          result.headers.forEach((value, key) => response.setHeader(key, value))
+          response.end(Buffer.from(await result.arrayBuffer()))
+        } catch {
+          if (!controller.signal.aborted) sendJson(response, 502, { error: '封面暂时无法载入' })
+        } finally {
+          response.removeListener('close', cancel)
+        }
+      })
       server.middlewares.use('/__meliora-dev/config', async (request, response) => {
         if (request.method !== 'POST') {
           sendJson(response, 405, { error: 'Method Not Allowed' })

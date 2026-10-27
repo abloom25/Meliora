@@ -3,6 +3,8 @@ import { usePlayerStore } from '../stores/player'
 import { musicConfig } from '../config/music'
 import { loadConfiguredTracks, loadMusicConfig } from '../services/music'
 import { filterTracks, trackMatchesShareId } from '../core/library/tracks'
+import { parseTrackShareTime } from '../core/library/track-share'
+import type { Track } from '../core/types'
 import { applySiteIntegrations } from '../platform/web/site-integrations'
 import type { PublicMusicConfig } from '../../shared/music-config'
 
@@ -10,8 +12,10 @@ import type { PublicMusicConfig } from '../../shared/music-config'
 export function usePlayerLibrary(options: {
   showNotice: (message: string) => void
   clearNotice: () => void
+  /** The audio owner pauses, selects and seeks; its normal pending seek clamps to media duration. */
+  onOpenSharedTrack?: (track: Track, seconds: number | null) => void
 }) {
-  const { showNotice, clearNotice } = options
+  const { showNotice, clearNotice, onOpenSharedTrack } = options
   const store = usePlayerStore()
   const runtimeConfig = ref<PublicMusicConfig>(musicConfig())
   const query = ref('')
@@ -66,14 +70,23 @@ export function usePlayerLibrary(options: {
       applySiteIntegrations(config)
       const url = new URL(window.location.href)
       const sharedTrackId = url.searchParams.get('share')
+      const sharedTime = parseTrackShareTime(url.searchParams.get('t'))
       let shareResolved = false
       const resolveShare = (finished: boolean) => {
         if (!sharedTrackId || shareResolved) return
         const sharedTrack = store.tracks.find((track) => trackMatchesShareId(track, sharedTrackId))
-        if (sharedTrack) store.selectTrack(sharedTrack, store.tracks)
+        if (sharedTrack) {
+          if (onOpenSharedTrack) onOpenSharedTrack(sharedTrack, sharedTime)
+          else {
+            // Without an audio owner there is no safe way to apply a pending seek.
+            store.isPlaying = false
+            store.selectTrack(sharedTrack, store.tracks)
+          }
+        }
         if (sharedTrack || finished) {
           shareResolved = true
           url.searchParams.delete('share')
+          url.searchParams.delete('t')
           window.history.replaceState(
             window.history.state,
             '',

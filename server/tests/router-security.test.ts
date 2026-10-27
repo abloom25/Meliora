@@ -23,6 +23,18 @@ describe('router security gates', () => {
     return createCookieHeader(await signToken(ENV)).split(';')[0]
   }
 
+  it('keeps the public cover relay behind the API environment and enabled gates', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const request = new Request('https://example.com/api/cover?url=invalid')
+    expect((await handleRequest(request, ENV)).status).toBe(400)
+    expect((await handleRequest(request, { ...ENV, ADMIN_DISABLED: 'true' })).status).toBe(403)
+    expect((await handleRequest(request, { ...ENV, DEVELOPMENT: '', GH_TOKEN: '' })).status).toBe(
+      403,
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   async function expectRuntimeConfigNotFound(env: Env): Promise<void> {
     const response = await handleRequest(new Request('https://example.com/api/runtime-config'), env)
     const data = (await response.json()) as { error?: string }

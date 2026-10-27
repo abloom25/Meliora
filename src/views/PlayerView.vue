@@ -2,6 +2,7 @@
   import {
     computed,
     defineAsyncComponent,
+    nextTick,
     onBeforeUnmount,
     onMounted,
     ref,
@@ -44,6 +45,7 @@
   import { usePlayerLayoutMotion } from '../platform/web/usePlayerLayoutMotion'
   import ArtworkBackground from '../components/ArtworkBackground.vue'
   import LyricsPanel from '../components/LyricsPanel.vue'
+  import Dropdown from '../components/Dropdown.vue'
   import PlayerControls from '../components/PlayerControls.vue'
   import MinimalPlayerControls from '../components/MinimalPlayerControls.vue'
   import SettingsPanel from '../components/SettingsPanel.vue'
@@ -51,6 +53,11 @@
   import Toast from '../components/Toast.vue'
   import type { LyricAvailability, LyricStatus, LyricsSnapshot, Track } from '../core/types'
   import type { LyricsDebugSnapshot } from '../core/diagnostics/lyrics-debug'
+  import { MAX_SHARED_LYRIC_LINES, type LyricShareSelection } from '../core/lyrics/share'
+
+  const LyricShareToolbar = defineAsyncComponent(
+    () => import('../components/LyricShareToolbar.vue'),
+  )
 
   const PlayerDebugPanel = import.meta.env.DEV
     ? defineAsyncComponent(() => import('../components/PlayerDebugPanel.vue'))
@@ -242,11 +249,23 @@
   const lyricsEnabled = ref(true)
   const lyricAvailability = ref<LyricAvailability>('unavailable')
   const lyricsSnapshot = shallowRef<LyricsSnapshot | null>(null)
+  const lyricShareSelection = shallowRef<LyricShareSelection | null>(null)
+  const lyricShareOpen = ref(false)
+  const lyricSharePreviewOpen = ref(false)
+  const lyricShareIndices = ref<number[]>([])
   const lyricsPanelRef = ref<InstanceType<typeof LyricsPanel> | null>(null)
   const getCalibrationLyrics = () => lyricsPanelRef.value?.getCalibrationLyrics() ?? null
   const notice = ref('')
   const { runtimeConfig, query, loading, loadFailed, sourceWarning, loadTracks } = usePlayerLibrary(
-    { showNotice, clearNotice },
+    {
+      showNotice,
+      clearNotice,
+      onOpenSharedTrack: (track, seconds) => {
+        pause()
+        store.selectTrack(track, store.tracks)
+        seek(seconds ?? 0)
+      },
+    },
   )
   const library = useLibraryStore()
   const libraryView = ref<LibraryView>('all')
@@ -299,6 +318,12 @@
       ? lyricsVisible.value && mobileView.value === 'lyrics'
       : lyricsVisible.value,
   )
+  watch(lyricsPanelActive, (active) => {
+    if (!active) lyricShareOpen.value = false
+  })
+  watch(lyricShareOpen, (open) => {
+    if (!open) lyricSharePreviewOpen.value = false
+  })
   usePlayerLayoutMotion({
     layoutKey: () =>
       `${viewportMode.value}:${minimalArtworkVisible.value}:${minimalMetadataPlacement.value}:${lyricsLayoutVisible.value}:${mobileView.value}`,
@@ -522,6 +547,46 @@
     setLyricsWindowSnapshot(snapshot)
   }
 
+  function openLyricShare(selection: LyricShareSelection) {
+    lyricSharePreviewOpen.value = false
+    mobileView.value = 'lyrics'
+    lyricShareSelection.value = {
+      track: { ...selection.track },
+      lines: selection.lines.map(({ time, text, translation }) => ({ time, text, translation })),
+      index: selection.index,
+    }
+    lyricShareOpen.value = true
+    lyricShareIndices.value = [selection.index]
+    triggerHaptic('light')
+  }
+
+  async function beginLyricShare(closeMenu: () => void) {
+    closeMenu()
+    closePanelsAnimated()
+    lyricsEnabled.value = true
+    mobileView.value = 'lyrics'
+    await nextTick()
+    lyricsPanelRef.value?.startShare()
+  }
+
+  function shareSongFromMenu(closeMenu: () => void) {
+    closeMenu()
+    void shareCurrentTrack()
+  }
+
+  function toggleShareLine(index: number) {
+    if (!lyricShareOpen.value || !lyricShareSelection.value?.lines[index]?.text.trim()) return
+    if (lyricShareIndices.value.includes(index))
+      lyricShareIndices.value = lyricShareIndices.value.filter((value) => value !== index)
+    else if (lyricShareIndices.value.length < MAX_SHARED_LYRIC_LINES)
+      lyricShareIndices.value = [...lyricShareIndices.value, index]
+    else showNotice(`最多选择 ${MAX_SHARED_LYRIC_LINES} 句歌词`)
+  }
+
+  function releaseLyricShare() {
+    if (!lyricShareOpen.value) lyricShareSelection.value = null
+  }
+
   onMounted(() => {
     window.addEventListener('offline', showOfflineNotice)
     window.addEventListener('online', showOnlineNotice)
@@ -538,6 +603,7 @@
   watch(
     currentTrackId,
     () => {
+      lyricShareOpen.value = false
       const nextTrackHasLyrics = hasTrackLyricsSource(currentTrack.value)
       setLyricAvailability(nextTrackHasLyrics ? 'loading' : 'unavailable')
       lyricsSnapshot.value = null
@@ -566,7 +632,7 @@
     :class="{
       'background-disabled': !settings.dynamicBackground,
       'beat-disabled': !settings.beatFlash,
-      'chrome-hidden': chromeHidden,
+      'chrome-hidden': chromeHidden && !lyricShareOpen,
       'drawer-open': listOpen || settingsOpen || debugOpen,
       'mobile-sheet': isMobileSheet,
       'compact-landscape': isCompactLandscape,
@@ -619,15 +685,31 @@
         >
           <Bug :size="19" />
         </button>
-        <button
-          class="nav-button share-button"
-          aria-label="分享当前歌曲"
-          title="分享歌曲"
-          :disabled="!currentTrack"
-          @click="shareCurrentTrack"
-        >
-          <Share2 :size="19" />
-        </button>
+        <Dropdown class="share-menu" teleport label="分享">
+          <template #trigger="{ toggle: toggleShareMenu }">
+            <button
+              class="nav-button share-button"
+              aria-label="分享"
+              title="分享"
+              :disabled="!currentTrack"
+              @click="toggleShareMenu"
+            >
+              <Share2 :size="19" />
+            </button>
+          </template>
+          <template #default="{ close }">
+            <button class="share-menu-option" @click="shareSongFromMenu(close)">
+              <Share2 :size="16" />分享歌曲
+            </button>
+            <button
+              class="share-menu-option"
+              :disabled="lyricAvailability !== 'available'"
+              @click="beginLyricShare(close)"
+            >
+              <MessageSquareText :size="16" />分享歌词
+            </button>
+          </template>
+        </Dropdown>
         <button
           class="nav-button settings-button"
           :class="{ active: settingsOpen && settingsAvailable }"
@@ -728,14 +810,38 @@
           class="lyrics-column"
           :class="{ 'mobile-hidden': mobileView !== 'lyrics', 'lyrics-disabled': !lyricsVisible }"
           :active="lyricsPanelActive"
+          :sharing="lyricShareOpen"
+          :share-preview="lyricShareOpen && lyricSharePreviewOpen"
+          :selected-indices="lyricShareIndices"
           :debug-enabled="debugEnabled"
           :get-lyrics-playback-state="getLyricsPlaybackState"
           :subscribe-lyrics-playback="subscribeLyricsPlayback"
           @seek="seek"
           @availability="handleLyricAvailability"
           @snapshot="handleLyricsSnapshot"
+          @share="openLyricShare"
+          @share-toggle="toggleShareLine"
+          @share-cancel="lyricShareOpen = false"
           @debug="lyricsDebug = $event"
-        />
+        >
+          <template #share-tools>
+            <Transition
+              name="lyric-share-tools"
+              @after-leave="releaseLyricShare"
+              @before-leave="(element) => element.setAttribute('inert', '')"
+            >
+              <LyricShareToolbar
+                v-if="lyricShareSelection"
+                v-show="lyricShareOpen"
+                :visible="lyricShareOpen"
+                :selection="lyricShareSelection"
+                :indices="lyricShareIndices"
+                @preview="lyricSharePreviewOpen = $event"
+                @close="lyricShareOpen = false"
+              />
+            </Transition>
+          </template>
+        </LyricsPanel>
       </Transition>
 
       <p v-if="isMinimalPlayer && minimalLyricMessage" class="minimal-lyric-message" role="status">
