@@ -53,6 +53,8 @@ function mountLyricsWindowHarness(
   const isPlaying = ref(false)
   const currentTime = ref(0)
   const lyricAnimation = ref(true)
+  const lyricScale = ref(1)
+  const lyricWindowScale = ref<number | null>(null)
   const debugEnabled = ref(false)
 
   const track = reactive<Track>({
@@ -75,6 +77,8 @@ function mountLyricsWindowHarness(
           getPlaybackSeconds,
           ...playback,
           lyricAnimation,
+          lyricScale,
+          lyricWindowScale,
           debugEnabled,
         })
         return {}
@@ -83,7 +87,18 @@ function mountLyricsWindowHarness(
     }),
   )
 
-  return { api, popup, track, wrapper, isPlaying, currentTime, lyricAnimation, debugEnabled }
+  return {
+    api,
+    popup,
+    track,
+    wrapper,
+    isPlaying,
+    currentTime,
+    lyricAnimation,
+    lyricScale,
+    lyricWindowScale,
+    debugEnabled,
+  }
 }
 
 function runPopupFrames(popup: Window, count: number, stepMs = 16) {
@@ -141,6 +156,23 @@ async function mountScrollingHarness(
 }
 
 describe('useLyricsWindow', () => {
+  it('follows the main lyric scale until a separate window scale is chosen', async () => {
+    const { api, popup, wrapper, lyricScale, lyricWindowScale } = mountLyricsWindowHarness()
+    lyricScale.value = 1.2
+    await api.toggleLyricsWindow()
+    const scale = () => popup.document.documentElement.style.getPropertyValue('--lyric-scale')
+    expect(scale()).toBe('1.2')
+    lyricWindowScale.value = 0.85
+    await nextTick()
+    expect(scale()).toBe('0.85')
+    lyricScale.value = 1.4
+    await nextTick()
+    expect(scale()).toBe('0.85')
+    lyricWindowScale.value = null
+    await nextTick()
+    expect(scale()).toBe('1.4')
+    wrapper.unmount()
+  })
   it('uses its own boundary timer while the main page is hidden and responds immediately to media state changes', async () => {
     const state: LyricPlaybackState = {
       timeSeconds: 0.2,

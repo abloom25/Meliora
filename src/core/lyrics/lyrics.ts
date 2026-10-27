@@ -1,4 +1,5 @@
 import type { LyricLine, LyricWord } from '../types'
+import { shiftLyricTimings } from './timing-offset'
 
 const timestampPattern = /\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?(?:-\d+)?\]/g
 const enhancedTimestampPattern = /<\d{1,3}:\d{1,2}(?:[.:]\d{1,3})?>/g
@@ -154,9 +155,12 @@ export function joinWords(words: readonly LyricWord[]): string {
 export function parseLyrics(source: string): LyricLine[] {
   const timed: LyricLine[] = []
   const plain: LyricLine[] = []
+  let offsetMs = 0
 
   for (const rawLine of source.replace(/^\uFEFF/, '').split(/\r?\n/)) {
     const line = rawLine.trim()
+    const offset = /^\[offset:\s*([+-]?\d+)\s*\]$/i.exec(line)
+    if (offset && Number.isFinite(Number(offset[1]))) offsetMs = Number(offset[1])
     if (!line || metadataPattern.test(line)) continue
 
     const timestamps = [...line.matchAll(timestampPattern)]
@@ -196,7 +200,8 @@ export function parseLyrics(source: string): LyricLine[] {
     }
   }
 
-  if (timed.length) return mergeTimedLines(timed)
+  // LRC 的正 offset 表示歌词应提前，和界面里“延后”的正向校准相反。
+  if (timed.length) return shiftLyricTimings(mergeTimedLines(timed), -offsetMs / 1000)
   return plain
 }
 

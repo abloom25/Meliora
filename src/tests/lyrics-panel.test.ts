@@ -1,7 +1,11 @@
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { nextTick } from 'vue'
+import { computed, effectScope, nextTick } from 'vue'
+import { useSongLyricsPreferences } from '../composables/useSongLyricsPreferences'
+import { shiftLyricTimings } from '../core/lyrics'
+import { createMemoryStore } from '../core/platform/storage'
+import { setSettingsStore } from '../platform/settings-store'
 import LyricsPanel from '../components/LyricsPanel.vue'
 import {
   getLyricsSource,
@@ -13,12 +17,16 @@ import { usePlayerStore } from '../stores/player'
 import type { LyricLine, LyricsSnapshot, Track } from '../core/types'
 import type { LyricsDebugSnapshot } from '../core/diagnostics/lyrics-debug'
 import type { LyricPlaybackState } from '../core/lyrics/render-schedule'
+import type { LyricCalibrationContext } from '../core/lyrics/calibration'
 
 vi.mock('../services/lyrics', () => ({
   getLyricsSource: vi.fn(() => null),
   hasCachedTrackLyrics: vi.fn(() => false),
   hasTrackLyricsSource: vi.fn(() => true),
   loadTrackLyrics: vi.fn(),
+  offsetLyrics: (lines: LyricLine[], milliseconds: number) =>
+    shiftLyricTimings(lines, milliseconds / 1000),
+  invalidateTrackLyrics: vi.fn(async () => undefined),
   transferTrackLyricsProvider: vi.fn(),
 }))
 
@@ -296,6 +304,90 @@ async function moveTo(store: ReturnType<typeof usePlayerStore>, time: number) {
 }
 
 describe('LyricsPanel', () => {
+  it('exposes original calibration timings and rejects stale lyrics as soon as the track changes', async () => {
+    mockedGetLyricsSource.mockReturnValue('meting')
+    mockedLoadTrackLyrics.mockResolvedValueOnce(karaokeLines)
+    const { wrapper, store } = await mountReadyPanel()
+    const panel = wrapper.vm as unknown as {
+      getCalibrationLyrics: () => LyricCalibrationContext | null
+    }
+    expect(panel.getCalibrationLyrics()).toEqual({
+      trackId: track.id,
+      source: 'meting',
+      lines: karaokeLines,
+    })
+    const scope = effectScope()
+    const preferences = scope.run(() =>
+      useSongLyricsPreferences(computed(() => store.currentTrack)),
+    )!
+    try {
+      preferences.setOffset(500)
+      await flushVueUpdates()
+      expect(panel.getCalibrationLyrics()?.lines[0]?.time).toBe(0)
+      const next = { ...track, id: 'calibration-next', audioUrl: '/calibration-next.mp3' }
+      store.setTracks([track, next])
+      store.currentTrackId = next.id
+      // The source watcher has not run yet; old lines must already be unavailable.
+      expect(panel.getCalibrationLyrics()).toBeNull()
+    } finally {
+      scope.stop()
+    }
+  })
+
+  it('applies per-source calibration to emitted media timestamps without reloading lyrics', async () => {
+    mockedGetLyricsSource.mockReturnValue('meting')
+    mockedLoadTrackLyrics.mockResolvedValueOnce(karaokeLines)
+    const { wrapper, store } = await mountReadyPanel({ currentTime: 0.05 })
+    const scope = effectScope()
+    const preferences = scope.run(() =>
+      useSongLyricsPreferences(computed(() => store.currentTrack)),
+    )!
+    try {
+      preferences.setOffset(200)
+      await flushVueUpdates()
+      const snapshot = wrapper.emitted('snapshot')?.at(-1)?.[0] as LyricsSnapshot
+      expect(snapshot.lines[0]).toMatchObject({
+        time: 0.2,
+        endTime: 2.2,
+        words: [
+          { time: 0.2, duration: 1 },
+          { time: 1.2, duration: 1 },
+        ],
+      })
+      expect(snapshot.activeIndex).toBe(-1)
+      expect(karaokeLines[0]?.time).toBe(0)
+      expect(mockedLoadTrackLyrics).toHaveBeenCalledTimes(1)
+      preferences.setOffset(0)
+      await flushVueUpdates()
+      expect((wrapper.emitted('snapshot')?.at(-1)?.[0] as LyricsSnapshot).activeIndex).toBe(0)
+    } finally {
+      scope.stop()
+    }
+  })
+
+  it('keeps romanization visible when only translation is disabled and vice versa', async () => {
+    mockedLoadTrackLyrics.mockResolvedValueOnce([
+      { time: 0, text: '歌', translation: 'Song', roman: 'Uta' },
+    ])
+    const { wrapper, store } = await mountReadyPanel()
+    store.settings.lyricTranslation = false
+    await flushVueUpdates()
+    expect((wrapper.emitted('snapshot')?.at(-1)?.[0] as LyricsSnapshot).lines[0]).toMatchObject({
+      roman: 'Uta',
+    })
+    expect(
+      (wrapper.emitted('snapshot')?.at(-1)?.[0] as LyricsSnapshot).lines[0],
+    ).not.toHaveProperty('translation')
+    store.settings.lyricTranslation = true
+    store.settings.lyricRomanization = false
+    await flushVueUpdates()
+    expect((wrapper.emitted('snapshot')?.at(-1)?.[0] as LyricsSnapshot).lines[0]).toMatchObject({
+      translation: 'Song',
+    })
+    expect(
+      (wrapper.emitted('snapshot')?.at(-1)?.[0] as LyricsSnapshot).lines[0],
+    ).not.toHaveProperty('roman')
+  })
   it('shows timed waiting dots in the intro and interlude, freezes on pause and clears at singing/end', async () => {
     mockedLoadTrackLyrics.mockResolvedValueOnce([
       { time: 12, endTime: 14, text: 'First' },
@@ -486,6 +578,7 @@ describe('LyricsPanel', () => {
   })
 
   beforeEach(() => {
+    setSettingsStore(createMemoryStore())
     vi.useFakeTimers()
     mockedHasCachedTrackLyrics.mockReset()
     mockedHasCachedTrackLyrics.mockReturnValue(false)
@@ -503,6 +596,7 @@ describe('LyricsPanel', () => {
 
   afterEach(() => {
     mountedWrappers.splice(0).forEach((wrapper) => wrapper.unmount())
+    setSettingsStore(null)
     vi.runOnlyPendingTimers()
     vi.useRealTimers()
     vi.unstubAllGlobals()
@@ -891,7 +985,7 @@ describe('LyricsPanel', () => {
 
       expect(wrapper.findAll('.lyric-line')).toHaveLength(2)
       expect(wrapper.findAll('.lyric-line.active')).toHaveLength(0)
-      expect(wrapper.findAll<HTMLButtonElement>('.lyric-line')[0]?.element.disabled).toBe(true)
+      expect(wrapper.findAll<HTMLButtonElement>('.lyric-line')[0]?.element.disabled).toBe(false)
       // 没有当前行时第一行停在锚点位置,供用户从头阅读
       expect(lineY(wrapper, 0)).toBeCloseTo(ANCHOR_Y, 5)
       const snapshot = wrapper.emitted('snapshot')?.at(-1)?.[0] as LyricsSnapshot | undefined
@@ -1710,6 +1804,263 @@ describe('LyricsPanel', () => {
 
       expect(lineY(wrapper, 3)).toBeCloseTo(ANCHOR_Y, 0)
     })
+  })
+
+  describe('lyric sharing gestures', () => {
+    function dispatchPointerClick(target: Element): void {
+      target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }))
+    }
+
+    it('shares calibrated complete lyrics from a hold even when translation is hidden', async () => {
+      mockedGetLyricsSource.mockReturnValue('meting')
+      const { wrapper, store } = await mountReadyPanel()
+      const scope = effectScope()
+      const preferences = scope.run(() =>
+        useSongLyricsPreferences(computed(() => store.currentTrack)),
+      )!
+      try {
+        preferences.setOffset(200)
+        store.settings.lyricTranslation = false
+        await flushVueUpdates()
+        const line = wrapper.get<HTMLElement>('[data-lyric-index="2"]')
+        expect(line.find('.lyric-translation').exists()).toBe(false)
+        await line.trigger('touchstart', {
+          touches: [{ identifier: 1, clientX: 120, clientY: 300 }],
+        })
+        vi.advanceTimersByTime(500)
+        expect(document.activeElement).toBe(line.element)
+        expect(wrapper.emitted('share')).toEqual([
+          [{ track, lines: shiftLyricTimings(lyricsLines, 0.2), index: 2 }],
+        ])
+        expect(wrapper.emitted('seek')).toBeUndefined()
+      } finally {
+        scope.stop()
+      }
+    })
+
+    it.each([
+      { key: 'ContextMenu', shiftKey: false },
+      { key: 'F10', shiftKey: true },
+    ])('keeps the native $key menu without starting sharing or seeking', async (keys) => {
+      const plainLines: LyricLine[] = [
+        { time: null, text: 'Plain line one' },
+        { time: null, text: 'Plain line two' },
+      ]
+      mockedLoadTrackLyrics.mockResolvedValueOnce(plainLines)
+      const { wrapper } = await mountReadyPanel()
+      const first = wrapper.get<HTMLElement>('[data-lyric-index="0"]')
+      expect(first.attributes('tabindex')).toBe('0')
+      await first.trigger('keydown', { key: 'ArrowDown' })
+      await flushVueUpdates()
+      const second = wrapper.get<HTMLElement>('[data-lyric-index="1"]')
+      expect(document.activeElement).toBe(second.element)
+      const keydown = new KeyboardEvent('keydown', { ...keys, bubbles: true, cancelable: true })
+      second.element.dispatchEvent(keydown)
+      expect(keydown.defaultPrevented).toBe(false)
+      await second.trigger('keydown', { ...keys, repeat: true })
+      expect(wrapper.emitted('share')).toBeUndefined()
+      await second.trigger('click')
+      await second.trigger('keydown', { key: 'Enter' })
+      expect(wrapper.emitted('seek')).toBeUndefined()
+    })
+
+    it('leaves desktop right click native and exposes an explicit share action', async () => {
+      const { wrapper } = await mountReadyPanel({ currentTime: 6 })
+      const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true })
+      wrapper.get('[data-lyric-index="1"]').element.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(wrapper.emitted('share')).toBeUndefined()
+      ;(wrapper.vm as unknown as { startShare: () => void }).startShare()
+      expect(wrapper.emitted('share')).toEqual([[{ track, lines: lyricsLines, index: 1 }]])
+    })
+
+    it('selects on the existing lyrics and freezes follow until selection ends', async () => {
+      const { wrapper, store } = await mountReadyPanel()
+      await wrapper.setProps({ sharing: true, selectedIndices: [1] })
+      await flushVueUpdates()
+      runSpringFrames(80)
+      expect(wrapper.get('[data-lyric-index="1"]').attributes('aria-pressed')).toBe('true')
+      await wrapper.get('[data-lyric-index="2"]').trigger('click')
+      await wrapper.get('[data-lyric-index="3"]').trigger('keydown', { key: 'Enter' })
+      expect(wrapper.emitted('shareToggle')).toEqual([[2], [3]])
+      expect(wrapper.emitted('seek')).toBeUndefined()
+      const position = lineY(wrapper, 1)
+      vi.advanceTimersByTime(4000)
+      await moveTo(store, 16)
+      runSpringFrames(80)
+      expect(wrapper.classes()).toContain('browsing')
+      expect(lineY(wrapper, 1)).toBeCloseTo(position, 0)
+      await wrapper.get('.lyrics-viewport').trigger('keydown', { key: 'Escape' })
+      expect(wrapper.emitted('shareCancel')).toEqual([[]])
+      await wrapper.setProps({ sharing: false })
+      await flushVueUpdates()
+      runSpringFrames(80)
+      expect(lineY(wrapper, 3)).toBeCloseTo(ANCHOR_Y, 0)
+      await wrapper.get('[data-lyric-index="2"]').trigger('click')
+      expect(wrapper.emitted('seek')).toEqual([[10]])
+    })
+
+    it('opens harmony rows while selecting and cancels selection when lyrics are replaced', async () => {
+      mockedLoadTrackLyrics.mockResolvedValueOnce(appleMusicLines)
+      const { wrapper, store } = await mountReadyPanel()
+      await wrapper.setProps({ sharing: true, selectedIndices: [0] })
+      await flushVueUpdates()
+      runSpringFrames(90)
+      expect(wrapper.get('[data-lyric-index="2"]').classes()).not.toContain('harmony-hidden')
+      expect(lineY(wrapper, 3) - lineY(wrapper, 2)).toBeGreaterThan(20)
+      store.setTracks([track, secondTrack])
+      store.currentTrackId = secondTrack.id
+      await flushVueUpdates()
+      expect(wrapper.emitted('shareCancel')?.length).toBeGreaterThan(0)
+    })
+
+    it('keeps selected lyrics mounted but inert while the card preview occupies the stage', async () => {
+      const { wrapper } = await mountReadyPanel()
+      await wrapper.setProps({ sharing: true, selectedIndices: [1] })
+      const line = wrapper.get('[data-lyric-index="1"]').element
+      const viewport = wrapper.get('.lyrics-viewport')
+      await wrapper.setProps({ sharePreview: true })
+      expect(viewport.attributes('inert')).toBeDefined()
+      expect(viewport.attributes('aria-hidden')).toBe('true')
+      expect(wrapper.get('[data-lyric-index="1"]').element).toBe(line)
+      expect(wrapper.get('[data-lyric-index="1"]').attributes('aria-pressed')).toBe('true')
+      await wrapper.setProps({ sharePreview: false })
+      expect(viewport.attributes('inert')).toBeUndefined()
+      expect(viewport.attributes('aria-hidden')).toBeUndefined()
+      await wrapper.get('[data-lyric-index="1"]').trigger('click')
+      expect(wrapper.emitted('shareToggle')).toEqual([[1]])
+      expect(wrapper.emitted('shareCancel')).toBeUndefined()
+      expect(wrapper.emitted('seek')).toBeUndefined()
+    })
+
+    it('shares after a stationary hold, suppresses its click and still accepts the next tap', async () => {
+      const { wrapper } = await mountReadyPanel()
+      const line = wrapper.get<HTMLElement>('[data-lyric-index="1"]')
+      const point = { identifier: 1, clientX: 120, clientY: 300 }
+      await line.get('.lyric-original').trigger('touchstart', { touches: [point] })
+      vi.advanceTimersByTime(499)
+      expect(wrapper.emitted('share')).toBeUndefined()
+      vi.advanceTimersByTime(1)
+      expect(wrapper.emitted('share')).toEqual([[{ track, lines: lyricsLines, index: 1 }]])
+      expect(document.activeElement).toBe(line.element)
+      await line.trigger('contextmenu')
+      await line.trigger('touchend', { touches: [] })
+      dispatchPointerClick(line.element)
+      expect(wrapper.emitted('share')).toHaveLength(1)
+      expect(wrapper.emitted('seek')).toBeUndefined()
+
+      await line.trigger('touchstart', { touches: [point] })
+      vi.advanceTimersByTime(100)
+      await line.trigger('touchend', { touches: [] })
+      dispatchPointerClick(line.element)
+      expect(wrapper.emitted('seek')).toEqual([[5]])
+    })
+
+    it('does not swallow a new mouse click when the previous long press generated no click', async () => {
+      const { wrapper } = await mountReadyPanel()
+      const line = wrapper.get('[data-lyric-index="1"]')
+      await line.trigger('touchstart', {
+        touches: [{ identifier: 1, clientX: 120, clientY: 300 }],
+      })
+      vi.advanceTimersByTime(500)
+      await line.trigger('touchend', { touches: [] })
+      const pointerdown = new MouseEvent('pointerdown', { bubbles: true, button: 0 })
+      Object.defineProperties(pointerdown, {
+        pointerType: { value: 'mouse' },
+        isPrimary: { value: true },
+      })
+      line.element.dispatchEvent(pointerdown)
+      dispatchPointerClick(line.element)
+      expect(wrapper.emitted('seek')).toEqual([[5]])
+    })
+
+    it.each([
+      'horizontal',
+      'vertical',
+      'multitouch',
+      'touchcancel',
+      'pointercancel',
+      'dragstart',
+      'wheel',
+    ])(
+      'cancels a pending share on %s without restarting it during the same touch',
+      async (interruption) => {
+        const { wrapper } = await mountReadyPanel()
+        const line = wrapper.get('[data-lyric-index="1"]')
+        const point = { identifier: 1, clientX: 120, clientY: 300 }
+        await line.trigger('touchstart', { touches: [point] })
+        vi.advanceTimersByTime(200)
+        if (interruption === 'horizontal' || interruption === 'vertical') {
+          await line.trigger('touchmove', {
+            touches: [
+              {
+                ...point,
+                clientX: interruption === 'horizontal' ? 135 : 120,
+                clientY: interruption === 'vertical' ? 280 : 300,
+              },
+            ],
+          })
+          await line.trigger('touchmove', { touches: [point] })
+        } else if (interruption === 'multitouch') {
+          const event = new Event('touchstart', { bubbles: true })
+          Object.defineProperty(event, 'touches', {
+            value: [point, { identifier: 2, clientX: 200, clientY: 400 }],
+          })
+          // A second finger outside the viewport must still cancel the hold.
+          document.body.dispatchEvent(event)
+        } else {
+          await line.trigger(interruption, { touches: [], deltaY: 40 })
+        }
+        vi.advanceTimersByTime(800)
+        await line.trigger('contextmenu')
+        expect(wrapper.emitted('share')).toBeUndefined()
+        await line.trigger('touchend', { touches: [] })
+        expect(wrapper.emitted('seek')).toBeUndefined()
+      },
+    )
+
+    it('keeps a short tap as a seek without sharing later', async () => {
+      const { wrapper } = await mountReadyPanel()
+      const line = wrapper.get('[data-lyric-index="1"]')
+      await line.trigger('touchstart', {
+        touches: [{ identifier: 1, clientX: 120, clientY: 300 }],
+      })
+      vi.advanceTimersByTime(200)
+      await line.trigger('touchend', { touches: [] })
+      dispatchPointerClick(line.element)
+      vi.advanceTimersByTime(800)
+      expect(wrapper.emitted('share')).toBeUndefined()
+      expect(wrapper.emitted('seek')).toEqual([[5]])
+    })
+
+    it.each(['inactive', 'hidden', 'track', 'unmount'])(
+      'cancels a pending share when the panel becomes %s',
+      async (interruption) => {
+        const { wrapper, store } = await mountReadyPanel()
+        await wrapper.get('[data-lyric-index="1"]').trigger('touchstart', {
+          touches: [{ identifier: 1, clientX: 120, clientY: 300 }],
+        })
+        vi.advanceTimersByTime(200)
+        try {
+          if (interruption === 'inactive') await wrapper.setProps({ active: false })
+          else if (interruption === 'hidden') {
+            Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+            document.dispatchEvent(new Event('visibilitychange'))
+          } else if (interruption === 'track') {
+            store.setTracks([track, secondTrack])
+            store.currentTrackId = secondTrack.id
+            await flushVueUpdates()
+          } else {
+            wrapper.unmount()
+            mountedWrappers.splice(mountedWrappers.indexOf(wrapper), 1)
+          }
+          vi.advanceTimersByTime(800)
+          expect(wrapper.emitted('share')).toBeUndefined()
+        } finally {
+          if (interruption === 'hidden') Reflect.deleteProperty(document, 'hidden')
+        }
+      },
+    )
   })
 
   describe('karaoke', () => {

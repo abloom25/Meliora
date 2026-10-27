@@ -2,7 +2,13 @@
   import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
   import { storeToRefs } from 'pinia'
   import { usePlayerStore } from '../stores/player'
-  import { getLyricsSource, hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
+  import {
+    getLyricsSource,
+    hasTrackLyricsSource,
+    loadTrackLyrics,
+    offsetLyrics,
+  } from '../services/lyrics'
+  import { useSongLyricsPreferences } from '../composables/useSongLyricsPreferences'
   import { createLyricClock } from '../core/lyrics'
   import type { LyricsDebugSnapshot } from '../core/diagnostics/lyrics-debug'
   import { listenMediaQuery } from '../platform/web/media-query'
@@ -35,16 +41,25 @@
     availability: [availability: LyricAvailability]
     snapshot: [snapshot: LyricsSnapshot]
     debug: [snapshot: LyricsDebugSnapshot | null]
+    share: [payload: { track: Track; lines: LyricLine[]; index: number }]
+    shareToggle: [index: number]
+    shareCancel: []
   }>()
   const props = withDefaults(
     defineProps<{
       active?: boolean
+      sharing?: boolean
+      sharePreview?: boolean
+      selectedIndices?: number[]
       debugEnabled?: boolean
       getLyricsPlaybackState?: () => LyricPlaybackState
       subscribeLyricsPlayback?: (listener: () => void) => () => void
     }>(),
     {
       active: true,
+      sharing: false,
+      sharePreview: false,
+      selectedIndices: () => [],
       debugEnabled: false,
       getLyricsPlaybackState: undefined,
       subscribeLyricsPlayback: undefined,
@@ -59,12 +74,14 @@
   const FLING_SAMPLE_MS = 90
   // 手指移动不超过这个距离算点按,不进入浏览态
   const TAP_SLOP_PX = 6
+  const SHARE_HOLD_MS = 500
   // 没有样式(测试环境)时的行距兜底
   const FALLBACK_GAPS = { gap: 28, harmonyGap: 8 }
 
   const store = usePlayerStore()
   const applePlatform = isApplePlatform()
   const { currentTrack, currentTrackVersion, currentTime, isPlaying, settings } = storeToRefs(store)
+  const lyricPreferences = useSongLyricsPreferences(currentTrack)
 
   function emptyScene(): LyricScene {
     return { active: [], highlighted: [], held: false, anchor: -1, harmonyOpen: [] }
@@ -73,6 +90,8 @@
   // timeupdate 只有约 4Hz,逐字扫光需要每帧的播放位置,这里统一走外推时钟
   const clock = createLyricClock()
   const lines = shallowRef<LyricLine[]>([])
+  const rawLines = shallowRef<LyricLine[]>([])
+  const rawLinesTrackId = ref<string | null>(null)
   const renderedIndices = shallowRef<readonly number[]>([])
   const renderedLines = computed(() =>
     renderedIndices.value.flatMap((index) => {
@@ -95,6 +114,8 @@
   const viewport = ref<HTMLElement>()
   const lyricsContent = ref<HTMLElement>()
   const userBrowsing = ref(false)
+  const sharingAnchor = ref(0)
+  const selectedShareIndices = computed(() => new Set(props.selectedIndices))
   let browseTimer = 0
   const keyboardIndex = ref<number | null>(null)
   // 行节点直接从 DOM 读:它们在 Transition 的插槽里,由 Transition 自己渲染,
@@ -212,12 +233,14 @@
   }
 
   const displayedLines = computed(() => {
-    if (settings.value.lyricTranslation) return lines.value
+    const translation = settings.value.lyricTranslation
+    const roman = settings.value.lyricRomanization
+    if (translation && roman) return lines.value
     return lines.value.map((line) => {
-      if (!line.translation && !line.roman) return line
+      if ((translation || !line.translation) && (roman || !line.roman)) return line
       const copy: LyricLine = { ...line }
-      delete copy.translation
-      delete copy.roman
+      if (!translation) delete copy.translation
+      if (!roman) delete copy.roman
       return copy
     })
   })
@@ -249,12 +272,18 @@
       ),
   )
 
-  // roving tabindex:仅当前激活行(无激活行时退回第一个可 seek 的行)是 Tab 停靠点,
+  // roving tabindex:仅当前激活行(无激活行时退回第一行)是 Tab 停靠点,
   // 避免数百行歌词全部进入 Tab 序列
   const keyboardFocusIndex = computed(() => {
+    if (props.sharing) {
+      const desired = keyboardIndex.value ?? sharingAnchor.value
+      return renderedIndices.value.includes(desired)
+        ? desired
+        : (renderedIndices.value[0] ?? desired)
+    }
     if (userBrowsing.value && keyboardIndex.value !== null) return keyboardIndex.value
     if (scene.value.anchor >= 0) return scene.value.anchor
-    return displayedLines.value.findIndex((line) => line.time !== null)
+    return displayedLines.value.findIndex((_, index) => !isHarmonyHidden(index))
   })
 
   const lyricPanelStyle = computed(() => ({
@@ -303,7 +332,7 @@
     getLineElements: lineElements,
     getLineElement: (index) =>
       lineElements().find((element) => Number(element.dataset.lyricIndex) === index),
-    isEnabled: animationEnabled,
+    isEnabled: () => animationEnabled() && !props.sharing,
   })
 
   // ---- 状态与快照 ----
@@ -354,15 +383,24 @@
         background: backgroundFlags.value,
         openHarmonies: scene.value.openHarmonies,
         ...(scene.value.openHarmonies ? {} : { open: scene.value.harmonyOpen }),
-        focus: scene.value.anchor,
-        active: scene.value.highlighted,
-        playing: readPlaybackState().playing,
-        waiting: waitingInterval.value
-          ? { nextAnchor: waitingInterval.value.nextAnchor }
-          : undefined,
+        ...(props.sharing
+          ? {
+              open: undefined,
+              openHarmonies: backgroundFlags.value.flatMap((background, index) =>
+                background ? [index] : [],
+              ),
+            }
+          : {}),
+        focus: props.sharing ? sharingAnchor.value : scene.value.anchor,
+        active: props.sharing ? [] : scene.value.highlighted,
+        playing: !props.sharing && readPlaybackState().playing,
+        waiting:
+          waitingInterval.value && !props.sharing
+            ? { nextAnchor: waitingInterval.value.nextAnchor }
+            : undefined,
       },
       transition,
-      { follow: !userBrowsing.value, budgetMs: scrollBudgetMs() },
+      { follow: !userBrowsing.value && !props.sharing, budgetMs: scrollBudgetMs() },
     )
   }
 
@@ -410,17 +448,23 @@
       return
     }
     updateStatus('loading')
-    lyricsController = new AbortController()
+    const requestController = new AbortController()
+    lyricsController = requestController
     const applyLines = (parsedLines: LyricLine[]) => {
       if (id !== requestId) return
-      if (lines.value === parsedLines) return
+      if (rawLines.value === parsedLines) return
+      if (props.sharing) emit('shareCancel')
+      rawLinesTrackId.value = track.id
+      rawLines.value = parsedLines
+      const source = getLyricsSource(parsedLines)
+      lyricPreferences.reportSource(source)
       if (!parsedLines.length) {
         lines.value = []
         updateStatus('empty')
         return
       }
       const upgrading = status.value === 'ready' && lines.value.length > 0
-      lines.value = parsedLines
+      lines.value = offsetLyrics(parsedLines, lyricPreferences.getOffset(source))
       clock.anchor(currentTime.value, performance.now())
       if (isPlaying.value) clock.resume(currentTime.value, performance.now())
       sceneTime.value = readClock()
@@ -437,7 +481,26 @@
       })
     }
     try {
-      const parsedLines = await loadTrackLyrics(track, lyricsController.signal, applyLines)
+      const selection = lyricPreferences.selection.value
+      let parsedLines: LyricLine[]
+      try {
+        parsedLines = await loadTrackLyrics(
+          track,
+          requestController.signal,
+          (progress) => {
+            if (progress.length) applyLines(progress)
+          },
+          'foreground',
+          selection,
+        )
+      } catch (error) {
+        if (selection === 'auto' || requestController.signal.aborted || id !== requestId)
+          throw error
+        parsedLines = []
+      }
+      // 已记住的来源临时不可用时，仍用自动源兜底；不覆盖用户的记忆选择。
+      if (!parsedLines.length && selection !== 'auto' && id === requestId)
+        parsedLines = await loadTrackLyrics(track, requestController.signal, applyLines)
       applyLines(parsedLines)
     } catch (error) {
       // 只有面板自己 abort(切歌/卸载)才静默返回;服务层的加载超时
@@ -448,6 +511,10 @@
   }
 
   function resetTransientLyrics() {
+    if (props.sharing) emit('shareCancel')
+    cancelShareHold()
+    touch = null
+    suppressedClickTarget = null
     if (props.debugEnabled) clearDebug()
     lyricsController?.abort()
     lyricsController = null
@@ -460,6 +527,9 @@
     karaoke.release()
     lyricTempo.value = 1
     lines.value = []
+    rawLines.value = []
+    rawLinesTrackId.value = null
+    lyricPreferences.reportSource(null)
     keyboardIndex.value = null
     scene.value = emptyScene()
     sceneTime.value = 0
@@ -601,14 +671,15 @@
   function markBrowsing() {
     userBrowsing.value = true
     window.clearTimeout(browseTimer)
-    browseTimer = touch
-      ? 0
-      : window.setTimeout(() => {
-          browseTimer = 0
-          if (!isPanelMounted || !props.active || document.hidden) return
-          stopBrowsing()
-          engine.follow('seek')
-        }, BROWSE_IDLE_MS)
+    browseTimer =
+      touch || props.sharing
+        ? 0
+        : window.setTimeout(() => {
+            browseTimer = 0
+            if (!isPanelMounted || !props.active || document.hidden) return
+            stopBrowsing()
+            engine.follow('seek')
+          }, BROWSE_IDLE_MS)
   }
 
   function stopBrowsing() {
@@ -619,6 +690,7 @@
   }
 
   function handleWheel(event: WheelEvent) {
+    cancelShareHold()
     if (status.value !== 'ready') return
     const unit =
       event.deltaMode === 1
@@ -633,22 +705,143 @@
   }
 
   interface TouchTracking {
+    startX: number
+    startY: number
+    startedAt: number
+    identifier: number
+    target: HTMLElement | null
     y: number
     moved: boolean
+    tapCancelled: boolean
+    shared: boolean
     samples: Array<{ at: number; y: number }>
   }
   let touch: TouchTracking | null = null
+  let shareHoldTimer = 0
+  let suppressedClickTarget: HTMLElement | null = null
+  let touchContextUntil = Number.NEGATIVE_INFINITY
+
+  function cancelShareHold(): void {
+    window.clearTimeout(shareHoldTimer)
+    shareHoldTimer = 0
+  }
+
+  function shareLine(index: number, target: HTMLElement): void {
+    cancelShareHold()
+    const track = currentTrack.value
+    if (
+      !isPanelMounted ||
+      !props.active ||
+      document.hidden ||
+      status.value !== 'ready' ||
+      !track ||
+      !lines.value[index] ||
+      isHarmonyHidden(index) ||
+      !target.isConnected
+    )
+      return
+    target.focus({ preventScroll: true })
+    emit('share', { track, lines: lines.value, index })
+  }
+
+  function handleLineContextMenu(event: MouseEvent): void {
+    // Only suppress the native touch callout following a long press. Desktop right-click stays native.
+    if (touch || performance.now() < touchContextUntil) event.preventDefault()
+  }
+
+  async function startShare(): Promise<void> {
+    if (status.value !== 'ready' || !currentTrack.value || !lines.value.length) return
+    const index = Math.max(0, scene.value.anchor)
+    emit('share', { track: currentTrack.value, lines: lines.value, index })
+    await nextTick()
+    if (!props.sharing || !props.active) return
+    engine.reveal(index)
+    await nextTick()
+    if (props.sharing)
+      lineElements()
+        .find((element) => Number(element.dataset.lyricIndex) === index)
+        ?.focus({ preventScroll: true })
+  }
+  function getCalibrationLyrics() {
+    return currentTrack.value &&
+      rawLinesTrackId.value === currentTrack.value.id &&
+      status.value === 'ready'
+      ? {
+          trackId: currentTrack.value.id,
+          source: getLyricsSource(rawLines.value),
+          lines: rawLines.value,
+        }
+      : null
+  }
+  defineExpose({ startShare, getCalibrationLyrics })
+
+  function activateLine(line: LyricLine, index: number): void {
+    if (props.sharing) emit('shareToggle', index)
+    else seekLine(line)
+  }
+
+  function handlePointerDown(event: PointerEvent): void {
+    if (event.isPrimary === false || event.pointerType === 'touch') return
+    // 新的鼠标操作不应被上一次没有派发 click 的长按吞掉。
+    suppressedClickTarget = null
+    touchContextUntil = Number.NEGATIVE_INFINITY
+    cancelShareHold()
+  }
+
+  function handleLineClick(event: MouseEvent, line: LyricLine): void {
+    if (suppressedClickTarget === event.currentTarget && event.detail !== 0) {
+      suppressedClickTarget = null
+      event.preventDefault()
+      return
+    }
+    if (!props.active || document.hidden) return
+    activateLine(line, Number((event.currentTarget as HTMLElement).dataset.lyricIndex))
+  }
 
   function handleTouchStart(event: TouchEvent) {
-    if (status.value !== 'ready' || event.touches.length !== 1) {
+    cancelShareHold()
+    if (
+      !props.active ||
+      document.hidden ||
+      status.value !== 'ready' ||
+      event.touches.length !== 1
+    ) {
       handleTouchCancel()
       return
     }
+    suppressedClickTarget = null
     const point = event.touches[0]!
+    const target = (event.target as HTMLElement | null)?.closest<HTMLElement>('.lyric-line') ?? null
+    const now = performance.now()
     touch = {
+      startX: point.clientX ?? 0,
+      startY: point.clientY,
+      startedAt: now,
+      identifier: point.identifier,
+      target,
       y: point.clientY,
       moved: false,
-      samples: [{ at: performance.now(), y: point.clientY }],
+      tapCancelled: false,
+      shared: false,
+      samples: [{ at: now, y: point.clientY }],
+    }
+    if (target && !props.sharing) {
+      const tracking = touch
+      const currentLines = lines.value
+      const track = currentTrack.value
+      shareHoldTimer = window.setTimeout(() => {
+        shareHoldTimer = 0
+        if (
+          touch !== tracking ||
+          tracking.tapCancelled ||
+          lines.value !== currentLines ||
+          currentTrack.value !== track
+        )
+          return
+        tracking.shared = true
+        suppressedClickTarget = target
+        shareLine(Number(target.dataset.lyricIndex), target)
+      }, SHARE_HOLD_MS)
     }
     window.clearTimeout(browseTimer)
     browseTimer = 0
@@ -663,6 +856,17 @@
     }
     if (!touch) return
     const point = event.touches[0]!
+    if (point.identifier !== touch.identifier) {
+      handleTouchCancel()
+      return
+    }
+    if (touch.shared) return
+    if (
+      Math.hypot((point.clientX ?? 0) - touch.startX, point.clientY - touch.startY) >= TAP_SLOP_PX
+    ) {
+      touch.tapCancelled = true
+      cancelShareHold()
+    }
     const dy = point.clientY - touch.y
     if (!touch.moved && Math.abs(dy) < TAP_SLOP_PX) return
     touch.moved = true
@@ -678,12 +882,15 @@
   }
 
   function handleTouchEnd() {
+    cancelShareHold()
+    touchContextUntil = performance.now() + 1000
     if (!touch) {
       if (userBrowsing.value) markBrowsing()
       return
     }
-    const { samples, moved } = touch
+    const { samples, moved, tapCancelled, shared, target } = touch
     touch = null
+    if ((tapCancelled || shared) && target) suppressedClickTarget = target
     if (!moved) {
       if (userBrowsing.value) markBrowsing()
       return
@@ -698,15 +905,29 @@
   }
 
   function handleTouchCancel() {
+    cancelShareHold()
+    touchContextUntil = performance.now() + 1000
+    if (touch?.target) suppressedClickTarget = touch.target
     // 系统接管手势不代表用户甩动松手，保留当前位置。
     touch = null
     engine.fling(0)
     if (userBrowsing.value) markBrowsing()
   }
 
+  function handleAdditionalTouch(event: TouchEvent): void {
+    // 第二根手指可能落在歌词外，视口自身收不到它的 touchstart。
+    if (touch && event.touches.length !== 1) handleTouchCancel()
+  }
+
   async function handleKeydown(event: KeyboardEvent) {
     if (status.value !== 'ready') return
     const focused = (event.target as HTMLElement | null)?.closest<HTMLElement>('.lyric-line')
+    if (props.sharing && event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      emit('shareCancel')
+      return
+    }
     if (focused && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
       event.preventDefault()
       const direction = event.key === 'ArrowUp' || event.key === 'End' ? -1 : 1
@@ -717,7 +938,7 @@
             ? lines.value.length - 1
             : Number(focused.dataset.lyricIndex) + direction
       while (index >= 0 && index < lines.value.length) {
-        if (lines.value[index]?.time !== null && !isHarmonyHidden(index)) break
+        if (!isHarmonyHidden(index)) break
         index += direction
       }
       if (index < 0 || index >= lines.value.length) return
@@ -801,6 +1022,7 @@
   }
 
   function suspendRendering() {
+    cancelShareHold()
     stopRenderLoop()
     stopBrowsing()
     touch = null
@@ -843,6 +1065,7 @@
     }
     viewportResizeTarget?.addEventListener('resize', handleViewportResize, { passive: true })
     document.addEventListener('visibilitychange', handleVisibilityChange)
+    document.addEventListener('touchstart', handleAdditionalTouch, { passive: true })
     if (typeof ResizeObserver !== 'undefined') {
       resizeObserver = new ResizeObserver(() => scheduleRelayout())
       if (viewport.value) resizeObserver.observe(viewport.value)
@@ -857,6 +1080,9 @@
 
   onBeforeUnmount(() => {
     isPanelMounted = false
+    cancelShareHold()
+    touch = null
+    suppressedClickTarget = null
     clearDebug()
     stopRenderLoop()
     stopBrowsing()
@@ -865,6 +1091,7 @@
     resizeObserver?.disconnect()
     viewportResizeTarget?.removeEventListener('resize', handleViewportResize)
     document.removeEventListener('visibilitychange', handleVisibilityChange)
+    document.removeEventListener('touchstart', handleAdditionalTouch)
     karaoke.release()
     stopReducedMotionListener?.()
     stopReducedMotionListener = null
@@ -872,6 +1099,36 @@
   })
 
   // ---- 响应 ----
+
+  watch(
+    () => props.sharing,
+    (sharing) => {
+      const restoreFocus =
+        !sharing && Boolean(viewport.value?.parentElement?.contains(document.activeElement))
+      cancelShareHold()
+      if (sharing) {
+        sharingAnchor.value = props.selectedIndices[0] ?? Math.max(0, scene.value.anchor)
+        keyboardIndex.value = sharingAnchor.value
+        markBrowsing()
+        engine.fling(0)
+        applyScene('spring')
+        engine.reveal(sharingAnchor.value)
+      } else {
+        stopBrowsing()
+        applyScene('seek')
+      }
+      void nextTick(() => {
+        relayout(true)
+        if (restoreFocus && !props.sharing && props.active)
+          lineElements()
+            .find(
+              (element) => Number(element.dataset.lyricIndex) === Math.max(0, scene.value.anchor),
+            )
+            ?.focus({ preventScroll: true })
+      })
+    },
+    { flush: 'post' },
+  )
 
   watch(
     () => props.debugEnabled,
@@ -894,10 +1151,32 @@
   )
 
   watch(
-    () => [currentTrack.value?.id, currentTrackVersion.value] as const,
+    () =>
+      [
+        currentTrack.value?.id,
+        currentTrackVersion.value,
+        lyricPreferences.selection.value,
+        lyricPreferences.revision.value,
+      ] as const,
     () => void loadLyrics(currentTrack.value),
     { immediate: true },
   )
+  watch(lyricPreferences.offsetMs, () => {
+    if (!rawLines.value.length || status.value !== 'ready') return
+    if (props.sharing) emit('shareCancel')
+    const next = offsetLyrics(
+      rawLines.value,
+      lyricPreferences.getOffset(getLyricsSource(rawLines.value)),
+    )
+    if (next === lines.value) return
+    lines.value = next
+    karaoke.release()
+    syncScene(readClock(), 'spring', true)
+    emitSnapshot()
+    stopRenderLoop()
+    startRenderLoop()
+    void nextTick(() => relayout(true))
+  })
   // 歌词舞台挂上来(状态过渡结束)时行节点才存在,此时做第一次排版
   watch(lyricsContent, (content) => {
     if (content) relayout()
@@ -948,7 +1227,7 @@
     () => handleAnimationToggle(),
   )
   watch(
-    () => settings.value.lyricTranslation,
+    () => [settings.value.lyricTranslation, settings.value.lyricRomanization],
     () => {
       emitSnapshot()
       void nextTick(() => relayout(true, true))
@@ -974,6 +1253,7 @@
   }
 
   function isHarmonyHidden(index: number): boolean {
+    if (props.sharing) return false
     return Boolean(lines.value[index]?.background) && !isLyricHarmonyOpen(scene.value, index)
   }
 </script>
@@ -983,6 +1263,8 @@
     class="lyrics-panel"
     :class="{
       browsing: userBrowsing,
+      sharing,
+      'share-previewing': sharing && sharePreview,
       'animation-disabled': !settings.lyricAnimation,
       'apple-font': applePlatform,
       paused: !playbackRunning,
@@ -994,6 +1276,11 @@
     <div
       ref="viewport"
       class="lyrics-viewport"
+      :inert="sharing && sharePreview ? true : undefined"
+      :aria-hidden="sharing && sharePreview ? true : undefined"
+      @pointerdown="handlePointerDown"
+      @pointercancel="handleTouchCancel"
+      @dragstart.prevent="handleTouchCancel"
       @wheel.passive="handleWheel"
       @touchstart.passive="handleTouchStart"
       @touchmove.passive="handleTouchMove"
@@ -1007,7 +1294,7 @@
         <div v-else key="lyrics" class="lyric-stage">
           <Transition name="lyric-waiting">
             <div
-              v-if="waitingInterval && !userBrowsing"
+              v-if="waitingInterval && !userBrowsing && !sharing"
               :key="waitingInterval.start"
               ref="waitingElement"
               :data-waiting-anchor="waitingInterval.nextAnchor"
@@ -1044,14 +1331,16 @@
                   background: line.background,
                   'harmony-hidden': isHarmonyHidden(index),
                   karaoke: Boolean(line.words?.length),
+                  'share-selected': sharing && selectedShareIndices.has(index),
                 },
               ]"
-              :disabled="line.time === null"
               :inert="isHarmonyHidden(index) ? true : undefined"
               :tabindex="index === keyboardFocusIndex ? 0 : -1"
-              @click="seekLine(line)"
-              @keydown.enter.prevent="seekLine(line)"
-              @keydown.space.prevent="seekLine(line)"
+              :aria-pressed="sharing ? selectedShareIndices.has(index) : undefined"
+              @contextmenu="handleLineContextMenu"
+              @click="handleLineClick($event, line)"
+              @keydown.enter.prevent="activateLine(line, index)"
+              @keydown.space.prevent="activateLine(line, index)"
               @keyup.space.prevent
             >
               <span class="lyric-original">
@@ -1088,25 +1377,62 @@
         </div>
       </Transition>
     </div>
+    <slot name="share-tools" />
   </section>
 </template>
 
 <style scoped lang="scss">
+  .sharing .lyric-line {
+    cursor: pointer;
+    color: var(--text);
+    opacity: 0.5 !important;
+    filter: none !important;
+    text-shadow: none !important;
+    --lyric-fill: var(--text);
+    --lyric-idle: var(--text);
+  }
+  .sharing .lyric-line.share-selected {
+    opacity: 1 !important;
+  }
+  .sharing .lyric-line.share-selected::before {
+    background: rgba(255, 255, 255, 0.07);
+    opacity: 1;
+  }
+  .sharing .lyric-original,
+  .sharing .lyric-word,
+  .sharing .lyric-char {
+    color: inherit !important;
+    -webkit-text-fill-color: currentColor !important;
+    background: none !important;
+    filter: none !important;
+    text-shadow: none !important;
+  }
   .lyrics-panel {
     position: relative;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
     min-width: 0;
-    height: 100%;
+    min-height: 0;
     overflow: hidden;
   }
 
   /* 容器本身不滚动:行的位置全部由引擎写在 translate 上。
      overflow: clip 连程序滚动(焦点落到视口外的行)都不会发生,版面不会被浏览器偷偷挪走 */
   .lyrics-viewport {
+    grid-area: 1 / 1;
     position: relative;
-    height: 100%;
+    min-height: 0;
     overflow: clip;
     touch-action: none;
     mask-image: linear-gradient(transparent, #000 13%, #000 87%, transparent);
+    transition:
+      opacity 200ms cubic-bezier(0.16, 1, 0.3, 1),
+      filter 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .share-previewing .lyrics-viewport {
+    opacity: 0;
+    filter: blur(6px);
+    pointer-events: none;
   }
 
   .lyric-stage {
@@ -1215,6 +1541,7 @@
     letter-spacing: -0.035em;
     text-align: left;
     overflow-wrap: anywhere;
+    -webkit-touch-callout: none;
     cursor: default;
     transform-origin: left center;
     transition:

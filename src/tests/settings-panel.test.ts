@@ -1068,6 +1068,35 @@ describe('SettingsPanel', () => {
     expect(lyrics.find('.collapse-body').attributes('inert')).toBeDefined()
   })
 
+  it('controls romanization independently and lets the lyric window follow or override the main scale', async () => {
+    const { wrapper, store } = mountPanel()
+    try {
+      store.settings.lyricTranslation = true
+      store.settings.lyricRomanization = true
+      store.settings.lyricScale = 1.2
+      store.settings.lyricWindowScale = null
+      await nextTick()
+      const lyrics = sectionByTitle(wrapper, '歌词')!
+      await lyrics.get('input[aria-label="歌词翻译"]').setValue(false)
+      expect(store.settings.lyricRomanization).toBe(true)
+      await lyrics.get('input[aria-label="歌词罗马音"]').setValue(false)
+      expect(store.settings.lyricTranslation).toBe(false)
+      await lyrics.get('input[aria-label="小窗独立字号"]').setValue(true)
+      expect(store.settings.lyricWindowScale).toBe(1.2)
+      const windowScale = lyrics
+        .findAll('.setting-group')
+        .find((group) => group.text().includes('小窗歌词缩放'))!
+        .get('[role="slider"]')
+      await windowScale.trigger('keydown', { key: 'ArrowRight' })
+      expect(store.settings.lyricWindowScale).toBeCloseTo(1.25)
+      expect(store.settings.lyricScale).toBe(1.2)
+      await lyrics.get('input[aria-label="小窗独立字号"]').setValue(false)
+      expect(store.settings.lyricWindowScale).toBeNull()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('needs a second click on the reset button before it actually restores defaults', async () => {
     const { wrapper, store } = mountPanel()
     store.settings.lyricScale = 1.45
