@@ -433,6 +433,8 @@ describe('useBeatAnalyser completed timeline playback', () => {
       debugSampleIntervalMs?: Ref<number>
       mode?: Ref<BeatAnalysisMode>
       onBeat?: (level: number, sustain: number) => void
+      visualIntervalMs?: Ref<number>
+      observeVisualFrame?: (now: number) => void
     } = {},
   ): Promise<BeatHarness> {
     stubMatchMedia()
@@ -467,6 +469,8 @@ describe('useBeatAnalyser completed timeline playback', () => {
         debugSampleIntervalMs: options.debugSampleIntervalMs,
         mode: options.mode,
         onBeat: options.onBeat,
+        visualIntervalMs: options.visualIntervalMs,
+        observeVisualFrame: options.observeVisualFrame,
         adjacent: options.adjacent,
         preloadEnabled: options.preloadEnabled,
         onSpectrum: createBeatVisualRenderer({
@@ -524,6 +528,21 @@ describe('useBeatAnalyser completed timeline playback', () => {
       expect(analyser.beatLevel.value).toBe(0)
       expect(analyser.preanalysis.timeline.value).toBeNull()
     }
+  })
+
+  it('throttles background sampling while still measuring every real RAF and restores full cadence', async () => {
+    const interval = ref(1000 / 30)
+    const observe = vi.fn()
+    const h = await mountBeatHarness({ visualIntervalMs: interval, observeVisualFrame: observe })
+    const sample = vi.spyOn(h.analyserNode, 'getByteFrequencyData')
+    runFrames(60)
+    expect(observe).toHaveBeenCalledTimes(60)
+    expect(sample.mock.calls.length).toBeGreaterThanOrEqual(29)
+    expect(sample.mock.calls.length).toBeLessThanOrEqual(31)
+    sample.mockClear()
+    interval.value = 0
+    runFrames(30)
+    expect(sample).toHaveBeenCalledTimes(30)
   })
 
   it('uses provisional coverage immediately without calling it verified model progress', async () => {
