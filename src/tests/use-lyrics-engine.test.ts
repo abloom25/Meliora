@@ -146,6 +146,46 @@ function expectNoCrossing(lines: HTMLElement[], minPitch: number) {
 }
 
 describe('useLyricsEngine', () => {
+  it('does not delay a settled upper row while lower rows continue the previous phrase', () => {
+    const { engine, lines, wrapper } = createHarness(20)
+    engine.setScene(sceneFor(20, 6), 'none', { follow: true })
+    engine.setScene(sceneFor(20, 7), 'spring', { follow: true })
+    const targets = engine.targets()
+    let mixedPhase = false
+    for (let elapsed = 0; elapsed < 1600; elapsed += 4) {
+      runFrames(1, 4)
+      if (
+        Math.abs(lineY(lines[5]!) - targets[5]!) < 0.005 &&
+        Math.abs(lineY(lines[9]!) - targets[9]!) > 0.1
+      ) {
+        mixedPhase = true
+        break
+      }
+    }
+    expect(mixedPhase).toBe(true)
+    const before = lineY(lines[5]!)
+    engine.setScene(sceneFor(20, 8), 'spring', { follow: true })
+    runFrames(1, 16)
+    expect(before - lineY(lines[5]!)).toBeGreaterThan(0.1)
+    wrapper.unmount()
+  })
+
+  it('orders a newly mounted upper row before a lower row already in motion', () => {
+    const { engine, lines, wrapper } = createHarness(16, [], {
+      getLineCount: () => 16,
+      getEstimatedHeight: () => LINE,
+    })
+    const incoming = lines.splice(5, 1)[0]!
+    engine.setScene(sceneFor(16, 6), 'none', { follow: true })
+    engine.setScene(sceneFor(16, 7), 'spring', { follow: true })
+    runFrames(20, 16)
+    lines.splice(5, 0, incoming)
+    engine.syncMounted()
+    const before = lineY(incoming)
+    runFrames(1, 16)
+    expect(before - lineY(incoming)).toBeGreaterThan(0.1)
+    wrapper.unmount()
+  })
   it('updates only changed offscreen harmony extents during long-lyric scenes and reverse seeks', () => {
     const viewport = document.createElement('div')
     defineReadonlyNumber(viewport, 'clientHeight', VIEWPORT)
@@ -736,14 +776,14 @@ describe('useLyricsEngine', () => {
   })
 
   it.each([1, -1])(
-    'carries one directional wave through visible rows on both sides of the focus (direction: %i)',
+    'carries a top-to-bottom wave regardless of physical travel direction (%i)',
     (direction) => {
       const { engine, lines, wrapper } = createHarness(20)
       engine.setScene(sceneFor(20, 6), 'none', { follow: true })
       const focus = 6 + direction
       // 观察当前句两侧实际可见的行，不只检查虚拟窗口的边缘。
       const indices = [focus - 2, focus - 1, focus, focus + 1, focus + 2]
-      const ordered = direction > 0 ? indices : [...indices].reverse()
+      const ordered = indices
       const before = lines.map(lineY)
       engine.setScene(sceneFor(20, focus), 'spring', { follow: true, budgetMs: 2000 })
       expect(indices.map((index) => lineY(lines[index]!))).toEqual(

@@ -6,6 +6,16 @@ function pcm(samples = 4): BeatAudioData {
 }
 
 describe('bounded preanalysis audio cache', () => {
+  it('bounds combined compressed and decoded allocations while preserving the current PCM', () => {
+    const cache = createBeatAudioCache({ maxResidentBytes: 24 })
+    cache.protectPcm('current')
+    cache.putPcm('current', pcm())
+    cache.putEncoded('next', new ArrayBuffer(16))
+    expect(cache.pcmBytes + cache.encodedBytes).toBeLessThanOrEqual(24)
+    cache.putPcm('next', pcm())
+    expect(cache.takePcm('next')).toBeUndefined()
+    expect(cache.takePcm('current')).toBeDefined()
+  })
   it('does not let neighbouring PCM evict the current song and releases protection on track change', () => {
     const cache = createBeatAudioCache({ maxPcmBytes: 20 })
     const current = { ...pcm(), identity: 'content-a' }

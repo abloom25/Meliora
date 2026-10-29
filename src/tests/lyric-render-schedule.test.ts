@@ -13,6 +13,15 @@ const words = [
 ]
 
 describe('lyric render scheduling', () => {
+  it('finishes a visible phrase tail but stops with the media clock', () => {
+    expect(scheduleLyricRender(playing, 5, [], true, 2.3)).toEqual({ kind: 'frame' })
+    expect(scheduleLyricRender({ ...playing, playing: false }, 5, [], true, 2.3)).toEqual({
+      kind: 'idle',
+    })
+    expect(scheduleLyricRender({ ...playing, timeSeconds: 2.3 }, null, [], true, 2.3)).toEqual({
+      kind: 'idle',
+    })
+  })
   it('sleeps until the nearest actual word/line boundary and accounts for playback speed', () => {
     expect(scheduleLyricRender(playing, 5, words, true)).toEqual({
       kind: 'timer',

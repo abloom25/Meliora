@@ -4,6 +4,16 @@ const MIN_RISE_SECONDS = 1
 const MIN_EMPHASIS_SECONDS = 1
 const MAX_EMPHASIS_CHARACTERS = 8
 const CHARACTER_STAGGER_RATIO = 0.16
+export interface LyricWordMotionContext {
+  phraseEnd?: boolean
+  background?: boolean
+}
+
+function emphasisTail(word: LyricWord, context?: LyricWordMotionContext): number {
+  return context?.phraseEnd && hasWordMotion(word) && word.duration >= MIN_EMPHASIS_SECONDS
+    ? Math.min(0.36, word.duration * 0.15)
+    : 0
+}
 const graphemeSegmenter =
   typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
     ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
@@ -30,8 +40,10 @@ export function lyricWordRise(time: number, word: LyricWord): number {
 }
 
 /** 调度器需要覆盖扫光结束后仍在继续的上浮；无时长的字不创建额外动画。 */
-export function lyricWordMotionEnd(word: LyricWord): number {
-  return hasWordMotion(word) ? word.time + Math.max(MIN_RISE_SECONDS, word.duration) : word.time
+export function lyricWordMotionEnd(word: LyricWord, context?: LyricWordMotionContext): number {
+  return hasWordMotion(word)
+    ? word.time + Math.max(MIN_RISE_SECONDS, word.duration + emphasisTail(word, context))
+    : word.time
 }
 
 /**
@@ -64,6 +76,7 @@ export function lyricCharacterEmphasis(
   word: LyricWord,
   index: number,
   count: number,
+  context?: LyricWordMotionContext,
 ): number {
   if (
     !Number.isFinite(time) ||
@@ -77,10 +90,22 @@ export function lyricCharacterEmphasis(
   )
     return 0
   const offset = count > 1 ? (index / (count - 1)) * CHARACTER_STAGGER_RATIO : 0
+  const duration = word.duration + emphasisTail(word, context)
   const progress = clampProgress(
-    (time - word.time - word.duration * offset) / (word.duration * (1 - offset)),
+    (time - word.time - word.duration * offset) / (duration - word.duration * offset),
   )
   if (progress === 0 || progress === 1) return 0
-  const amount = Math.min(1, 0.6 + (word.duration - MIN_EMPHASIS_SECONDS) * 0.2)
+  const strength = (context?.phraseEnd ? 1.15 : 1) * (context?.background ? 1.08 : 1)
+  const amount = Math.min(
+    1.15,
+    Math.min(1, 0.6 + (word.duration - MIN_EMPHASIS_SECONDS) * 0.2) * strength,
+  )
   return Math.sin(progress * Math.PI) ** 2 * amount
+}
+
+/** Small symmetric expansion, independent of layout width and source word boundaries. */
+export function lyricCharacterSpread(emphasis: number, index: number, count: number): number {
+  if (!Number.isFinite(emphasis) || emphasis <= 0 || count < 2 || index < 0 || index >= count)
+    return 0
+  return Math.max(-0.025, Math.min(0.025, (index - (count - 1) / 2) * 0.006 * emphasis))
 }

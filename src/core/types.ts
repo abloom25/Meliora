@@ -18,12 +18,17 @@ export type LyricWordSource = 'native'
 /** 对唱声部。TTML 的 ttm:agent 映射而来,单声部歌词恒为 primary */
 export type LyricAgent = 'primary' | 'secondary'
 
-export interface LyricWord {
+export interface LyricSyllable {
   /** 音节起始时间(秒) */
   time: number
   /** 音节时长(秒) */
   duration: number
   text: string
+}
+
+export interface LyricWord extends LyricSyllable {
+  /** 合并显示的词仍保留原始音节时间，包含音节之间的停顿。 */
+  syllables?: readonly LyricSyllable[]
   /** 该音节后是否跟随一个空格(拉丁文分词后仍要还原原始排版) */
   trailingSpace?: boolean
 }

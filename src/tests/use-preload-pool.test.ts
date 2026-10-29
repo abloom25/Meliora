@@ -104,7 +104,10 @@ function resolveDeferred(callback: (() => void) | null) {
 
 function mountPool(
   settings: Ref<PlayerSettings>,
-  options: Pick<PreloadPoolOptions, 'onTargetsChanged' | 'isChannelProtected'> = {},
+  options: Pick<
+    PreloadPoolOptions,
+    'onTargetsChanged' | 'isChannelProtected' | 'resourcePressure'
+  > = {},
 ) {
   const store = usePlayerStore()
   store.setTracks(tracks)
@@ -140,6 +143,82 @@ function failNextSlot(
 }
 
 describe('usePreloadPool', () => {
+  it('resumes a cancelled lyric prefetch without reloading the retained audio', async () => {
+    vi.useFakeTimers()
+    const signals: AbortSignal[] = []
+    registerTrackLyrics(tracks[2]!, {
+      cacheKey: 'pressure-resume-lyrics',
+      load: (signal) =>
+        new Promise((_resolve, reject) => {
+          signals.push(signal!)
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+        }),
+    })
+    const pressure = ref<'normal' | 'buffering'>('normal')
+    const { pool, backend, store, wrapper } = mountPool(ref({ ...defaultSettings }), {
+      resourcePressure: pressure,
+    })
+    try {
+      store.selectTrack(tracks[1]!, tracks)
+      pool.preloadAdjacentTracks()
+      const audio = backend.elementOf(pool.preloadSlots.next.channel)
+      Object.defineProperty(audio, 'readyState', { configurable: true, value: 3 })
+      audio.dispatchEvent(new Event('canplay'))
+      await vi.advanceTimersByTimeAsync(1)
+      expect(signals).toHaveLength(1)
+      pressure.value = 'buffering'
+      await vi.advanceTimersByTimeAsync(1)
+      expect(signals[0]!.aborted).toBe(true)
+      const load = vi.spyOn(audio, 'load')
+      load.mockClear()
+      pressure.value = 'normal'
+      await vi.advanceTimersByTimeAsync(1)
+      expect(signals).toHaveLength(2)
+      expect(signals[1]!.aborted).toBe(false)
+      expect(load.mock.contexts).not.toContain(audio)
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+  it('prioritizes the next song and yields unfinished downloads while preserving playable buffers', async () => {
+    vi.useFakeTimers()
+    const pressure = ref<'normal' | 'buffering' | 'constrained'>('buffering')
+    const { pool, backend, store, wrapper } = mountPool(ref({ ...defaultSettings }), {
+      resourcePressure: pressure,
+    })
+    try {
+      store.selectTrack(tracks[1]!, tracks)
+      pool.preloadAdjacentTracks()
+      expect(pool.preloadSlots.next.track).toBeNull()
+      pressure.value = 'normal'
+      await vi.advanceTimersByTimeAsync(1)
+      expect(pool.preloadSlots.next.track?.id).toBe('3')
+      expect(pool.preloadSlots.previous.track).toBeNull()
+      const next = backend.elementOf(pool.preloadSlots.next.channel)
+      Object.defineProperty(next, 'readyState', { configurable: true, value: 3 })
+      next.dispatchEvent(new Event('canplay'))
+      await vi.advanceTimersByTimeAsync(1)
+      expect(pool.preloadSlots.previous.track?.id).toBe('1')
+      const source = next.src
+      const load = vi.spyOn(next, 'load')
+      load.mockClear()
+      pressure.value = 'buffering'
+      await vi.advanceTimersByTimeAsync(1)
+      expect(pool.preloadSlots.previous.track).toBeNull()
+      expect(next.src).toBe(source)
+      expect(next.preload).toBe('none')
+      expect(load.mock.contexts).not.toContain(next)
+      pressure.value = 'normal'
+      await vi.advanceTimersByTimeAsync(1)
+      expect(next.preload).toBe('auto')
+      expect(load.mock.contexts).not.toContain(next)
+      expect(pool.preloadSlots.previous.track?.id).toBe('1')
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
   it('keeps a neighbor in the queue after a network preload failure and avoids immediate retry storms', async () => {
     vi.useFakeTimers()
     const { pool, backend, store, wrapper } = mountPool(ref({ ...defaultSettings }))

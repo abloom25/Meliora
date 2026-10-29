@@ -48,6 +48,26 @@ describe('tokenizeLyricText', () => {
 })
 
 describe('mergeSyllablesIntoWords', () => {
+  it('keeps native syllable pauses and unequal durations inside an unbroken display word', () => {
+    const source = [
+      { time: 1, duration: 0.2, text: 'to' },
+      { time: 2, duration: 0.5, text: 'day' },
+    ]
+    const [word] = mergeSyllablesIntoWords(source)
+    expect(word!.text).toBe('today')
+    expect(word!.syllables).toEqual(source)
+    expect(wordFillProgress(1.4, word!)).toBeCloseTo(0.4)
+    expect(wordFillProgress(1.8, word!)).toBeCloseTo(0.4)
+    expect(wordFillProgress(2.25, word!)).toBeCloseTo(0.7)
+    expect(mergeSyllablesIntoWords([word!])).toEqual([word])
+    expect(
+      mergeSyllablesIntoWords([word!, { time: 3, duration: 0.2, text: 's' }])[0]!.syllables,
+    ).toHaveLength(3)
+    expect(source).toEqual([
+      { time: 1, duration: 0.2, text: 'to' },
+      { time: 2, duration: 0.5, text: 'day' },
+    ])
+  })
   it('merges latin syllables of one word but keeps CJK characters separate', () => {
     const merged = mergeSyllablesIntoWords([
       { time: 0, duration: 0.2, text: 'beau' },

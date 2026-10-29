@@ -378,13 +378,13 @@ export function tokenizeLyricText(text: string): WeightedToken[] {
 }
 
 // 拉丁字母音节:歌词源常把一个英文单词拆成多个音节(beau / ti / ful),
-// 但高亮的推进单位应该是"词",中文才是"字"。这里把同一个词的音节合回去
-const LATIN_SYLLABLE = /^[A-Za-z'’-]+$/
+// 显示时作为完整单词排版，演唱时间仍以原始音节为准。
+const LATIN_SYLLABLE = /^(?:\p{Script=Latin}|\p{Mark}|['’-])+$/u
 
 /**
  * 把字级时间轴上的音节合并成显示用的推进单位:
- * 英文按词、中文按字。合并后该词的时间跨度是它全部音节的首尾,
- * 扫光在整个词上连续推进,而不是一个字母一个字母地跳。
+ * 英文按词、中文按字。只合并显示边界，不合并内部时间轴。
+ * 重复解析也保留原始片段，不将已分组的时间轴再次摊平成匀速扫光。
  */
 export function mergeSyllablesIntoWords(words: readonly LyricWord[]): LyricWord[] {
   const merged: LyricWord[] = []
@@ -399,7 +399,14 @@ export function mergeSyllablesIntoWords(words: readonly LyricWord[]): LyricWord[
 
     if (mergeable) {
       const end = Math.max(previous.time + previous.duration, word.time + word.duration)
+      previous.syllables = [
+        ...(previous.syllables ?? [
+          { text: previous.text, time: previous.time, duration: previous.duration },
+        ]),
+        ...(word.syllables ?? [{ text: word.text, time: word.time, duration: word.duration }]),
+      ]
       previous.text += word.text
+      previous.time = Math.min(previous.time, word.time)
       previous.duration = Math.max(MIN_WORD_DURATION, end - previous.time)
       if (word.trailingSpace) previous.trailingSpace = true
       continue
@@ -563,6 +570,20 @@ function mergeLyricField(
 
 /** 该音节在给定时刻的演唱进度(0…1) */
 export function wordFillProgress(time: number, word: LyricWord): number {
+  if (word.syllables?.length) {
+    let total = 0
+    let filled = 0
+    for (const syllable of word.syllables) {
+      const weight = Array.from(syllable.text).length
+      const progress =
+        syllable.duration <= 0
+          ? Number(time >= syllable.time)
+          : Math.max(0, Math.min(1, (time - syllable.time) / syllable.duration))
+      total += weight
+      filled += weight * progress
+    }
+    if (total > 0) return filled / total
+  }
   if (word.duration <= 0) return time >= word.time ? 1 : 0
   const ratio = (time - word.time) / word.duration
   return ratio <= 0 ? 0 : ratio >= 1 ? 1 : ratio

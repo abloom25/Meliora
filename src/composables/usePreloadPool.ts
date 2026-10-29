@@ -7,6 +7,7 @@ import { createTrackFailureLog, type PreloadDirection } from '../core/audio/prel
 import type { AudioBackend, AudioChannel } from '../core/audio/backend'
 import type { BeatPreloadTarget } from '../core/analysis/beat-timeline'
 import { LruCache } from '../core/util/lru-cache'
+import type { PlaybackResourcePressure } from '../core/playback/resource-budget'
 
 export type { PreloadDirection }
 
@@ -140,6 +141,7 @@ export interface PreloadPoolOptions {
   backend: AudioBackend
   store: ReturnType<typeof usePlayerStore>
   settings: Ref<PlayerSettings>
+  resourcePressure?: Readonly<Ref<PlaybackResourcePressure>>
 
   transitionInProgress: () => boolean
   isChannelProtected?: (channel: AudioChannel) => boolean
@@ -179,6 +181,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
   const transientFailures = new LruCache<string, { source: string; until: number }>(16)
   const pendingPreloadTimeouts = new Set<number>()
   const lyricPreloads = new Map<PreloadSlot, AbortController>()
+  const suspendedLyrics = new Set<PreloadSlot>()
   const lyricHandoffs = new Set<AbortController>()
   const isPoolUnmounted = ref(false)
   let publishedTargets: readonly BeatPreloadTarget[] = []
@@ -287,6 +290,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
   }
 
   function startSlotLyrics(slot: PreloadSlot, track: Track): void {
+    suspendedLyrics.delete(slot)
     cancelSlotLyrics(slot)
     const controller = new AbortController()
     lyricPreloads.set(slot, controller)
@@ -297,11 +301,18 @@ export function usePreloadPool(options: PreloadPoolOptions) {
 
   /** Transfer ownership when audio handles rotate. Release incoming after foreground watchers attach. */
   function transferLyricsForPromotion(slot: PreloadSlot, reverseSlot: PreloadSlot): () => void {
+    suspendedLyrics.delete(slot)
+    suspendedLyrics.delete(reverseSlot)
     const incoming = lyricPreloads.get(slot)
     lyricPreloads.delete(slot)
     if (incoming) lyricHandoffs.add(incoming)
     cancelSlotLyrics(reverseSlot)
-    if (!isPoolUnmounted.value && settings.value.preloadNextTrack && reverseSlot.track)
+    if (
+      !isPoolUnmounted.value &&
+      settings.value.preloadNextTrack &&
+      reverseSlot.track &&
+      options.resourcePressure?.value !== 'buffering'
+    )
       startSlotLyrics(reverseSlot, reverseSlot.track)
     return () => {
       if (!incoming) return
@@ -311,6 +322,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
   }
 
   function clearSlot(slot: PreloadSlot, publish = true) {
+    suspendedLyrics.delete(slot)
     cancelSlotLyrics(slot)
     if (slot.cleanup) {
       slot.cleanup()
@@ -369,8 +381,10 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     if (isPoolUnmounted.value) return Promise.resolve(false)
     const slot = preloadSlots[direction]
     if (options.isChannelProtected?.(slot.channel)) return Promise.resolve(false)
-    if (slot.track?.id === track.id && slot.track.audioUrl === track.audioUrl && slot.ready)
+    if (slot.track?.id === track.id && slot.track.audioUrl === track.audioUrl && slot.ready) {
+      if (suspendedLyrics.delete(slot)) startSlotLyrics(slot, track)
       return slot.ready
+    }
 
     const duplicateSlot = findSlotByTrack(track)
     if (duplicateSlot && duplicateSlot !== slot) {
@@ -406,11 +420,13 @@ export function usePreloadPool(options: PreloadPoolOptions) {
       const handleReady = () => {
         if (isPoolUnmounted.value || !ownsSlot()) return
         finish(true)
+        scheduleAdjacentPreload()
       }
       stops.push(channel.on('canplay', handleReady), channel.on('loadeddata', handleReady))
       slot.cleanup = cancel
     })
     slot.ready = ready
+    channel.setPreload('auto')
     channel.load(track.audioUrl)
     refreshTargets()
     if (direction === 'next') {
@@ -423,20 +439,47 @@ export function usePreloadPool(options: PreloadPoolOptions) {
   function preloadAdjacentTracks() {
     if (!settings.value.preloadNextTrack || transitionInProgress() || navigator.onLine === false)
       return
+    const pressure = options.resourcePressure?.value ?? 'normal'
+    if (pressure === 'buffering') {
+      for (const slot of Object.values(preloadSlots)) {
+        if (slot.channel === backend.active() || options.isChannelProtected?.(slot.channel))
+          continue
+        if (lyricPreloads.has(slot)) suspendedLyrics.add(slot)
+        cancelSlotLyrics(slot)
+        // An unfinished speculative request must give the active song its connection back.
+        if (slot.track && !slot.channel.canStart()) clearSlot(slot)
+        else slot.channel.setPreload('none')
+      }
+      return
+    }
     const previousTrack = predictPreviousTrack()
     const nextTrack = predictNextTrack()
     const sameNeighbor =
       previousTrack?.id === nextTrack?.id && previousTrack?.audioUrl === nextTrack?.audioUrl
+    if (nextTrack && nextTrack.id !== store.currentTrack?.id && canWarm(nextTrack)) {
+      void loadSlot('next', nextTrack)
+      preloadSlots.next.channel.setPreload('auto')
+    }
+    const canLoadPrevious =
+      pressure === 'normal' &&
+      (!options.resourcePressure ||
+        !nextTrack ||
+        nextTrack.id === store.currentTrack?.id ||
+        slotCanStart(preloadSlots.next, nextTrack))
     // In a two-song queue both directions name the same song. Keep it in the
     // next slot instead of releasing and loading it twice on each refresh.
     if (previousTrack && previousTrack.id !== store.currentTrack?.id && !sameNeighbor) {
-      if (canWarm(previousTrack)) void loadSlot('previous', previousTrack)
+      if (canLoadPrevious && canWarm(previousTrack)) void loadSlot('previous', previousTrack)
+      else if (!options.isChannelProtected?.(preloadSlots.previous.channel)) {
+        if (lyricPreloads.has(preloadSlots.previous)) suspendedLyrics.add(preloadSlots.previous)
+        cancelSlotLyrics(preloadSlots.previous)
+        if (!preloadSlots.previous.channel.canStart()) clearSlot(preloadSlots.previous)
+        else preloadSlots.previous.channel.setPreload('none')
+      }
     } else {
       clearSlot(preloadSlots.previous)
     }
-    if (nextTrack && nextTrack.id !== store.currentTrack?.id) {
-      if (canWarm(nextTrack)) void loadSlot('next', nextTrack)
-    } else {
+    if (!nextTrack || nextTrack.id === store.currentTrack?.id) {
       clearSlot(preloadSlots.next)
     }
   }
@@ -493,6 +536,7 @@ export function usePreloadPool(options: PreloadPoolOptions) {
     }),
   ])
   watch(() => settings.value.preloadNextTrack, refreshTargets, { flush: 'sync' })
+  if (options.resourcePressure) watch(options.resourcePressure, scheduleAdjacentPreload)
   const reconnect = (): void => {
     transientFailures.clear()
     scheduleAdjacentPreload()

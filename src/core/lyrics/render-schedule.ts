@@ -20,12 +20,15 @@ export function scheduleLyricRender(
   nextLineBoundary: number | null,
   words: readonly LyricWord[],
   animated: boolean,
+  motionEnd: number | null = null,
 ): LyricRenderSchedule {
   if (!playback.playing || playback.seeking || !Number.isFinite(playback.timeSeconds))
     return { kind: 'idle' }
   const time = playback.timeSeconds
   let next = nextLineBoundary ?? Number.POSITIVE_INFINITY
   if (animated) {
+    if (motionEnd !== null && Number.isFinite(motionEnd) && time < motionEnd)
+      return { kind: 'frame' }
     for (const word of words) {
       if (!Number.isFinite(word.time) || !Number.isFinite(word.duration)) continue
       if (

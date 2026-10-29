@@ -143,6 +143,10 @@ function createChannel(
       element.src = url
       element.load()
     },
+    setPreload(mode) {
+      // A hint, not a hard byte limit. Never call load(): that discards useful buffers.
+      element.preload = mode
+    },
     source() {
       return element.currentSrc || element.src || ''
     },
@@ -156,6 +160,7 @@ function createChannel(
     },
     play() {
       clearResume()
+      element.preload = 'auto'
       return element.play()
     },
     pause() {

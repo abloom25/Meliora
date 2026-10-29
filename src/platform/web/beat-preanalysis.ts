@@ -303,6 +303,26 @@ async function copyChannels(
   ) {
     throw new Error('这首歌曲过长或音频格式不适合预分析，播放不受影响')
   }
+  // This OfflineAudioContext buffer is never played. Move its channel storage into
+  // our exclusive ownership instead of allocating a second full-song PCM copy.
+  // Some engines disallow detaching native buffers; keep the chunked fallback.
+  if (typeof audio.getChannelData === 'function' && typeof structuredClone === 'function') {
+    try {
+      const views = Array.from({ length: audio.numberOfChannels }, (_, index) =>
+        audio.getChannelData(index),
+      )
+      const buffers = [...new Set(views.map((view) => view.buffer))]
+      if (
+        views.every((view) => view.length === audio.length) &&
+        buffers.every((buffer) => buffer instanceof ArrayBuffer)
+      ) {
+        signal.throwIfAborted()
+        return structuredClone(views, { transfer: buffers }) as Float32Array<ArrayBuffer>[]
+      }
+    } catch (error) {
+      if (signal.aborted) throw error
+    }
+  }
   const channels: Float32Array<ArrayBuffer>[] = []
   for (let channel = 0; channel < audio.numberOfChannels; channel += 1) {
     const samples = new Float32Array(audio.length)

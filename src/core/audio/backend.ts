@@ -37,6 +37,8 @@ export interface AudioChannel {
   readonly id: string
   /** 指向新的音频地址并开始加载。不自动播放 */
   load(url: string): void
+  /** Adjust speculative loading without discarding already buffered media. */
+  setPreload(mode: 'none' | 'metadata' | 'auto'): void
   /** 当前音频地址;没有源时为空串 */
   source(): string
   /** 暂停、清空源、中止下载 */

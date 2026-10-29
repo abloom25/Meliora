@@ -54,9 +54,151 @@ const harmony: LyricLine = {
 afterEach(() => {
   document.body.replaceChildren()
   vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 describe('useLyricsKaraoke', () => {
+  function layeredFixture() {
+    const element = createLine(lead)
+    const original = document.createElement('div')
+    original.className = 'lyric-original'
+    original.append(...element.childNodes)
+    element.append(original)
+    const karaoke = useLyricsKaraoke({
+      getLines: () => [lead],
+      getLineElements: () => [element],
+      isEnabled: () => true,
+    })
+    return { element, original, karaoke }
+  }
+
+  it('revives a fading row without allowing the old cleanup timer to clear it', () => {
+    vi.useFakeTimers()
+    const { element, karaoke } = layeredFixture()
+    karaoke.bind([0])
+    karaoke.write(3)
+    const copy = element.querySelector('.lyric-original-dim')
+    karaoke.ensure([])
+    expect(karaoke.getWords()).toEqual([])
+    expect(element.hasAttribute('data-lyric-bright')).toBe(false)
+    expect(fills(element)).toEqual(['1.000', '0.500'])
+    vi.advanceTimersByTime(200)
+    karaoke.ensure([0])
+    karaoke.write(2.5)
+    vi.advanceTimersByTime(500)
+    expect(element.hasAttribute('data-lyric-bright')).toBe(true)
+    expect(element.querySelector('.lyric-original-dim')).toBe(copy)
+    expect(fills(element)).toEqual(['1.000', '0.250'])
+    karaoke.release()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('returns an exited row to one text layer after fade and recreates it on rewind', () => {
+    vi.useFakeTimers()
+    const { element, karaoke } = layeredFixture()
+    karaoke.bind([0])
+    karaoke.write(3)
+    karaoke.ensure([])
+    expect(element.querySelectorAll('.lyric-original-dim')).toHaveLength(1)
+    vi.advanceTimersByTime(500)
+    expect(element.querySelector('.lyric-original-dim')).toBeNull()
+    expect(element.hasAttribute('data-lyric-layered')).toBe(false)
+    expect(fills(element)).toEqual(['', ''])
+    expect(vi.getTimerCount()).toBe(0)
+    karaoke.ensure([0])
+    karaoke.write(1)
+    expect(element.querySelectorAll('.lyric-original-dim')).toHaveLength(1)
+    expect(fills(element)).toEqual(['0.500', '0.000'])
+    karaoke.release()
+  })
+
+  it('cancels an old fade before a virtual row is recycled for a different source index', () => {
+    vi.useFakeTimers()
+    const { element, karaoke: unused } = layeredFixture()
+    unused.release()
+    let owner = 0
+    const karaoke = useLyricsKaraoke({
+      getLines: () => [lead, lead],
+      getLineElements: () => [element],
+      getLineElement: (index) => (index === owner ? element : null),
+      isEnabled: () => true,
+    })
+    karaoke.bind([0])
+    karaoke.write(3)
+    karaoke.ensure([])
+    owner = 1
+    karaoke.ensure([1])
+    karaoke.write(1)
+    vi.advanceTimersByTime(500)
+    expect(element.hasAttribute('data-lyric-bright')).toBe(true)
+    expect(element.querySelectorAll('.lyric-original-dim')).toHaveLength(1)
+    expect(fills(element)).toEqual(['0.500', '0.000'])
+    karaoke.release()
+  })
+
+  it('finishes a natural phrase tail but freezes the old visual sample after a seek', () => {
+    vi.useFakeTimers()
+    const { element, karaoke } = layeredFixture()
+    karaoke.bind([0])
+    karaoke.write(3.99)
+    karaoke.ensure([])
+    expect(karaoke.getMotionEnd(4)).toBeCloseTo(4.3)
+    karaoke.write(4.1)
+    const character = spans(element)[1]!.querySelector<HTMLElement>('.lyric-char')!
+    const tail = character.style.getPropertyValue('--lyric-char-emphasis')
+    expect(Number(tail)).toBeGreaterThan(0)
+    karaoke.write(1)
+    expect(character.style.getPropertyValue('--lyric-char-emphasis')).toBe(tail)
+    expect(karaoke.getMotionEnd(1)).toBeNull()
+    karaoke.release()
+    expect(vi.getTimerCount()).toBe(0)
+    expect(element.querySelector('.lyric-original-dim')).toBeNull()
+    expect(character.style.getPropertyValue('--lyric-char-emphasis')).toBe('')
+  })
+
+  it('reuses stable bindings on relayout and repairs a replaced original text layer', () => {
+    const { element, original, karaoke } = layeredFixture()
+    karaoke.bind([0])
+    karaoke.write(3)
+    const word = spans(element)[1]!
+    const clear = vi.spyOn(word.style, 'removeProperty')
+    karaoke.bind([0])
+    karaoke.write(3)
+    expect(clear).not.toHaveBeenCalled()
+    const replacement = original.cloneNode(true) as HTMLElement
+    replacement.querySelectorAll('[style]').forEach((node) => node.removeAttribute('style'))
+    original.replaceWith(replacement)
+    karaoke.ensure([0])
+    karaoke.write(3)
+    expect(fills(element)).toEqual(['1.000', '0.500'])
+    expect(element.querySelectorAll('.lyric-original-dim')).toHaveLength(1)
+    expect(word.style.getPropertyValue('--lyric-word-fill')).toBe('')
+    karaoke.release()
+  })
+
+  it('does not reread character text on stable frames and invalidates it on DOM edits', () => {
+    const element = createLine(lead)
+    const karaoke = useLyricsKaraoke({
+      getLines: () => [lead],
+      getLineElements: () => [element],
+      isEnabled: () => true,
+    })
+    karaoke.bind([0])
+    const character = element.querySelector<HTMLElement>('.lyric-char')!
+    const text = vi.spyOn(character, 'textContent', 'get')
+    const children = vi.spyOn(spans(element)[0]!, 'childElementCount', 'get')
+    for (let frame = 0; frame < 120; frame++) {
+      karaoke.ensure([0])
+      karaoke.write(frame / 120)
+    }
+    expect(text).not.toHaveBeenCalled()
+    expect(children).not.toHaveBeenCalled()
+    character.textContent = ' '
+    karaoke.ensure([0])
+    karaoke.write(0.5)
+    expect(character.style.getPropertyValue('--lyric-char-emphasis')).toBe('0.000')
+    karaoke.release()
+  })
   it('writes independent rise after a short word is fully lit and rewinds both on seek', () => {
     const line: LyricLine = {
       time: 0,

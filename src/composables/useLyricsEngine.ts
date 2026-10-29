@@ -9,6 +9,7 @@ import {
   type SpringState,
 } from '../core/motion/spring'
 import { VirtualLyricLayout } from '../core/lyrics/virtual-layout'
+import { lyricBrowseReturnStiffness } from '../core/lyrics/browse-return'
 
 // 歌词行的位移引擎。
 //
@@ -18,7 +19,7 @@ import { VirtualLyricLayout } from '../core/lyrics/virtual-layout'
 // 会出现速度突变;和声行展开/收起时它下面的行被弹开/收拢,也只是目标变了而已,
 // 不需要任何版面快照与补偿。
 //
-// 牵引感来自整个可见区域逐行错峰起步:内容上移时由上向下,反向时镜像,
+// 牵引感来自整个可见区域自上而下错峰起步，不让可变行高反转传播顺序。
 // 唱过的行也参与牵引。按可见行数压缩间隔,限制当前行和整道波的等待时间。
 // 错峰会让相邻行在运动中短暂靠近,位移越大靠得越近;间隔按本次位移收窄,
 // 保证靠近量不超过一个行距,相邻行不会叠在一起。
@@ -27,6 +28,8 @@ import { VirtualLyricLayout } from '../core/lyrics/virtual-layout'
 // 半屏出头,离开的行直接就位(它们早已在视口之外)。尺寸重排则不截断当前位置。
 
 export interface LyricsEngineOptions {
+  requestFrame?: (callback: FrameRequestCallback) => number
+  cancelFrame?: (handle: number) => void
   getViewport: () => HTMLElement | null | undefined
   getLineElements: () => readonly (HTMLElement | null | undefined)[]
   /** 等待点外层，data-waiting-anchor 必须标明其所属的下一句索引。 */
@@ -176,6 +179,11 @@ function springConfig(stiffness: number, dampingRatio: number, scale: number): S
 }
 
 export function useLyricsEngine(options: LyricsEngineOptions) {
+  const requestFrame =
+    options.requestFrame ??
+    ((callback: FrameRequestCallback) => window.requestAnimationFrame(callback))
+  const cancelFrame =
+    options.cancelFrame ?? ((handle: number) => window.cancelAnimationFrame(handle))
   let motions: LineMotion[] = []
   let heights: number[] = []
   let gaps = { gap: 0, harmonyGap: 0 }
@@ -197,6 +205,8 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   let publishedWindow = ''
   let mountTransition: LyricsTransition | 'reflow' = 'none'
   let mountDelta = 0
+  let waveStartedAt = 0
+  let waveStepMs = 0
   // 点与下一句共享行位移；仅对重排改变的间距单独保留位置和速度，避免 resize 先跳半个间距。
   const waitingHalfExtent = createSpringState(0, 0)
   let waitingHalfExtentTarget = 0
@@ -512,7 +522,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
 
   function stopLoop() {
     if (frame) {
-      window.cancelAnimationFrame(frame)
+      cancelFrame(frame)
       frame = 0
     }
     lastFrameAt = null
@@ -522,12 +532,12 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     if (frame || !hasMotion()) return
     // 从请求这一帧的时刻计时。首帧固定推进 1/60s 会让 120Hz 屏幕起步走双倍距离。
     lastFrameAt = performance.now()
-    frame = window.requestAnimationFrame(tick)
+    frame = requestFrame(tick)
   }
 
-  function tick() {
+  function tick(timestamp: number) {
     frame = 0
-    const now = performance.now()
+    const now = Number.isFinite(timestamp) ? timestamp : performance.now()
     const dt = Math.min(Math.max(0, (now - (lastFrameAt ?? now)) / 1000), 0.25)
     lastFrameAt = now
 
@@ -592,7 +602,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     }
     syncWaiting()
 
-    if (busy) frame = window.requestAnimationFrame(tick)
+    if (busy) frame = requestFrame(tick)
     else {
       mountTransition = 'none'
       stopLoop()
@@ -720,11 +730,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     ensureLoop()
   }
 
-  function retargetRows(
-    delta: number,
-    budgetMs = Number.POSITIVE_INFINITY,
-    retained?: ReadonlySet<LineMotion>,
-  ) {
+  function retargetRows(budgetMs = Number.POSITIVE_INFINITY, retained?: ReadonlySet<LineMotion>) {
     const travel = Math.max(viewportHeight * JUMP_TRAVEL_RATIO, 1)
     const animated: Array<{ motion: LineMotion; fresh: boolean; ordered: boolean }> = []
     let maxShift = 0
@@ -775,12 +781,10 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
 
     // 整个可见区域保持连续相位,不能把当前句之前的行全部归零成同步移动的一块。
     // 隐藏的舞台边缘行不占序号；focus 尚未挂载时也按它的插入位置限制等待。
-    const topFirst = delta >= 0
+    animated.sort((left, right) => left.motion.index - right.motion.index)
     const ordered = animated.filter((entry) => entry.ordered)
     const focus = Math.max(0, scene?.focus ?? 0)
-    const focusOrder = ordered.filter(({ motion }) =>
-      topFirst ? motion.index < focus : motion.index > focus,
-    ).length
+    const focusOrder = ordered.filter(({ motion }) => motion.index < focus).length
     const lastOrder = Math.max(0, ordered.length - 1)
 
     // 错峰间隔:相邻行的最大靠近量 ≈ 峰值速度 × 间隔,不得超过一个行距
@@ -796,11 +800,16 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
       stepMs = Math.min(stepMs, (budgetMs * 0.5) / Math.max(1, lastOrder))
     }
     if (mountTransition === 'seek') stepMs = 0
+    if (retained) stepMs = waveStepMs
+    else {
+      waveStartedAt = performance.now()
+      waveStepMs = stepMs
+    }
+    const elapsed = retained ? Math.max(0, performance.now() - waveStartedAt) : 0
 
     const delays = new Map<LineMotion, number>()
     for (const [position, entry] of ordered.entries()) {
-      const order = topFirst ? position : lastOrder - position
-      delays.set(entry.motion, order * stepMs)
+      delays.set(entry.motion, Math.max(0, position * stepMs - elapsed))
     }
     // 舞台外那一圈:上方的跟最上面的可见行,下方的跟最下面的可见行
     const firstDelay = ordered.length ? delays.get(ordered[0]!.motion)! : 0
@@ -822,6 +831,18 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
             ? delayMs
             : Math.min(entry.motion.delayMs, delayMs)
       }
+    }
+    // A lower row may still be moving from the previous phrase. Never pause it;
+    // instead let preceding settled rows join now, so a fresh upper row cannot start later.
+    // Newly mounted rows also inherit the elapsed wave instead of restarting a full delay.
+    let latestStart = Number.POSITIVE_INFINITY
+    for (let index = animated.length - 1; index >= 0; index -= 1) {
+      const entry = animated[index]!
+      if (!retained?.has(entry.motion)) {
+        entry.motion.delayMs = Math.min(entry.motion.delayMs, latestStart)
+      }
+      latestStart = Math.min(latestStart, entry.motion.delayMs)
+      if (retained?.has(entry.motion)) continue
       if (
         scaleSettled(entry.motion) ||
         Math.abs(entry.motion.scale.velocity) > SCALE_VELOCITY_EPSILON
@@ -865,7 +886,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     mountDelta = delta
     if (transition === 'seek') {
       config = springConfig(SEEK_STIFFNESS, SEEK_DAMPING_RATIO, boundedScale(SEEK_STIFFNESS))
-      retargetRows(delta)
+      retargetRows()
       ensureLoop()
       return
     }
@@ -881,7 +902,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     }
     const scale = Math.min(frequency, MAX_FOLLOW_FREQUENCY) ** 2 / FOLLOW_STIFFNESS
     config = springConfig(FOLLOW_STIFFNESS, FOLLOW_DAMPING_RATIO, scale)
-    retargetRows(delta, budgetMs)
+    retargetRows(budgetMs)
     ensureLoop()
   }
 
@@ -990,7 +1011,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
         (mountTransition === 'spring' || mountTransition === 'seek') &&
         motions.some((motion) => !retained.has(motion))
       ) {
-        retargetRows(mountDelta, Number.POSITIVE_INFINITY, retained)
+        retargetRows(Number.POSITIVE_INFINITY, retained)
       } else if (mountTransition === 'none' && hasMotion()) {
         beginReflow()
       } else {
@@ -1059,11 +1080,23 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
   }
 
   /** 退出浏览模式,锚点行回到视口锚点位置 */
-  function follow(transition: LyricsTransition = 'spring') {
+  function follow(transition: LyricsTransition = 'spring', adaptive = false) {
     if (!scene) return
+    const distance = browseState().distanceScreens
     mode = 'follow'
     flingVelocity = 0
     apply(transition)
+    if (adaptive && options.isAnimated()) {
+      config = springConfig(lyricBrowseReturnStiffness(distance), SEEK_DAMPING_RATIO, 1)
+    }
+  }
+
+  function browseState(): { distanceScreens: number; coasting: boolean } {
+    const target = scene ? (waitingOffset() ?? offsetFor(scene.focus)) : offset
+    return {
+      distanceScreens: Math.abs(browseOffset - target) / Math.max(1, viewportHeight),
+      coasting: flingVelocity !== 0,
+    }
   }
 
   /** 用户滚动:内容按 delta 像素上移(负数下移) */
@@ -1197,6 +1230,7 @@ export function useLyricsEngine(options: LyricsEngineOptions) {
     cancel,
     reset,
     isBrowsing,
+    browseState,
     isRowVisible,
     targets,
     readDebugSnapshot,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   lyricCharacterEmphasis,
+  lyricCharacterSpread,
   lyricWordCharacters,
   lyricWordMotionEnd,
   lyricWordRise,
@@ -11,6 +12,26 @@ const short: LyricWord = { time: 2, duration: 0.15, text: 'you' }
 const sustained: LyricWord = { time: 4, duration: 2, text: '永远' }
 
 describe('lyric word motion', () => {
+  it('lets a phrase-ending long note settle beyond the wipe without extending short words', () => {
+    const context = { phraseEnd: true }
+    expect(lyricWordMotionEnd(sustained, context)).toBeCloseTo(6.3)
+    expect(lyricWordMotionEnd(short, context)).toBe(3)
+    expect(lyricCharacterEmphasis(6, sustained, 0, 2, context)).toBeGreaterThan(0)
+    expect(lyricCharacterEmphasis(6.3, sustained, 0, 2, context)).toBe(0)
+    expect(lyricCharacterEmphasis(3, sustained, 0, 2, context)).toBe(0)
+    const paused = lyricCharacterEmphasis(5.1, sustained, 0, 2, context)
+    expect(lyricCharacterEmphasis(5.1, sustained, 0, 2, context)).toBe(paused)
+    expect(lyricCharacterEmphasis(5, sustained, 0, 2, { background: true })).toBeGreaterThan(
+      lyricCharacterEmphasis(5, sustained, 0, 2),
+    )
+  })
+
+  it('spreads characters symmetrically and stays within the drawing bleed', () => {
+    expect(lyricCharacterSpread(1, 0, 6)).toBe(-lyricCharacterSpread(1, 5, 6))
+    expect(lyricCharacterSpread(0, 0, 6)).toBe(0)
+    expect(lyricCharacterSpread(1, 0, 1)).toBe(0)
+    expect(Math.abs(lyricCharacterSpread(10, 0, 100))).toBeLessThanOrEqual(0.025)
+  })
   it('lets a short syllable keep rising after its wipe has finished', () => {
     expect(lyricWordRise(2, short)).toBe(0)
     expect(lyricWordRise(2.15, short)).toBeCloseTo(1 - 0.85 ** 3)

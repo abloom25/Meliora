@@ -73,6 +73,36 @@ function mountPlayer(options: UseAudioPlayerOptions = {}) {
 }
 
 describe('useAudioPlayer', () => {
+  it('recovers a silent pending startup without discarding the buffer on the first attempt', async () => {
+    vi.useFakeTimers()
+    const play = vi
+      .spyOn(HTMLMediaElement.prototype, 'play')
+      .mockImplementation(() => new Promise(() => {}))
+    const { player, wrapper, store } = mountPlayer()
+    try {
+      store.settings.preloadNextTrack = false
+      void player.play()
+      await nextTick()
+      const audio = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0].getActiveAudio()
+      audio.currentTime = 42
+      const load = vi.spyOn(audio, 'load')
+      load.mockClear()
+      await vi.advanceTimersByTimeAsync(13000)
+      expect(play).toHaveBeenCalledTimes(2)
+      expect(load.mock.contexts).not.toContain(audio)
+      await vi.advanceTimersByTimeAsync(6800)
+      expect(play).toHaveBeenCalledTimes(3)
+      expect(load.mock.contexts).toContain(audio)
+      expect(store.currentTime).toBe(42)
+      player.pause()
+      const calls = play.mock.calls.length
+      await vi.advanceTimersByTimeAsync(30000)
+      expect(play).toHaveBeenCalledTimes(calls)
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
   it.each(['disable', 'close'] as const)(
     'shares one audio clock and resumes locally after %s',
     async (leaveMode) => {
@@ -300,13 +330,16 @@ describe('useAudioPlayer', () => {
       audio.dispatchEvent(new Event('waiting'))
       await vi.advanceTimersByTimeAsync(1000)
       audio.dispatchEvent(new Event('playing'))
-      await vi.advanceTimersByTimeAsync(12000)
+      for (let second = 0; second < 12; second++) {
+        audio.currentTime += 1
+        await vi.advanceTimersByTimeAsync(1000)
+      }
       expect(play).toHaveBeenCalledTimes(1)
       audio.dispatchEvent(new Event('waiting'))
       await vi.advanceTimersByTimeAsync(12800)
       expect(play).toHaveBeenCalledTimes(2)
       expect(store.currentTrackId).toBe('1')
-      expect(store.currentTime).toBe(40)
+      expect(store.currentTime).toBe(52)
     } finally {
       wrapper.unmount()
       vi.useRealTimers()
@@ -728,6 +761,7 @@ describe('useAudioPlayer', () => {
 
   it('passes real preload targets to beat analysis and rotates previous/next with playback', async () => {
     vi.useFakeTimers()
+    vi.spyOn(HTMLMediaElement.prototype, 'readyState', 'get').mockReturnValue(4)
     const restore = stubAudioPlay()
     vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => undefined)
     vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined)

@@ -96,6 +96,7 @@ afterEach(() => {
 
 describe('playback races', () => {
   it('cancels obsolete reverse-slot lyrics while promoting the incoming prefetch without restarting it', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'readyState', 'get').mockReturnValue(4)
     const starts = new Map<string, AbortSignal[]>()
     for (const track of tracks)
       registerTrackLyrics(track, {

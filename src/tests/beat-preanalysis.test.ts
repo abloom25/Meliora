@@ -115,6 +115,36 @@ afterEach(() => {
 })
 
 describe('browser beat preanalysis', () => {
+  it('transfers native channel storage without making another full PCM copy', async () => {
+    const left = new Float32Array(48000).fill(0.5)
+    const right = new Float32Array(48000).fill(-0.25)
+    const decoded = audioBuffer({ getChannelData: (index) => (index === 0 ? left : right) })
+    const h = harness({ decode: async () => decoded })
+    await flushPromises()
+    const request = h.worker.postMessage.mock.calls[0]![0] as BeatAudioData
+    expect(request.channels[0]![0]).toBe(0.5)
+    expect(request.channels[1]![0]).toBe(-0.25)
+    expect(left.byteLength + right.byteLength).toBe(0)
+    expect(decoded.copyFromChannel).not.toHaveBeenCalled()
+    h.worker.reply({ type: 'complete', timeline: fixtureTimeline() })
+    await h.promise
+  })
+
+  it('keeps chunked PCM copying when native channel access is unavailable', async () => {
+    const decoded = audioBuffer({
+      getChannelData: () => {
+        throw new Error('native buffer')
+      },
+    })
+    const h = harness({ decode: async () => decoded })
+    await flushPromises()
+    const request = h.worker.postMessage.mock.calls[0]![0] as BeatAudioData
+    expect(request.channels[0]![0]).toBe(0.5)
+    expect(request.channels[1]![0]).toBe(-0.25)
+    expect(decoded.copyFromChannel).toHaveBeenCalledTimes(2)
+    h.worker.reply({ type: 'complete', timeline: fixtureTimeline() })
+    await h.promise
+  })
   function persistentFixture() {
     const cache = createBeatAudioCache()
     cache.putPcm('/song.mp3', {

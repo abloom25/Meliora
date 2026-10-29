@@ -16,6 +16,7 @@ function fixture() {
     audioUrl: 'https://media.example/next.mp3?token=private',
   }
   const channel: AudioChannel = {
+    setPreload: vi.fn(),
     id: 'slot-2',
     load: vi.fn(),
     source: vi.fn(() => track.audioUrl),

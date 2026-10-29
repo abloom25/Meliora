@@ -8,7 +8,20 @@ export function shiftLyricTimings(lines: LyricLine[], seconds: number): LyricLin
     time: line.time === null ? null : line.time + seconds,
     ...(line.endTime === undefined ? {} : { endTime: line.endTime + seconds }),
     ...(line.words
-      ? { words: line.words.map((word) => ({ ...word, time: word.time + seconds })) }
+      ? {
+          words: line.words.map((word) => ({
+            ...word,
+            time: word.time + seconds,
+            ...(word.syllables
+              ? {
+                  syllables: word.syllables.map((syllable) => ({
+                    ...syllable,
+                    time: syllable.time + seconds,
+                  })),
+                }
+              : {}),
+          })),
+        }
       : {}),
   }))
 }

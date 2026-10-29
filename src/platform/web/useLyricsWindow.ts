@@ -11,13 +11,13 @@ import {
   createLyricWaitingTimeline,
   isLyricLineCompleted,
   lyricTempoScale,
-  lyricWordRise,
+  lyricWordCharacters,
   resolveLyricWaitingMotion,
-  wordFillProgress,
   type LyricScene,
   type LyricWaitingInterval,
 } from '../../core/lyrics'
 import { listenMediaQuery } from './media-query'
+import { createLyricKaraoke } from './lyric-karaoke'
 import { scheduleLyricRender, type LyricPlaybackState } from '../../core/lyrics/render-schedule'
 
 interface DocumentPictureInPictureApi {
@@ -104,9 +104,32 @@ const popupStyles = `
   @supports (background-clip: text) or (-webkit-background-clip: text) {
     /* --e 是前沿柔化宽度的缩放,进度为 0 或 1 时收到 0;
        否则未唱词的左边缘会被画出一段亮色渐变 */
-    .word { color: transparent; -webkit-background-clip: text; background-clip: text; background-image: linear-gradient(90deg, var(--lyric-fill) 0%, var(--lyric-fill) calc(var(--w,1) * 100%), var(--lyric-idle) calc(var(--w,1) * 100% + .5em * var(--e,0)), var(--lyric-idle) 100%); }
+    .word { color: transparent; -webkit-background-clip: text; background-clip: text; background-image: linear-gradient(90deg, var(--lyric-fill) 0%, var(--lyric-fill) calc(var(--lyric-word-fill,1) * 100%), var(--lyric-idle) calc(var(--lyric-word-fill,1) * 100% + .5em * var(--lyric-word-edge,0)), var(--lyric-idle) 100%); }
+    .word[data-lyric-sweep] { background-image: linear-gradient(90deg,var(--lyric-fill) var(--lyric-sweep-span),var(--lyric-idle) calc(var(--lyric-sweep-span) + var(--lyric-sweep-fade))); background-size: var(--lyric-sweep-size) 100%; background-position: var(--lyric-sweep-position) 0; background-repeat: no-repeat; }
   }
   .gap { white-space: pre-wrap; }
+  .main { text-wrap: balance; }
+  .line { position: relative; --lyric-mask-idle: .32; }
+  .lyric-original-dim { position: absolute; inset: 0 0 auto; pointer-events: none; user-select: none; text-shadow: none; }
+  .lyric-dim-word { box-sizing: content-box; display: inline-block; max-width: 100%; padding: .08em .12em .16em; margin: -.08em -.12em -.16em; color: var(--lyric-fill); text-shadow: none; }
+  .lyric-dim-gap { white-space: pre-wrap; }
+  .word.emphasized.unbroken,.lyric-dim-word.emphasized.unbroken { max-width: none; white-space: nowrap; overflow-wrap: normal; }
+  .lyric-char,.lyric-dim-char { display: inline-block; white-space: pre; }
+  .lyric-char { translate: calc(var(--lyric-char-spread,0) * 1em) calc(var(--lyric-char-emphasis,0) * -.035em); scale: calc(1 + var(--lyric-char-emphasis,0) * .045); }
+  .line.active .word,.line.active .lyric-char { text-shadow: 0 0 calc(var(--lyric-word-fill,1) * .34em) rgba(255,255,255,calc(var(--lyric-word-fill,1) * .42 + var(--lyric-char-emphasis,0) * .18)),0 0 calc(var(--lyric-word-fill,1) * .9em) rgba(255,255,255,calc(var(--lyric-word-fill,1) * .16)); }
+  .line:not(.active) .word,.line:not(.active) .lyric-char { transition: translate 320ms ease-out,scale 320ms ease-out,text-shadow 320ms ease-out; }
+  .line:not(.active):not([data-lyric-layered]) .word,.line:not(.active):not([data-lyric-layered]) .lyric-char { translate: none; scale: 1; text-shadow: none; transition: none; }
+  .word.emphasized { background-image: none; color: var(--lyric-fill); }
+  @supports (mask-image: linear-gradient(#000,#000)) or (-webkit-mask-image: linear-gradient(#000,#000)) {
+    .word.emphasized { --word-mask: linear-gradient(90deg,#000 0%,#000 calc(var(--lyric-word-fill,1) * 100%),rgba(0,0,0,var(--lyric-mask-idle)) calc(var(--lyric-word-fill,1) * 100% + .5em * var(--lyric-word-edge,0)),rgba(0,0,0,var(--lyric-mask-idle)) 100%); -webkit-mask-image: var(--word-mask); mask-image: var(--word-mask); }
+    .word.emphasized[data-lyric-sweep] { background-image: none; --word-mask: linear-gradient(90deg,#000 var(--lyric-sweep-span),rgba(0,0,0,var(--lyric-mask-idle)) calc(var(--lyric-sweep-span) + var(--lyric-sweep-fade))); -webkit-mask-size: var(--lyric-sweep-size) 100%; mask-size: var(--lyric-sweep-size) 100%; -webkit-mask-position: var(--lyric-sweep-position) 0; mask-position: var(--lyric-sweep-position) 0; -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat; }
+  }
+  .line[data-lyric-layered] { --lyric-idle: rgba(255,255,255,.32); }
+  .line[data-lyric-layered] .lyric-original,.line[data-lyric-layered] .lyric-original-dim { transition: opacity 420ms cubic-bezier(.16,1,.3,1); }
+  .line[data-lyric-layered] .lyric-original { opacity: 0; }
+  .line[data-lyric-layered] .lyric-original-dim { opacity: 1; }
+  .line[data-lyric-bright] .lyric-original { opacity: 1; }
+  .line[data-lyric-bright] .lyric-original-dim { opacity: 0; }
   .roman,.translation { display: block; margin-top: .25em; font-size: max(12px,.68em); line-height: 1.4; letter-spacing: 0; opacity: .72; }
   .roman { opacity: .58; }
   .state { margin: auto 0; padding-block: .25em; overflow-wrap: anywhere; color: rgba(255,255,255,.5); font-size: clamp(14px,4vw,18px); font-weight: 620; }
@@ -132,8 +155,10 @@ const popupStyles = `
   @media (prefers-reduced-motion: reduce) {
     .line { transition: none; }
     .word { translate: none; }
+    .lyric-char { translate: none; scale: 1; }
   }
   @media (prefers-contrast: more) {
+    .line { --lyric-mask-idle: .65; }
     .line { --lyric-fill: rgba(255,255,255,.65); --lyric-idle: rgba(255,255,255,.65); }
     .line.before { --lyric-fill: rgba(255,255,255,.8); --lyric-idle: rgba(255,255,255,.8); }
     .line.active { --lyric-fill: #fff; --lyric-idle: rgba(255,255,255,.65); }
@@ -252,11 +277,13 @@ export function useLyricsWindow({
   let karaokeTimer = 0
   // 同一时刻可以有多行在唱(对唱双声部、背景和声),扫光要按整批槽位绑
   let activeSlots: Array<{ slot: number; words: LyricWord[] }> = []
-  let karaokeSpans: HTMLElement[] = []
-  let karaokeWords: LyricWord[] = []
-  let karaokeLastFill: string[] = []
-  let karaokeLastEdge: string[] = []
-  let karaokeLastRise: string[] = []
+  const karaoke = createLyricKaraoke({
+    getLines: () => snapshot.value.lines,
+    getLineElements: () => cachedNodes?.lineNodes ?? [],
+    getLineElement: (index) =>
+      cachedNodes?.lineNodes.find((node) => Number(node.dataset.index) === index),
+    isEnabled: () => lyricAnimation.value && !reducedMotion?.matches,
+  })
   const debugSnapshot = shallowRef<LyricsWindowDebugSnapshot | null>(null)
   let debugTimer = 0
   let debugSampledAt = Number.NEGATIVE_INFINITY
@@ -304,9 +331,9 @@ export function useLyricsWindow({
             ).length ?? 0,
           activeSlots: activeSlots.map((entry) => entry.slot),
           renderedActiveIndex,
-          karaokeRunning: karaokeFrame !== 0 && karaokeSpans.length > 0,
+          karaokeRunning: karaokeFrame !== 0 && karaoke.getWords().length > 0,
           renderSchedule: karaokeFrame ? 'frame' : karaokeTimer ? 'timer' : 'idle',
-          animatedWordCount: karaokeSpans.length,
+          animatedWordCount: karaoke.getWords().length,
           scrollAnimationCount: scrollAnimations.size,
           mediaSeconds: currentTime.value,
           clockSeconds: readPlaybackTime(),
@@ -356,6 +383,7 @@ export function useLyricsWindow({
   }
 
   function clearCache() {
+    karaoke.release()
     stopScrollAnimations()
     previousPositions = null
     renderedTrackId = undefined
@@ -717,6 +745,10 @@ export function useLyricsWindow({
     void target.document.fonts?.ready.then(() => {
       if (lyricsWindow === target) resetLayout()
     })
+    target.document.fonts?.addEventListener?.('loadingdone', resetLayout)
+    windowCloseListeners.push(() =>
+      target.document.fonts?.removeEventListener?.('loadingdone', resetLayout),
+    )
   }
 
   function reuseLineNodes(start: number, end: number): void {
@@ -771,7 +803,7 @@ export function useLyricsWindow({
     if (!node) {
       node = doc.createElement('div')
       const main = doc.createElement('span')
-      main.className = 'main'
+      main.className = 'main lyric-original'
       node.append(main)
       nodes.lineNodes[index] = node
       nodes.mainNodes[index] = main
@@ -787,7 +819,11 @@ export function useLyricsWindow({
   // 副歌里同一句反复出现时避免每次换行都扔掉重建一遍音节节点
   function lineSignature(line: LyricLine): string {
     return JSON.stringify([
-      line.words?.map((word) => [word.text, Boolean(word.trailingSpace)]),
+      line.words?.map((word) => [
+        word.text,
+        Boolean(word.trailingSpace),
+        Boolean(lyricWordCharacters(word)),
+      ]),
       line.text,
       line.roman ?? '',
       line.translation ?? '',
@@ -807,14 +843,25 @@ export function useLyricsWindow({
       const fragment = doc.createDocumentFragment()
       for (const word of line.words) {
         const span = doc.createElement('span')
-        span.className = 'word'
-        span.textContent = word.text
+        span.className = 'word lyric-word'
+        const characters = lyricWordCharacters(word)
+        if (characters) {
+          span.classList.add('emphasized')
+          if (/^(?:\p{Script=Latin}|\p{Number}|\p{Mark}|\p{Punctuation})+$/u.test(word.text))
+            span.classList.add('unbroken')
+          for (const text of characters) {
+            const character = doc.createElement('span')
+            character.className = 'lyric-char'
+            character.textContent = text
+            span.append(character)
+          }
+        } else span.textContent = word.text
         fragment.append(span)
         spans.push(span)
         if (!word.trailingSpace) continue
         // 音节之间必须有真实的空白文本节点,否则行内块之间没有换行机会
         const gap = doc.createElement('span')
-        gap.className = 'gap'
+        gap.className = 'gap lyric-gap'
         gap.textContent = ' '
         fragment.append(gap)
       }
@@ -857,70 +904,19 @@ export function useLyricsWindow({
   }
 
   function releaseKaraoke() {
-    for (const span of karaokeSpans) {
-      span.style.removeProperty('--w')
-      span.style.removeProperty('--e')
-      span.style.removeProperty('--lyric-word-rise')
-    }
-    karaokeSpans = []
-    karaokeWords = []
-    karaokeLastFill = []
-    karaokeLastEdge = []
-    karaokeLastRise = []
+    karaoke.release()
   }
 
   function bindKaraoke() {
-    releaseKaraoke()
-    // 扫光关闭时不接管任何音节:释放内联的 --w / --e 后,
-    // 样式里的兜底值 var(--w,1) 让整行按已唱完渲染,等同整行高亮
-    if (!lyricAnimation.value || reducedMotion?.matches || !cachedNodes) return
-
-    const spans: HTMLElement[] = []
-    const words: LyricWord[] = []
-    for (const entry of activeSlots) {
-      const slotSpans = cachedNodes.wordNodes[entry.slot]
-      // 数量对不上说明 DOM 与快照不同步,整批都先不接管,下一次 render 会重绑
-      if (!slotSpans || slotSpans.length !== entry.words.length) return
-      spans.push(...slotSpans)
-      words.push(...entry.words)
-    }
-    if (!spans.length) return
-
-    karaokeSpans = spans
-    karaokeWords = words
-    karaokeLastFill = words.map(() => '')
-    karaokeLastEdge = words.map(() => '')
-    karaokeLastRise = words.map(() => '')
+    const active = activeSlots.map(({ slot }) =>
+      Number(cachedNodes!.lineNodes[slot]!.dataset.index),
+    )
+    karaoke.bind(active)
   }
 
   function writeKaraoke(time: number) {
-    if (!lyricAnimation.value || reducedMotion?.matches) {
-      releaseKaraoke()
-      return
-    }
-    if (!Number.isFinite(time)) return
-    for (let index = 0; index < karaokeSpans.length; index += 1) {
-      const span = karaokeSpans[index]!
-      const word = karaokeWords[index]!
-      const progress = wordFillProgress(time, word)
-      const fill = progress.toFixed(3)
-      if (fill !== karaokeLastFill[index]) {
-        karaokeLastFill[index] = fill
-        span.style.setProperty('--w', fill)
-      }
-      const edge = Math.max(0, Math.min(1, Math.min(progress, 1 - progress) * 8)).toFixed(3)
-      if (edge !== karaokeLastEdge[index]) {
-        karaokeLastEdge[index] = edge
-        span.style.setProperty('--e', edge)
-      }
-      const rise = lyricWordRise(time, word).toFixed(3)
-      if (rise !== karaokeLastRise[index]) {
-        karaokeLastRise[index] = rise
-        span.style.setProperty('--lyric-word-rise', rise)
-      }
-    }
+    karaoke.write(time)
   }
-
   function writeWaiting(time: number) {
     if (
       !cachedNodes ||
@@ -987,8 +983,9 @@ export function useLyricsWindow({
     const plan = scheduleLyricRender(
       playback,
       Number.isFinite(nextBoundary) ? nextBoundary : null,
-      karaokeWords,
+      karaoke.getWords(),
       lyricAnimation.value && !reducedMotion?.matches,
+      karaoke.getMotionEnd(playback.timeSeconds),
     )
     if (plan.kind === 'frame') karaokeFrame = target.requestAnimationFrame(karaokeTick)
     else if (plan.kind === 'timer') karaokeTimer = target.setTimeout(karaokeTick, plan.delayMs)
@@ -1164,7 +1161,7 @@ export function useLyricsWindow({
           ? 'before'
           : 'after'
       // 对唱的第二声部靠右,背景和声更小更淡 —— 和主面板同一套语义
-      const roleClass = `${line.agent === 'secondary' ? ' secondary' : ''}${line.background ? ' harmony' : ''}`
+      const roleClass = `${line.agent === 'secondary' ? ' secondary' : ''}${line.background ? ' harmony background' : ''}`
       const desiredClass = `line ${positionClass}${lineIndex === focus ? ' focused' : ''}${roleClass}`
       if (node.className !== desiredClass) node.className = desiredClass
       const indexStr = String(lineIndex)

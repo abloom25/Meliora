@@ -53,13 +53,19 @@ function pcmBytes(audio: BeatAudioData): number {
 
 /** Resident audio only; model sessions and the single in-flight PCM are never retained here. */
 export function createBeatAudioCache(
-  options: { maxPcmBytes?: number; maxEncodedBytes?: number; maxEntries?: number } = {},
+  options: {
+    maxPcmBytes?: number
+    maxEncodedBytes?: number
+    maxEntries?: number
+    maxResidentBytes?: number
+  } = {},
 ): BeatAudioCache {
   const maximumPcm = options.maxPcmBytes ?? 96 * 1024 * 1024
   const maximumEncoded = options.maxEncodedBytes ?? 32 * 1024 * 1024
   const maximumEntries = options.maxEntries ?? 3
+  const maximumResident = options.maxResidentBytes ?? 96 * 1024 * 1024
   if (
-    [maximumPcm, maximumEncoded, maximumEntries].some(
+    [maximumPcm, maximumEncoded, maximumEntries, maximumResident].some(
       (value) => !Number.isSafeInteger(value) || value < 0,
     )
   )
@@ -76,7 +82,8 @@ export function createBeatAudioCache(
     bytes: number,
     maximum: number,
   ): void => {
-    if (!source || !bytes || bytes > maximum || maximumEntries === 0) return
+    if (!source || !bytes || bytes > maximum || bytes > maximumResident || maximumEntries === 0)
+      return
     entries.delete(source)
     while (entries.size >= maximumEntries || bytesIn(entries) + bytes > maximum) {
       const oldest = [...entries.keys()].find((key) => entries !== pcm || key !== protectedSource)
@@ -85,6 +92,17 @@ export function createBeatAudioCache(
     }
     if (entries.size >= maximumEntries || bytesIn(entries) + bytes > maximum) return
     entries.set(source, { value, bytes })
+    // Compressed backups and neighbouring PCM share one resident budget. Protect
+    // the active decoded song, then keep the most recently prepared neighbour.
+    while (bytesIn(pcm) + bytesIn(encoded) > maximumResident) {
+      const compressed = encoded.keys().next().value
+      if (compressed !== undefined) encoded.delete(compressed)
+      else {
+        const victim = [...pcm.keys()].find((key) => key !== protectedSource)
+        if (victim === undefined) break
+        pcm.delete(victim)
+      }
+    }
   }
   return {
     protectPcm(source): void {

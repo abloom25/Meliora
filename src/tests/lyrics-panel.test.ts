@@ -1105,6 +1105,9 @@ describe('LyricsPanel', () => {
           activeIndex: 1,
           activeIndices: [1],
         })
+        expect(row(0).attributes('data-lyric-bright')).toBeUndefined()
+        // The old timing sample remains only for the opacity crossfade, then is released.
+        vi.advanceTimersByTime(500)
         for (const property of ['--lyric-word-fill', '--lyric-word-edge', '--lyric-word-rise'])
           expect(firstWord.style.getPropertyValue(property)).toBe('')
         for (const character of firstWord.querySelectorAll<HTMLElement>('.lyric-char'))
@@ -1316,7 +1319,7 @@ describe('LyricsPanel', () => {
       await wrapper.findAll('.lyric-line')[3]!.trigger('click')
 
       expect(wrapper.emitted('seek')?.at(-1)).toEqual([15])
-      // 点击立刻退出浏览态并开始牵引,不等 3.2s 的浏览超时
+      // 点击立刻退出浏览态并开始牵引,不等自适应浏览超时
       expect(wrapper.classes()).not.toContain('browsing')
       runSpringFrames(120)
       expect(wrapper.findAll('.lyric-line')[3]?.classes()).toContain('active')
@@ -1620,7 +1623,7 @@ describe('LyricsPanel', () => {
       expect(lineY(wrapper, 0)).toBeCloseTo(ANCHOR_Y, 0)
     })
 
-    it('resumes smoothly after the last browsing gesture has been idle for 3.2 seconds', async () => {
+    it('resumes smoothly after the adaptive idle period following the last browsing gesture', async () => {
       const { wrapper, store } = await mountReadyPanel()
 
       await wrapper.get('.lyrics-viewport').trigger('wheel', { deltaY: 100, deltaMode: 0 })
@@ -1641,7 +1644,7 @@ describe('LyricsPanel', () => {
       expect(lineY(wrapper, 3)).toBeCloseTo(ANCHOR_Y, 0)
     })
 
-    it('returns from distant lyrics without rendering a return button', async () => {
+    it('allows more reading time for distant lyrics before returning without a button', async () => {
       mockedLoadTrackLyrics.mockResolvedValueOnce(
         Array.from({ length: 80 }, (_, index) => ({ time: index * 5, text: `Line ${index}` })),
       )
@@ -1652,7 +1655,10 @@ describe('LyricsPanel', () => {
       await moveTo(store, 5)
       expect(wrapper.classes()).toContain('browsing')
       expect(wrapper.find('.browse-return').exists()).toBe(false)
-      vi.advanceTimersByTime(3200)
+      vi.advanceTimersByTime(1200)
+      await flushVueUpdates()
+      expect(wrapper.classes()).toContain('browsing')
+      vi.advanceTimersByTime(2500)
       runSpringFrames(120)
       await flushVueUpdates()
       expect(wrapper.classes()).not.toContain('browsing')
@@ -2185,7 +2191,7 @@ describe('LyricsPanel', () => {
       )
     })
 
-    it('releases the syllable fill of the line that stops being active', async () => {
+    it('releases the previous syllable fill after its brightness crossfade', async () => {
       mockedLoadTrackLyrics.mockResolvedValueOnce(karaokeLines)
       const { wrapper, store } = await mountReadyPanel()
 
@@ -2197,6 +2203,9 @@ describe('LyricsPanel', () => {
 
       await moveTo(store, 5.5)
 
+      expect(previous.element.style.getPropertyValue('--lyric-word-fill')).toBe('0.500')
+      expect(wrapper.findAll('.lyric-line')[0]!.attributes('data-lyric-bright')).toBeUndefined()
+      vi.advanceTimersByTime(500)
       expect(previous.element.style.getPropertyValue('--lyric-word-fill')).toBe('')
       const current = wrapper
         .findAll<HTMLElement>('.lyric-line')[1]!
@@ -2220,6 +2229,7 @@ describe('LyricsPanel', () => {
         'e',
       ])
       await moveTo(store, 5)
+      vi.advanceTimersByTime(500)
       expect(words[0]!.element.style.getPropertyValue('--lyric-word-rise')).toBe('')
     })
 

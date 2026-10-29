@@ -13,6 +13,9 @@
   import type { LyricsDebugSnapshot } from '../core/diagnostics/lyrics-debug'
   import { listenMediaQuery } from '../platform/web/media-query'
   import { isApplePlatform } from '../platform/web/browser'
+  import { createLyricLineMeasurer } from '../platform/web/lyric-line-layout'
+  import { createLyricFrames } from '../platform/web/lyric-frames'
+  import { lyricBrowseReturnWait } from '../core/lyrics/browse-return'
   import LyricsWaitingIndicator from './LyricsWaitingIndicator.vue'
   import {
     createLyricTimeline,
@@ -66,8 +69,6 @@
     },
   )
 
-  // 最后一次翻阅后留出阅读时间，再平滑恢复播放跟随。
-  const BROWSE_IDLE_MS = 3200
   // 滚轮 deltaMode 为"行"时每行折算的像素
   const WHEEL_LINE_PX = 40
   // 触摸惯性取松手前这么长时间内的位移算速度
@@ -117,6 +118,10 @@
   const sharingAnchor = ref(0)
   const selectedShareIndices = computed(() => new Set(props.selectedIndices))
   let browseTimer = 0
+  let lastBrowseAt = 0
+  const frames = createLyricFrames(window)
+  const lineMeasurer = createLyricLineMeasurer()
+  let paintFrame = 0
   const keyboardIndex = ref<number | null>(null)
   // 行节点直接从 DOM 读:它们在 Transition 的插槽里,由 Transition 自己渲染,
   // 面板自身重渲染时插槽不一定跟着跑,靠 ref 收集会在 onBeforeUpdate 清空后拿不回来
@@ -251,6 +256,31 @@
   const wordCharacters = computed(() =>
     displayedLines.value.map((line) => line.words?.map(lyricWordCharacters) ?? []),
   )
+  const lineBreaks = shallowRef<ReadonlyMap<number, readonly number[]>>(new Map())
+
+  function balanceMountedLines(): boolean {
+    const content = lyricsContent.value
+    if (!content || content.clientWidth <= 0) return false
+    const limit =
+      Number.parseFloat(getComputedStyle(content).getPropertyValue('--lyric-line-limit')) || 900
+    const available = Math.min(limit, content.clientWidth)
+    const next = new Map<number, readonly number[]>()
+    let changed = false
+    for (const element of lineElements()) {
+      const index = Number(element.dataset.lyricIndex)
+      const words = displayedLines.value[index]?.words
+      if (!words?.length) continue
+      const breaks = lineMeasurer.measure(
+        Array.from(element.querySelectorAll<HTMLElement>('.lyric-word')),
+        words,
+        available,
+      )
+      next.set(index, breaks)
+      if (breaks.join(',') !== (lineBreaks.value.get(index) ?? []).join(',')) changed = true
+    }
+    if (changed) lineBreaks.value = next
+    return changed
+  }
   // 英文长音里的字母只是动画节点，不能因此成为新的换行点。
   // 中文和含空格的短句仍保留原来的自然断行规则。
   const unbrokenWords = computed(() =>
@@ -306,6 +336,8 @@
   }
 
   const engine = useLyricsEngine({
+    requestFrame: (callback) => frames.request('motion', callback),
+    cancelFrame: frames.cancel,
     getViewport: () => viewport.value,
     getLineElements: lineElements,
     getWaitingElement: () => waitingElement.value,
@@ -520,12 +552,13 @@
     lyricsController = null
     stopRenderLoop()
     stopBrowsing()
-    window.cancelAnimationFrame(measureRaf)
+    frames.cancel(measureRaf)
     measureRaf = 0
     engine.reset()
     previousPlayback = null
     karaoke.release()
     lyricTempo.value = 1
+    lineBreaks.value = new Map()
     lines.value = []
     rawLines.value = []
     rawLinesTrackId.value = null
@@ -541,6 +574,11 @@
   /** 首次显示立即定位；播放中的重测保留当前位移、速度与和声展开进度。 */
   function relayout(preserveMotion = false, reflow = false) {
     if (!isPanelMounted || status.value !== 'ready' || !props.active || document.hidden) return
+    if (balanceMountedLines()) {
+      // Vue owns the break nodes. Measure final row heights only after that patch has landed.
+      void nextTick(() => relayout(preserveMotion, reflow))
+      return
+    }
     const firstLine = lineElements()[0]
     if (firstLine) {
       const style = getComputedStyle(firstLine)
@@ -569,16 +607,21 @@
   }
 
   function scheduleRelayout() {
-    window.cancelAnimationFrame(measureRaf)
-    measureRaf = window.requestAnimationFrame(() => {
+    frames.cancel(measureRaf)
+    measureRaf = frames.request('layout', () => {
       measureRaf = 0
       relayout(true, true)
     })
   }
 
+  function handleFontsLoaded(): void {
+    lineMeasurer.invalidate()
+    scheduleRelayout()
+  }
+
   // ---- 每帧渲染 ----
 
-  function renderOnce() {
+  function renderOnce(deferPaint = false) {
     scheduleDebug()
     if (!isPanelMounted || status.value !== 'ready' || !props.active || document.hidden) return
     const playback = readPlaybackState()
@@ -601,16 +644,24 @@
     const playingChanged = previous !== null && playback.playing !== previous.state.playing
     previousPlayback = { state: { ...playback }, sampledAt: now }
     syncScene(time, jumped ? 'seek' : 'spring', playingChanged || jumped)
-    karaoke.ensure(scene.value.highlighted)
-    karaoke.write(time)
-    waitingIndicator.value?.write(time)
+    const paint = () => {
+      paintFrame = 0
+      karaoke.ensure(scene.value.highlighted)
+      karaoke.write(time)
+      waitingIndicator.value?.write(time)
+      if (deferPaint) startRenderLoop(playback)
+    }
+    frames.cancel(paintFrame)
+    if (deferPaint) paintFrame = frames.request('paint', paint)
+    else paint()
   }
 
   function renderTick() {
+    const inFrame = renderFrame !== 0
     renderFrame = 0
     renderTimer = 0
-    renderOnce()
-    startRenderLoop()
+    renderOnce(inFrame)
+    if (!inFrame) startRenderLoop()
   }
 
   function shouldRunRenderLoop(): boolean {
@@ -625,9 +676,9 @@
     )
   }
 
-  function startRenderLoop() {
+  function startRenderLoop(sampled?: LyricPlaybackState) {
     if (renderFrame || renderTimer || !shouldRunRenderLoop()) return
-    const playback = readPlaybackState()
+    const playback = sampled ?? readPlaybackState()
     if (
       playback.playing &&
       !playback.seeking &&
@@ -635,7 +686,7 @@
       !userBrowsing.value &&
       animationEnabled()
     ) {
-      renderFrame = window.requestAnimationFrame(renderTick)
+      renderFrame = frames.request('scene', renderTick)
       return
     }
     const boundaries = [
@@ -647,14 +698,17 @@
       boundaries.length ? Math.min(...boundaries) : null,
       karaoke.getWords(),
       animationEnabled(),
+      karaoke.getMotionEnd(playback.timeSeconds),
     )
-    if (plan.kind === 'frame') renderFrame = window.requestAnimationFrame(renderTick)
+    if (plan.kind === 'frame') renderFrame = frames.request('scene', renderTick)
     else if (plan.kind === 'timer') renderTimer = window.setTimeout(renderTick, plan.delayMs)
   }
 
   function stopRenderLoop() {
-    if (renderFrame) window.cancelAnimationFrame(renderFrame)
+    if (renderFrame) frames.cancel(renderFrame)
     renderFrame = 0
+    frames.cancel(paintFrame)
+    paintFrame = 0
     if (renderTimer) window.clearTimeout(renderTimer)
     renderTimer = 0
   }
@@ -670,16 +724,37 @@
 
   function markBrowsing() {
     userBrowsing.value = true
+    lastBrowseAt = performance.now()
     window.clearTimeout(browseTimer)
-    browseTimer =
-      touch || props.sharing
-        ? 0
-        : window.setTimeout(() => {
-            browseTimer = 0
-            if (!isPanelMounted || !props.active || document.hidden) return
-            stopBrowsing()
-            engine.follow('seek')
-          }, BROWSE_IDLE_MS)
+    browseTimer = 0
+    scheduleBrowseReturn()
+  }
+
+  function scheduleBrowseReturn(): void {
+    if (
+      touch ||
+      props.sharing ||
+      !userBrowsing.value ||
+      !isPanelMounted ||
+      !props.active ||
+      document.hidden
+    )
+      return
+    const state = engine.browseState()
+    const wait = lyricBrowseReturnWait(
+      performance.now() - lastBrowseAt,
+      state.distanceScreens,
+      state.coasting,
+    )
+    if (wait > 0) {
+      browseTimer = window.setTimeout(() => {
+        browseTimer = 0
+        scheduleBrowseReturn()
+      }, wait)
+    } else {
+      stopBrowsing()
+      engine.follow('seek', true)
+    }
   }
 
   function stopBrowsing() {
@@ -1026,9 +1101,10 @@
     stopRenderLoop()
     stopBrowsing()
     touch = null
-    window.cancelAnimationFrame(measureRaf)
+    frames.cancel(measureRaf)
     measureRaf = 0
     engine.cancel()
+    karaoke.release()
   }
 
   function restoreRendering() {
@@ -1070,11 +1146,12 @@
       resizeObserver = new ResizeObserver(() => scheduleRelayout())
       if (viewport.value) resizeObserver.observe(viewport.value)
     }
-    // 网页字体晚于首次排版加载完成时行高会变,量一次就好
+    // Later font loads invalidate cached widths as well as initial layout.
     if (typeof document !== 'undefined' && 'fonts' in document) {
       void document.fonts.ready.then(() => {
-        if (isPanelMounted) scheduleRelayout()
+        if (isPanelMounted) handleFontsLoaded()
       })
+      document.fonts.addEventListener?.('loadingdone', handleFontsLoaded)
     }
   })
 
@@ -1086,7 +1163,10 @@
     clearDebug()
     stopRenderLoop()
     stopBrowsing()
-    window.cancelAnimationFrame(measureRaf)
+    frames.cancel(measureRaf)
+    frames.dispose()
+    lineMeasurer.invalidate()
+    document.fonts?.removeEventListener?.('loadingdone', handleFontsLoaded)
     lyricsController?.abort()
     resizeObserver?.disconnect()
     viewportResizeTarget?.removeEventListener('resize', handleViewportResize)
@@ -1185,7 +1265,9 @@
   watch(waitingElement, () => engine.syncWaiting(), { flush: 'post' })
   watch(
     renderedIndices,
-    () => {
+    async () => {
+      if (!isPanelMounted || status.value !== 'ready' || !props.active || document.hidden) return
+      if (balanceMountedLines()) await nextTick()
       if (!isPanelMounted || status.value !== 'ready' || !props.active || document.hidden) return
       engine.syncMounted()
       karaoke.ensure(scene.value.highlighted)
@@ -1346,6 +1428,7 @@
               <span class="lyric-original">
                 <template v-if="line.words?.length">
                   <template v-for="(word, wordIndex) in line.words" :key="wordIndex">
+                    <br v-if="lineBreaks.get(index)?.includes(wordIndex)" />
                     <span
                       class="lyric-word"
                       :class="{
@@ -1365,7 +1448,11 @@
                       </template>
                       <template v-else>{{ word.text }}</template>
                     </span>
-                    <span v-if="word.trailingSpace" class="lyric-gap">{{ ' ' }}</span>
+                    <span
+                      v-if="word.trailingSpace && !lineBreaks.get(index)?.includes(wordIndex + 1)"
+                      class="lyric-gap"
+                      >{{ ' ' }}</span
+                    >
                   </template>
                 </template>
                 <template v-else>{{ line.text }}</template>
@@ -1506,6 +1593,8 @@
   }
 
   .lyrics-content {
+    --lyric-line-limit: 900px;
+
     inset: 0 7% 0 3%;
     /* 只是把行距变量算成像素给引擎读(getComputedStyle 的 rowGap / columnGap),
        块级元素上的 gap 没有版面效果 */
@@ -1527,7 +1616,7 @@
     position: absolute;
     top: 0;
     left: 0;
-    max-width: min(900px, 100%);
+    max-width: min(var(--lyric-line-limit), 100%);
     padding: 0;
     border: 0;
     background: none;
@@ -1626,6 +1715,7 @@
   }
 
   .lyric-original,
+  .lyric-original-dim,
   .lyric-translation,
   .lyric-roman {
     position: relative;
@@ -1636,10 +1726,15 @@
     transform-origin: inherit;
   }
 
+  .lyric-line:not(.karaoke) .lyric-original {
+    text-wrap: balance;
+  }
+
   /* 逐字扫光:每个音节是一个独立的行内块,用背景渐变裁到文字上。
      --lyric-word-fill 是这个音节的演唱进度(0…1),由 JS 每帧写入当前行。
      前沿留 --lyric-edge 的渐变过渡,看起来是"亮起来"而不是"被刷过去" */
-  .lyric-word {
+  .lyric-word,
+  .lyric-dim-word {
     /* 左右各留出的绘制余量。字形墨迹横向溢出行内盒的来源有两处:
        行上的 letter-spacing: -0.035em 会让盒宽比最后一个字的字形窄,
        以及 690 字重下 J / f / y 这类字形本身带负边距。
@@ -1698,6 +1793,12 @@
     }
   }
 
+  .lyric-dim-word.emphasized.unbroken {
+    max-width: none;
+    white-space: nowrap;
+    overflow-wrap: normal;
+  }
+
   @supports (mask-image: linear-gradient(#000, #000)) or
     (-webkit-mask-image: linear-gradient(#000, #000)) {
     .lyric-word.emphasized {
@@ -1715,10 +1816,45 @@
     }
   }
 
-  .lyric-char {
+  // 几何只在挂载或重排时测量，播放时移动固定渐变，避免逐帧改写色标。
+  @supports (background-clip: text) or (-webkit-background-clip: text) {
+    .lyric-word[data-lyric-sweep]:not(.emphasized) {
+      background-image: linear-gradient(
+        90deg,
+        var(--lyric-fill) var(--lyric-sweep-span),
+        var(--lyric-idle) calc(var(--lyric-sweep-span) + var(--lyric-sweep-fade))
+      );
+      background-size: var(--lyric-sweep-size) 100%;
+      background-position: var(--lyric-sweep-position) 0;
+      background-repeat: no-repeat;
+    }
+  }
+
+  @supports (mask-image: linear-gradient(#000, #000)) or
+    (-webkit-mask-image: linear-gradient(#000, #000)) {
+    .lyric-word.emphasized[data-lyric-sweep] {
+      --lyric-word-mask: linear-gradient(
+        90deg,
+        #000 var(--lyric-sweep-span),
+        rgba(0, 0, 0, var(--lyric-mask-idle))
+          calc(var(--lyric-sweep-span) + var(--lyric-sweep-fade))
+      );
+
+      -webkit-mask-size: var(--lyric-sweep-size) 100%;
+      mask-size: var(--lyric-sweep-size) 100%;
+      -webkit-mask-position: var(--lyric-sweep-position) 0;
+      mask-position: var(--lyric-sweep-position) 0;
+      -webkit-mask-repeat: no-repeat;
+      mask-repeat: no-repeat;
+    }
+  }
+
+  .lyric-char,
+  .lyric-dim-char {
     display: inline-block;
     white-space: pre;
-    translate: 0 calc(var(--lyric-char-emphasis, 0) * -0.035em);
+    translate: calc(var(--lyric-char-spread, 0) * 1em)
+      calc(var(--lyric-char-emphasis, 0) * -0.035em);
     scale: calc(1 + var(--lyric-char-emphasis, 0) * 0.045);
     text-shadow:
       0 0 0.22em rgba(255, 255, 255, calc(var(--lyric-char-emphasis, 0) * 0.3)),
@@ -1753,6 +1889,15 @@
       text-shadow 320ms ease-out;
   }
 
+  // Reclaimed rows replace their static copy in the same resting pose, without a second fall.
+  .lyric-line:not(.active):not([data-lyric-layered]) .lyric-word,
+  .lyric-line:not(.active):not([data-lyric-layered]) .lyric-char {
+    translate: none;
+    scale: 1;
+    text-shadow: none;
+    transition: none;
+  }
+
   /* 浏览态下整行压平,发光也一并关掉 */
   .lyrics-panel.browsing .lyric-line.active .lyric-word,
   .lyrics-panel.browsing .lyric-line.active .lyric-char {
@@ -1761,7 +1906,8 @@
 
   /* 音节之间的空格单独成节点:行内块之间没有空白文本节点就不会产生换行机会,
      英文长句会溢出。pre-wrap 保留这个空格的同时保留它的换行能力 */
-  .lyric-gap {
+  .lyric-gap,
+  .lyric-dim-gap {
     white-space: pre-wrap;
   }
 
@@ -1835,6 +1981,7 @@
   }
 
   .lyric-line.background .lyric-original,
+  .lyric-line.background .lyric-original-dim,
   .lyric-line.background .lyric-roman,
   .lyric-line.background .lyric-translation {
     transform-origin: left top;
@@ -1845,6 +1992,7 @@
   }
 
   .lyric-line.background.secondary .lyric-original,
+  .lyric-line.background.secondary .lyric-original-dim,
   .lyric-line.background.secondary .lyric-roman,
   .lyric-line.background.secondary .lyric-translation {
     transform-origin: right top;
@@ -1864,6 +2012,59 @@
 
   .lyric-line.background.harmony-hidden {
     pointer-events: none;
+  }
+
+  // The copy has exactly the same word/character boxes and breaks, but never joins layout or karaoke queries.
+  .lyric-original-dim {
+    position: absolute;
+    inset: 0 0 auto;
+    pointer-events: none;
+    user-select: none;
+  }
+
+  .lyric-original-dim,
+  .lyric-dim-word,
+  .lyric-dim-char {
+    text-shadow: none;
+  }
+
+  .lyric-line[data-lyric-layered] {
+    --lyric-idle: rgba(255, 255, 255, 0.36);
+
+    // Keep mask contrast fixed while opacity handles entering/leaving the active state.
+    transition-property: opacity, filter, text-shadow;
+
+    .lyric-original,
+    .lyric-original-dim {
+      transition: opacity 420ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .lyric-original {
+      opacity: 0;
+    }
+    .lyric-original-dim {
+      opacity: var(--lyric-harmony, 1);
+    }
+
+    &[data-lyric-bright] {
+      .lyric-original {
+        opacity: var(--lyric-harmony, 1);
+      }
+      .lyric-original-dim {
+        opacity: 0;
+      }
+    }
+  }
+
+  .lyrics-panel.browsing .lyric-line[data-lyric-layered] {
+    --lyric-idle: #fff;
+  }
+
+  .sharing .lyric-original-dim {
+    display: none;
+  }
+  .sharing .lyric-original {
+    opacity: var(--lyric-harmony, 1) !important;
   }
 
   // 停下来后回到清晰的阅读状态，沿用有限的亮度/模糊过渡，不启动待机循环。

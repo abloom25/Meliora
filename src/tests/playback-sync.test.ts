@@ -65,6 +65,7 @@ function peer() {
   return result
 }
 beforeEach(() => {
+  vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
   vi.useFakeTimers()
   vi.setSystemTime(new Date('2026-10-27T00:00:00Z'))
   vi.stubGlobal('BroadcastChannel', Bus)
@@ -84,6 +85,55 @@ afterEach(() => {
   vi.useRealTimers()
 })
 describe('shared playback transport and clock', () => {
+  it('suspends hidden follower refreshes and immediately resynchronizes on return', () => {
+    const owner = peer()
+    owner.coordinator.claim()
+    owner.sync.setEnabled(true)
+    const follower = peer()
+    follower.sync.setEnabled(true)
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+    document.dispatchEvent(new Event('visibilitychange'))
+    follower.onTick.mockClear()
+    vi.advanceTimersByTime(10000)
+    expect(follower.onTick).not.toHaveBeenCalled()
+    expect(follower.onStop).not.toHaveBeenCalled()
+    owner.state.position = 70
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(follower.sync.read()?.position).toBe(70)
+    vi.advanceTimersByTime(250)
+    expect(follower.onTick).toHaveBeenCalledOnce()
+  })
+
+  it('does not rewind interpolation when the operating system clock changes', () => {
+    const owner = peer()
+    owner.coordinator.claim()
+    owner.sync.setEnabled(true)
+    const follower = peer()
+    follower.sync.setEnabled(true)
+    vi.setSystemTime(new Date('2026-10-26T00:00:00Z'))
+    vi.advanceTimersByTime(500)
+    expect(follower.sync.read()?.position).toBe(12.5)
+    expect(follower.onStop).not.toHaveBeenCalled()
+  })
+
+  it('probes a silent owner before declaring it lost, freezing the stale progress', () => {
+    const owner = peer()
+    owner.coordinator.claim()
+    owner.sync.setEnabled(true)
+    const follower = peer()
+    follower.sync.setEnabled(true)
+    owner.coordinator.release()
+    vi.advanceTimersByTime(6250)
+    expect(follower.onStop).not.toHaveBeenCalled()
+    expect(follower.sync.read()?.advancing).toBe(false)
+    expect(follower.sync.command({ action: 'play' })).toBe(true)
+    expect(follower.coordinator.owns()).toBe(false)
+    vi.advanceTimersByTime(2250)
+    expect(follower.onStop).toHaveBeenCalledOnce()
+    expect(owner.onCommand).not.toHaveBeenCalled()
+    expect(follower.sync.command({ action: 'play' })).toBe(false)
+  })
   it('joins a playing owner immediately and interpolates between anchors, freezing during buffering or seeking', () => {
     const owner = peer()
     owner.coordinator.claim()
@@ -169,7 +219,7 @@ describe('shared playback transport and clock', () => {
     expect(owner.onCommand).toHaveBeenCalledTimes(1)
     const oldOwner = owner.coordinator.owner()
     owner.coordinator.release()
-    vi.advanceTimersByTime(6250)
+    vi.advanceTimersByTime(8500)
     expect(follower.onStop).toHaveBeenCalledOnce()
     expect(follower.sync.read()).toBeNull()
     const nextOwner = peer()

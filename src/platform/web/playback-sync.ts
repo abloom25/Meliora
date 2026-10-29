@@ -4,6 +4,7 @@ import { safeStorage } from './storage'
 
 const KEY = 'meliora:playback-sync:v1'
 const LEASE_MS = 6000
+const RESYNC_GRACE_MS = 2000
 export interface TabPlaybackSnapshot {
   track: Track
   position: number
@@ -128,23 +129,36 @@ export function createPlaybackSync(options: {
   let timer: number | undefined
   let lastPublish = -Infinity
   let lastRequest = -Infinity
-  let remote: { state: TabPlaybackSnapshot; at: number; owner: PlaybackOwner } | null = null
+  let remote: {
+    state: TabPlaybackSnapshot
+    receivedAt: number
+    ageAtReceipt: number
+    owner: PlaybackOwner
+  } | null = null
+  let resyncUntil = 0
+  let lastTick = 0
+  const pendingCommands: Array<{ owner: PlaybackOwner; action: TabPlaybackCommand }> = []
   const seen = new Map<string, number>()
+  const remoteAge = (): number =>
+    remote ? remote.ageAtReceipt + Math.max(0, performance.now() - remote.receivedAt) : Infinity
 
   function read(): TabPlaybackSnapshot | null {
     if (!remote) return null
     const state = remote.state
-    const elapsed = Math.min(LEASE_MS, Math.max(0, Date.now() - remote.at)) / 1000
+    const elapsed = Math.min(LEASE_MS, remoteAge()) / 1000
     const position =
       state.position + (state.advancing && !state.seeking ? elapsed * state.playbackRate : 0)
     return {
       ...state,
       position: state.duration > 0 ? Math.min(position, state.duration) : position,
+      advancing: state.advancing && remoteAge() <= LEASE_MS,
     }
   }
   function stopFollowing(): void {
     const state = read()
     remote = null
+    resyncUntil = 0
+    pendingCommands.length = 0
     if (state) options.onStop({ ...state, playing: false, advancing: false })
   }
   function send(kind: string, payload: object = {}): void {
@@ -162,10 +176,10 @@ export function createPlaybackSync(options: {
   }
   function publish(force = false): void {
     if (!enabled || !options.coordinator.owns() || disposed) return
-    if (!force && Date.now() - lastPublish < 1000) return
+    if (!force && performance.now() - lastPublish < 1000) return
     const state = snapshot(options.getSnapshot())
     if (!state) return
-    lastPublish = Date.now()
+    lastPublish = performance.now()
     send('state', { owner: options.coordinator.owner(), state })
   }
   function receive(value: unknown): void {
@@ -194,8 +208,19 @@ export function createPlaybackSync(options: {
       options.coordinator.observeOwner(message.owner)
       if (options.coordinator.owns() || !sameOwner(options.coordinator.owner(), message.owner))
         return
-      remote = { state, at: message.at, owner: options.coordinator.owner()! }
+      remote = {
+        state,
+        receivedAt: performance.now(),
+        ageAtReceipt: Math.max(0, Date.now() - message.at),
+        owner: options.coordinator.owner()!,
+      }
+      resyncUntil = 0
       options.onSnapshot(read()!)
+      if (!enabled || !remote) return
+      for (const pending of pendingCommands.splice(0)) {
+        if (sameOwner(remote.owner, pending.owner))
+          send('command', { owner: remote.owner, command: pending.action })
+      }
     } else if (message.kind === 'command') {
       const action = command(message.command)
       if (
@@ -220,7 +245,13 @@ export function createPlaybackSync(options: {
         .finally(() => publish(true))
     } else if (message.kind === 'release' && remote && sameOwner(remote.owner, message.owner)) {
       const state = snapshot(message.state)
-      if (state) remote = { state, at: message.at, owner: remote.owner }
+      if (state)
+        remote = {
+          state,
+          receivedAt: performance.now(),
+          ageAtReceipt: Math.max(0, Date.now() - message.at),
+          owner: remote.owner,
+        }
       stopFollowing()
     }
   }
@@ -233,24 +264,62 @@ export function createPlaybackSync(options: {
     }
   }
   function request(): void {
-    lastRequest = Date.now()
+    lastRequest = performance.now()
     send('request')
   }
+  function probe(): void {
+    if (resyncUntil) return
+    resyncUntil = performance.now() + RESYNC_GRACE_MS
+    request()
+  }
+  function schedule(): void {
+    if (timer !== undefined) window.clearTimeout(timer)
+    if (!enabled || disposed) return
+    timer = window.setTimeout(
+      tick,
+      options.coordinator.owns() ? 1000 : document.hidden ? 2000 : 250,
+    )
+  }
   function tick(): void {
+    timer = undefined
+    if (!enabled || disposed) return
+    const now = performance.now()
+    // A delayed callback after sleep says nothing about whether the audio owner died.
+    if (remote && now - lastTick > LEASE_MS) probe()
+    lastTick = now
     if (options.coordinator.owns()) {
       // An explicit local play takes ownership synchronously before its first state update.
       remote = null
+      resyncUntil = 0
+      pendingCommands.length = 0
       publish()
     } else if (
       remote &&
-      Date.now() - remote.at <= LEASE_MS &&
+      remoteAge() <= LEASE_MS &&
       sameOwner(options.coordinator.owner(), remote.owner)
     ) {
-      options.onTick(read()!)
+      if (!document.hidden) options.onTick(read()!)
+    } else if (
+      remote &&
+      sameOwner(options.coordinator.owner(), remote.owner) &&
+      (!resyncUntil || now < resyncUntil)
+    ) {
+      probe()
     } else {
       stopFollowing()
-      if (Date.now() - lastRequest >= 2000) request()
+      if (performance.now() - lastRequest >= 2000) request()
     }
+    schedule()
+  }
+  function wake(): void {
+    if (!enabled || disposed) return
+    lastTick = performance.now()
+    if (options.coordinator.owns()) publish(true)
+    else if (!document.hidden) {
+      resyncUntil = 0
+      probe()
+    }
+    schedule()
   }
   function release(): void {
     if (options.coordinator.owns())
@@ -264,9 +333,11 @@ export function createPlaybackSync(options: {
     if (!value) {
       release()
       enabled = false
-      if (timer !== undefined) window.clearInterval(timer)
+      if (timer !== undefined) window.clearTimeout(timer)
       timer = undefined
       window.removeEventListener('storage', storage)
+      window.removeEventListener('pageshow', wake)
+      document.removeEventListener('visibilitychange', wake)
       bus?.close()
       bus = null
       seen.clear()
@@ -283,7 +354,10 @@ export function createPlaybackSync(options: {
       /* Storage is the fallback transport. */
     }
     window.addEventListener('storage', storage)
-    timer = window.setInterval(tick, 250)
+    window.addEventListener('pageshow', wake)
+    document.addEventListener('visibilitychange', wake)
+    lastTick = performance.now()
+    schedule()
     publish(true)
     request()
   }
@@ -295,8 +369,20 @@ export function createPlaybackSync(options: {
     command(action: TabPlaybackCommand): boolean {
       if (!enabled || options.coordinator.owns()) return false
       if (
+        remote &&
+        sameOwner(options.coordinator.owner(), remote.owner) &&
+        remoteAge() > LEASE_MS &&
+        (!resyncUntil || performance.now() < resyncUntil)
+      ) {
+        // Keep a wake-up click remote until the owner answers; never start a second audio stream.
+        if (pendingCommands.length >= 16) pendingCommands.shift()
+        pendingCommands.push({ owner: remote.owner, action })
+        probe()
+        return true
+      }
+      if (
         !remote ||
-        Date.now() - remote.at > LEASE_MS ||
+        remoteAge() > LEASE_MS ||
         !sameOwner(options.coordinator.owner(), remote.owner)
       ) {
         stopFollowing()

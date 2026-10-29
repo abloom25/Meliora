@@ -39,6 +39,7 @@ import { createPlaybackCoordinator } from '../platform/web/playback-coordinator'
 import { refreshListeningHistory } from '../platform/web/listening-history'
 import { usePlaybackPreferences } from '../platform/web/usePlaybackPreferences'
 import { createPlaybackSync } from '../platform/web/playback-sync'
+import { createPlaybackWatchdog } from '../platform/web/playback-watchdog'
 
 export interface UseAudioPlayerOptions {
   /** Only observe diagnostic data while its panel is visible. */
@@ -132,6 +133,39 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       }
     },
   })
+  const progressWatchdog = createPlaybackWatchdog({
+    read: () => {
+      if (
+        disposed ||
+        !localPlaying.value ||
+        detachedTabPosition.value !== null ||
+        recovery.active()
+      )
+        return null
+      const channel = backend.active()
+      // The waiting-event recovery already owns its own deadline.
+      if (!channel.source() || waitingChannels.has(channel)) return null
+      return {
+        identity: `${playbackVersion}:${channel.id}:${channel.source()}`,
+        position: channel.currentTime(),
+        ended: channel.ended(),
+      }
+    },
+    onStall: (reload) => {
+      const channel = backend.active()
+      if (reload || channel.failed()) {
+        handleRecoverableFailure(channel, 'network')
+        return
+      }
+      // Keep the native buffer on the first attempt; do not wait on another stuck promise.
+      const version = playbackVersion
+      void channel.play().catch((error: unknown) => {
+        if (!disposed && version === playbackVersion && channel === backend.active())
+          handleRecoverableFailure(channel, channel.classifyFailure(error))
+      })
+    },
+  })
+  watch(localPlaying, (playing) => (playing ? progressWatchdog.start() : progressWatchdog.stop()))
 
   function notifyLyricsPlayback(): void {
     if (disposed) return
@@ -340,6 +374,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   } = usePreloadPool({
     backend,
     store,
+    resourcePressure: budget.pressure,
     settings: computed(() =>
       followingTab.value || detachedTabPosition.value !== null
         ? { ...settings.value, preloadNextTrack: false }
@@ -387,6 +422,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
 
   // 用户的新操作接管播放；旧 Promise、跳歌定时器和增益动画不再有写入权。
   function invalidatePlayback(resetRecovery = true): void {
+    progressWatchdog.reset()
     allowInterruptedStart = false
     clearWaitingTimeout()
     if (resetRecovery) {
@@ -1404,6 +1440,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       tabSync?.dispose()
       coordination.dispose()
       disposed = true
+      progressWatchdog.stop()
       recovery.dispose()
       lyricPlaybackListeners.clear()
       waitingChannels.clear()

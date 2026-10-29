@@ -156,6 +156,63 @@ async function mountScrollingHarness(
 }
 
 describe('useLyricsWindow', () => {
+  it('shares phrase emphasis, reuses paused bindings on resize and removes settled dim copies', async () => {
+    vi.useFakeTimers()
+    const { api, popup, wrapper, currentTime, lyricAnimation } = mountLyricsWindowHarness()
+    try {
+      await api.toggleLyricsWindow()
+      currentTime.value = 1
+      await nextTick()
+      const snapshot: LyricsSnapshot = {
+        status: 'ready',
+        activeIndex: 0,
+        lines: [
+          {
+            time: 0,
+            endTime: 2,
+            text: 'Ohhh',
+            wordSource: 'native',
+            words: [{ time: 0, duration: 2, text: 'Ohhh' }],
+          },
+          {
+            time: 5,
+            endTime: 6,
+            text: 'next',
+            wordSource: 'native',
+          },
+        ],
+      }
+      api.setSnapshot(snapshot)
+      const word = popup.document.querySelector<HTMLElement>('.word')!
+      const character = word.querySelector<HTMLElement>('.lyric-char')!
+      expect(word.classList.contains('unbroken')).toBe(true)
+      expect(word.querySelectorAll('.lyric-char')).toHaveLength(4)
+      expect(Number(character.style.getPropertyValue('--lyric-char-emphasis'))).toBeGreaterThan(0)
+      expect(Number(character.style.getPropertyValue('--lyric-char-spread'))).toBeLessThan(0)
+      const clear = vi.spyOn(word.style, 'removeProperty')
+      api.setSnapshot({ ...snapshot, tempoScale: 0.9 })
+      const resize = vi
+        .mocked(popup.addEventListener)
+        .mock.calls.find(([event]) => event === 'resize')![1] as EventListener
+      resize(new Event('resize'))
+      expect(clear).not.toHaveBeenCalled()
+      expect(word.style.getPropertyValue('--lyric-word-fill')).toBe('0.500')
+      currentTime.value = 5.1
+      await nextTick()
+      expect(popup.document.querySelectorAll('[data-lyric-bright]')).toHaveLength(0)
+      vi.advanceTimersByTime(500)
+      expect(popup.document.querySelector('.lyric-original-dim')).toBeNull()
+      currentTime.value = 1
+      await nextTick()
+      expect(popup.document.querySelectorAll('.lyric-original-dim')).toHaveLength(1)
+      lyricAnimation.value = false
+      await nextTick()
+      expect(popup.document.querySelector('.lyric-original-dim')).toBeNull()
+      expect(character.style.getPropertyValue('--lyric-char-emphasis')).toBe('')
+    } finally {
+      wrapper.unmount()
+    }
+  })
   it('follows the main lyric scale until a separate window scale is chosen', async () => {
     const { api, popup, wrapper, lyricScale, lyricWindowScale } = mountLyricsWindowHarness()
     lyricScale.value = 1.2
@@ -517,7 +574,7 @@ describe('useLyricsWindow', () => {
         Number(
           popup.document
             .querySelector<HTMLElement>('.line.active .word')!
-            .style.getPropertyValue('--w'),
+            .style.getPropertyValue('--lyric-word-fill'),
         ),
       ).toBeGreaterThan(0)
 
@@ -547,7 +604,7 @@ describe('useLyricsWindow', () => {
       show('genbun')
       const line = popup.document.querySelector('.line')!
       expect([...line.children].map((node) => node.className)).toEqual([
-        'main',
+        'main lyric-original',
         'roman',
         'translation',
       ])
@@ -916,7 +973,9 @@ describe('useLyricsWindow', () => {
     currentTime.value = 2.5
     await nextTick()
     expect(
-      popup.document.querySelector<HTMLElement>('.active .word')?.style.getPropertyValue('--w'),
+      popup.document
+        .querySelector<HTMLElement>('.active .word')
+        ?.style.getPropertyValue('--lyric-word-fill'),
     ).toBe('0.500')
     wrapper.unmount()
   })
@@ -1026,14 +1085,14 @@ describe('useLyricsWindow', () => {
     const words = popup.document.querySelectorAll<HTMLElement>('.line.active .word')
     expect([...words].map((word) => word.textContent)).toEqual(['ze', 'ro'])
     expect(popup.document.querySelectorAll('.line.active .gap')).toHaveLength(1)
-    expect(words[0]?.style.getPropertyValue('--w')).toBe('0.500')
-    expect(words[1]?.style.getPropertyValue('--w')).toBe('0.000')
+    expect(words[0]?.style.getPropertyValue('--lyric-word-fill')).toBe('0.500')
+    expect(words[1]?.style.getPropertyValue('--lyric-word-fill')).toBe('0.000')
     expect(words[0]?.style.getPropertyValue('--lyric-word-rise')).toBe('0.875')
     expect(words[1]?.style.getPropertyValue('--lyric-word-rise')).toBe('0.000')
 
     // 非当前行不写内联值,CSS 的 var() 兜底把它们渲染成已唱完
     const idle = popup.document.querySelector<HTMLElement>('.line:not(.active) .word')
-    expect(idle?.style.getPropertyValue('--w')).toBe('')
+    expect(idle?.style.getPropertyValue('--lyric-word-fill')).toBe('')
   })
 
   it('stops the syllable scan in the popup when lyric animation is off', async () => {
@@ -1061,19 +1120,19 @@ describe('useLyricsWindow', () => {
     })
 
     const word = popup.document.querySelector<HTMLElement>('.line.active .word')!
-    expect(word.style.getPropertyValue('--w')).toBe('0.500')
+    expect(word.style.getPropertyValue('--lyric-word-fill')).toBe('0.500')
 
     lyricAnimation.value = false
     await nextTick()
 
-    // 释放内联值后由样式里的 var(--w,1) 兜底成"已唱完",整行一次性高亮
-    expect(word.style.getPropertyValue('--w')).toBe('')
-    expect(word.style.getPropertyValue('--e')).toBe('')
+    // 释放内联值后由样式里的 var(--lyric-word-fill,1) 兜底成"已唱完",整行一次性高亮
+    expect(word.style.getPropertyValue('--lyric-word-fill')).toBe('')
+    expect(word.style.getPropertyValue('--lyric-word-edge')).toBe('')
     expect(word.style.getPropertyValue('--lyric-word-rise')).toBe('')
 
     lyricAnimation.value = true
     await nextTick()
-    expect(word.style.getPropertyValue('--w')).toBe('0.500')
+    expect(word.style.getPropertyValue('--lyric-word-fill')).toBe('0.500')
     expect(word.style.getPropertyValue('--lyric-word-rise')).toBe('0.875')
   })
 
@@ -1104,13 +1163,15 @@ describe('useLyricsWindow', () => {
       mediaSeconds = 0.3
       runPopupFrames(popup, 1)
       expect(word.closest('.line')?.classList.contains('active')).toBe(true)
-      expect(word.style.getPropertyValue('--w')).toBe('1.000')
+      expect(word.style.getPropertyValue('--lyric-word-fill')).toBe('1.000')
       expect(word.style.getPropertyValue('--lyric-word-rise')).toBe('0.657')
       mediaSeconds = 0.7
       runPopupFrames(popup, 1)
       expect(word.style.getPropertyValue('--lyric-word-rise')).toBe('0.973')
       mediaSeconds = 3.1
       runPopupFrames(popup, 1)
+      expect(word.closest('.line')?.hasAttribute('data-lyric-bright')).toBe(false)
+      vi.advanceTimersByTime(500)
       expect(word.style.getPropertyValue('--lyric-word-rise')).toBe('')
       expect(popup.document.querySelector('.line.active')?.textContent).toBe('Next')
     } finally {
@@ -1142,10 +1203,10 @@ describe('useLyricsWindow', () => {
     await nextTick()
 
     const word = popup.document.querySelector<HTMLElement>('.line.active .word')!
-    const before = Number(word.style.getPropertyValue('--w'))
+    const before = Number(word.style.getPropertyValue('--lyric-word-fill'))
     runPopupFrames(popup, 20)
 
-    expect(Number(word.style.getPropertyValue('--w'))).toBeGreaterThan(before)
+    expect(Number(word.style.getPropertyValue('--lyric-word-fill'))).toBeGreaterThan(before)
   })
 
   it('changes plain lyric lines from the popup media clock while the main page stays stale', async () => {
@@ -1323,19 +1384,23 @@ describe('useLyricsWindow', () => {
         expect(row(1).classList.contains('active')).toBe(true)
         expect(row(1).classList.contains('focused')).toBe(true)
         expect(popup.document.querySelectorAll('.line.active')).toHaveLength(1)
-        for (const property of ['--w', '--e', '--lyric-word-rise'])
+        expect(row(0).hasAttribute('data-lyric-bright')).toBe(false)
+        vi.advanceTimersByTime(500)
+        for (const property of ['--lyric-word-fill', '--lyric-word-edge', '--lyric-word-rise'])
           expect(firstWord.style.getPropertyValue(property)).toBe('')
-        expect(row(1).querySelector<HTMLElement>('.word')?.style.getPropertyValue('--w')).not.toBe(
-          '',
-        )
+        expect(
+          row(1).querySelector<HTMLElement>('.word')?.style.getPropertyValue('--lyric-word-fill'),
+        ).not.toBe('')
       }
 
       mediaSeconds = 2
       runPopupFrames(popup, 1)
       expect(
-        [...popup.document.querySelectorAll('.line.active')].map((line) => line.textContent),
+        [...popup.document.querySelectorAll('.line.active .lyric-original')].map(
+          (line) => line.textContent,
+        ),
       ).toEqual(['First', 'Second'])
-      expect(firstWord.style.getPropertyValue('--w')).not.toBe('')
+      expect(firstWord.style.getPropertyValue('--lyric-word-fill')).not.toBe('')
 
       mediaSeconds = 2.01
       runPopupFrames(popup, 1)
@@ -1351,7 +1416,7 @@ describe('useLyricsWindow', () => {
       expect(row(0).classList.contains('active')).toBe(true)
       expect(row(0).classList.contains('before')).toBe(false)
       expect(row(1).classList.contains('active')).toBe(false)
-      expect(firstWord.style.getPropertyValue('--w')).not.toBe('')
+      expect(firstWord.style.getPropertyValue('--lyric-word-fill')).not.toBe('')
       mediaSeconds = 2.02
       runPopupFrames(popup, 1)
       assertHandoff()
@@ -1382,12 +1447,12 @@ describe('useLyricsWindow', () => {
       runPopupFrames(popup, 1)
       const coverReads = vi.spyOn(popup.document.querySelector('.cover')!, 'getAttribute')
       const word = popup.document.querySelector<HTMLElement>('.line.active .word')!
-      const initialFill = Number(word.style.getPropertyValue('--w'))
+      const initialFill = Number(word.style.getPropertyValue('--lyric-word-fill'))
       for (let frame = 0; frame < 30; frame += 1) {
         mediaSeconds += 0.016
         runPopupFrames(popup, 1)
       }
-      expect(Number(word.style.getPropertyValue('--w'))).toBeGreaterThan(initialFill)
+      expect(Number(word.style.getPropertyValue('--lyric-word-fill'))).toBeGreaterThan(initialFill)
       expect(coverReads).not.toHaveBeenCalled()
     } finally {
       wrapper.unmount()
