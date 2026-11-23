@@ -213,6 +213,65 @@ describe('useLyricsWindow', () => {
       wrapper.unmount()
     }
   })
+  it('measures the final popup size once and keeps a paused sustained word at its media time', async () => {
+    const popup = createPopupWindow()
+    const viewport = new EventTarget()
+    Object.defineProperty(popup, 'visualViewport', { value: viewport })
+    const { api, wrapper, lyricWindowScale } = mountLyricsWindowHarness(popup, () => 1)
+    try {
+      await api.toggleLyricsWindow()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        lines: [{ time: 0, text: 'Stay', words: [{ time: 0, duration: 4, text: 'Stay' }] }],
+      })
+      runPopupFrames(popup, 1)
+      const word = popup.document.querySelector<HTMLElement>('.word')!
+      const container = popup.document.querySelector<HTMLElement>('.lyrics-lines')!
+      container.style.width = '300px'
+      container.style.fontSize = '18px'
+      popup.getComputedStyle = (el) =>
+        el === container ? container.style : window.getComputedStyle(el)
+      Object.defineProperty(popup.document, 'defaultView', { value: window })
+      let width = 90
+      Object.defineProperty(word, 'clientWidth', { get: () => width })
+      const range = popup.document.createRange()
+      Object.assign(range, { getBoundingClientRect: () => ({ width }) })
+      const measure = vi.spyOn(popup.document, 'createRange').mockReturnValue(range)
+      const frame = vi.mocked(popup.requestAnimationFrame).mockClear()
+      const resize = vi
+        .mocked(popup.addEventListener)
+        .mock.calls.find(([event]) => event === 'resize')![1] as EventListener
+      resize(new Event('resize'))
+      width = 130
+      viewport.dispatchEvent(new Event('resize'))
+      lyricWindowScale.value = 1.25
+      await nextTick()
+      width = 150
+      resize(new Event('resize'))
+      expect(measure).not.toHaveBeenCalled()
+      expect(frame).toHaveBeenCalledTimes(1)
+      runPopupFrames(popup, 1)
+      expect(measure).toHaveBeenCalledTimes(1)
+      expect(word.style.getPropertyValue('--lyric-sweep-span')).toBe('150px')
+      expect(word.style.getPropertyValue('--lyric-word-fill')).toBe('0.250')
+      expect(popup.document.querySelector('.word')).toBe(word)
+      expect(frame).toHaveBeenCalledTimes(1)
+      const styles = vi.spyOn(window, 'getComputedStyle')
+      resize(new Event('resize'))
+      runPopupFrames(popup, 1)
+      expect(styles.mock.calls.some(([el]) => el === word)).toBe(false)
+      expect(word.style.getPropertyValue('--lyric-word-fill')).toBe('0.250')
+      container.style.fontSize = '20px'
+      width = 170
+      resize(new Event('resize'))
+      runPopupFrames(popup, 1)
+      expect(word.style.getPropertyValue('--lyric-sweep-span')).toBe('170px')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('follows the main lyric scale until a separate window scale is chosen', async () => {
     const { api, popup, wrapper, lyricScale, lyricWindowScale } = mountLyricsWindowHarness()
     lyricScale.value = 1.2
@@ -267,6 +326,13 @@ describe('useLyricsWindow', () => {
       await nextTick()
       runPopupFrames(popup, 1)
       expect(popup.setTimeout).toHaveBeenCalledWith(expect.any(Function), 400)
+      const scheduled = vi.mocked(popup.setTimeout).mock.calls.length
+      const resize = vi
+        .mocked(popup.addEventListener)
+        .mock.calls.find(([event]) => event === 'resize')![1] as EventListener
+      resize(new Event('resize'))
+      runPopupFrames(popup, 1, 0)
+      expect(popup.setTimeout).toHaveBeenCalledTimes(scheduled)
       vi.mocked(popup.requestAnimationFrame).mockClear()
       await vi.advanceTimersByTimeAsync(200)
       expect(popup.requestAnimationFrame).not.toHaveBeenCalled()
@@ -458,6 +524,64 @@ describe('useLyricsWindow', () => {
         nodesReady: false,
         lastFailure: '无法写入歌词小窗内容',
       })
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('indexes only the latest lyrics when the closed window opens at the current media time', async () => {
+    const { api, popup, wrapper } = mountLyricsWindowHarness(createPopupWindow(), () => 8)
+    const oldTime = vi.fn(() => 0)
+    const latestTime = vi.fn(() => 7)
+    const latest: LyricsSnapshot = {
+      status: 'ready',
+      activeIndex: 0,
+      lines: [
+        { time: 0, text: 'Intro' },
+        {
+          get time() {
+            return latestTime()
+          },
+          text: 'Current verse',
+        },
+      ],
+    }
+    try {
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        lines: [
+          {
+            get time() {
+              return oldTime()
+            },
+            text: 'Old song',
+          },
+        ],
+      })
+      api.setSnapshot(latest)
+      expect(oldTime).not.toHaveBeenCalled()
+      expect(latestTime).not.toHaveBeenCalled()
+      await api.toggleLyricsWindow()
+      expect(oldTime).not.toHaveBeenCalled()
+      expect(latestTime).toHaveBeenCalled()
+      expect(popup.document.querySelector('.line.active')?.textContent).toBe('Current verse')
+      // Some popup hosts close without delivering pagehide before the next snapshot.
+      popup.close()
+      api.setSnapshot({
+        status: 'ready',
+        activeIndex: 0,
+        lines: [
+          {
+            get time() {
+              return oldTime()
+            },
+            text: 'Another song',
+          },
+        ],
+      })
+      expect(oldTime).not.toHaveBeenCalled()
+      expect(api.isOpen.value).toBe(false)
     } finally {
       wrapper.unmount()
     }

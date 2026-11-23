@@ -81,7 +81,7 @@ function createChannel(
   // 挂在元素上的转发器。换元素时要先摘干净再挂到新元素上
   let forwarders: Array<{ type: string; handler: EventListener }> = []
   // 时长未知时 <audio> 写 currentTime 不生效,先记下来等 metadata 就绪再落位
-  let pendingSeek: number | null = null
+  let pendingSeek: { time: number; applied: boolean } | null = null
   let cancelResume: (() => void) | null = null
 
   function clearResume(): void {
@@ -100,27 +100,32 @@ function createChannel(
   // <audio> 在少数状态下会拒绝写 currentTime 并抛 InvalidStateError
   // (刚 ended、metadata 刚就绪时最常见)。后端契约要求方法不抛错,
   // 所以落位一律走这里:写不进去就当这次跳转还欠着,等下一个时长事件再试
-  function applyCurrentTime(target: HTMLAudioElement, seconds: number, total: number): boolean {
-    try {
-      target.currentTime = Math.max(0, Math.min(seconds, total))
-      return true
-    } catch {
-      return false
-    }
-  }
-
   function flushPendingSeek() {
-    if (pendingSeek === null) return
+    if (!pendingSeek || pendingSeek.applied) return
     const total = element.duration
     if (!Number.isFinite(total) || total <= 0) return
-    if (applyCurrentTime(element, pendingSeek, total)) pendingSeek = null
+    pendingSeek.time = Math.max(0, Math.min(pendingSeek.time, total))
+    try {
+      element.currentTime = pendingSeek.time
+    } catch {
+      return
+    }
+    if (element.seeking) pendingSeek.applied = true
+    else pendingSeek = null
   }
 
   function attach(target: HTMLAudioElement) {
     for (const event of CHANNEL_EVENTS) {
       const handler: EventListener = () => {
         // 时长一就绪就把欠着的跳转落位,再把事件转出去
-        if (event === 'durationchange' || event === 'loadedmetadata') flushPendingSeek()
+        if (event === 'seeked' && pendingSeek?.applied && !target.seeking) pendingSeek = null
+        if (
+          event === 'durationchange' ||
+          event === 'loadedmetadata' ||
+          event === 'loadeddata' ||
+          event === 'canplay'
+        )
+          flushPendingSeek()
         emit(event)
       }
       target.addEventListener(event, handler)
@@ -171,12 +176,11 @@ function createChannel(
       return element.currentTime
     },
     seek(seconds) {
-      const total = element.duration
-      if (!Number.isFinite(total) || total <= 0) {
-        pendingSeek = seconds
-        return
-      }
-      pendingSeek = applyCurrentTime(element, seconds, total) ? null : seconds
+      pendingSeek = { time: seconds, applied: false }
+      flushPendingSeek()
+    },
+    pendingSeekTime() {
+      return pendingSeek?.time ?? null
     },
     duration() {
       return Number.isFinite(element.duration) && element.duration > 0 ? element.duration : null
@@ -215,14 +219,15 @@ function createChannel(
       clearResume()
       const previous = element
       const wasPlaying = !previous.paused
-      const position = previous.currentTime
+      const position = pendingSeek?.time ?? previous.currentTime
       detach(previous)
       element = next
       attach(next)
       applyGain()
       // 进度沿用通道的 pending seek；之后用户 seek/load 可覆盖它。
       // 自动恢复监听由 pause/play/load/release 取消，不能覆盖更新的用户意图。
-      pendingSeek ??= Number.isFinite(position) && position > 0 ? position : null
+      pendingSeek =
+        Number.isFinite(position) && position > 0 ? { time: position, applied: false } : null
       const resume = () => {
         clearResume()
         if (element === next && wasPlaying) void next.play().catch(() => undefined)

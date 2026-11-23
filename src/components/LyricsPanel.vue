@@ -621,10 +621,10 @@
 
   // ---- 每帧渲染 ----
 
-  function renderOnce(deferPaint = false) {
+  function renderOnce(deferPaint = false, sampled?: LyricPlaybackState) {
     scheduleDebug()
     if (!isPanelMounted || status.value !== 'ready' || !props.active || document.hidden) return
-    const playback = readPlaybackState()
+    const playback = sampled ?? readPlaybackState()
     playbackRunning.value = playback.playing && !playback.seeking
     const time = playback.timeSeconds
     const now = performance.now()
@@ -636,11 +636,9 @@
           : 0)
       : time
     const jumped =
-      previous !== null &&
-      (playback.seeking ||
-        previous.state.seeking ||
-        time < previous.state.timeSeconds - 0.05 ||
-        Math.abs(time - expected) > 0.6)
+      (playback.seeking && (!previous?.state.seeking || time !== previous.state.timeSeconds)) ||
+      (previous !== null &&
+        (time < previous.state.timeSeconds - 0.05 || Math.abs(time - expected) > 0.6))
     const playingChanged = previous !== null && playback.playing !== previous.state.playing
     previousPlayback = { state: { ...playback }, sampledAt: now }
     syncScene(time, jumped ? 'seek' : 'spring', playingChanged || jumped)
@@ -714,10 +712,21 @@
   }
 
   function handlePlaybackChange(): void {
-    stopRenderLoop()
     if (!props.active || document.hidden) return
-    renderOnce()
-    startRenderLoop()
+    const playback = readPlaybackState()
+    const previous = previousPlayback?.state
+    // Buffering can publish several native events for one stationary seek target.
+    if (
+      playback.seeking &&
+      previous?.seeking &&
+      playback.timeSeconds === previous.timeSeconds &&
+      playback.playing === previous.playing &&
+      playback.playbackRate === previous.playbackRate
+    )
+      return
+    stopRenderLoop()
+    renderOnce(false, playback)
+    startRenderLoop(playback)
   }
 
   // ---- 用户接管滚动 ----

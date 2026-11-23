@@ -871,19 +871,86 @@ describe('useAudioPlayer', () => {
     }
   })
 
-  it('seek with pending duration records pendingSeekTime and flushes later', async () => {
-    const restore = stubAudioPlay()
+  it('holds the last requested lyric and progress through missing metadata, a rejected write and buffering', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    const { player, store, wrapper } = mountPlayer()
     try {
-      const { player, store } = mountPlayer()
-      store.selectTrack(tracks[0]!, tracks)
-      await player.selectAndPlay(tracks[0]!, tracks)
+      await player.play()
+      const audio = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0].getActiveAudio()
+      let nativeTime = 0
+      let nativeSeeking = false
+      let writable = false
+      const write = vi.fn(() => {
+        if (!writable) throw new DOMException('Not ready', 'InvalidStateError')
+        nativeSeeking = true
+      })
+      Object.defineProperties(audio, {
+        currentTime: { configurable: true, get: () => nativeTime, set: write },
+        seeking: { configurable: true, get: () => nativeSeeking },
+        paused: { configurable: true, value: false },
+        readyState: { configurable: true, value: HTMLMediaElement.HAVE_FUTURE_DATA },
+        duration: { configurable: true, value: NaN },
+      })
+      const listener = vi.fn(player.getLyricsPlaybackState)
+      player.subscribeLyricsPlayback(listener)
+      const expectHeld = (time: number) => {
+        expect(store.currentTime).toBe(time)
+        expect(listener).toHaveLastReturnedWith({
+          timeSeconds: time,
+          playing: false,
+          seeking: true,
+          playbackRate: 1,
+        })
+      }
+      player.seek(24)
+      expectHeld(24)
+      player.seek(78)
+      audio.dispatchEvent(new Event('timeupdate'))
+      expectHeld(78)
+      Object.defineProperty(audio, 'duration', { configurable: true, value: 60 })
+      audio.dispatchEvent(new Event('loadedmetadata'))
+      expect(write).toHaveBeenLastCalledWith(60)
+      expectHeld(60)
 
-      // When duration is 0 (jsdom default), seek records pending time
-      player.seek(30)
-      // currentTime should update immediately for UI feedback
-      expect(store.currentTime).toBe(30)
+      writable = true
+      audio.dispatchEvent(new Event('loadeddata'))
+      player.seek(39)
+      // A queued completion from the prior seek cannot release the new target.
+      audio.dispatchEvent(new Event('seeked'))
+      expectHeld(39)
+      audio.dispatchEvent(new Event('waiting'))
+      nativeTime = 39
+      nativeSeeking = false
+      audio.dispatchEvent(new Event('seeked'))
+      expect(player.getLyricsPlaybackState()).toMatchObject({
+        timeSeconds: 39,
+        seeking: false,
+        playing: false,
+      })
+      audio.dispatchEvent(new Event('playing'))
+      nativeTime = 39.25
+      audio.dispatchEvent(new Event('timeupdate'))
+      expect(store.currentTime).toBe(39.25)
+      expect(player.getLyricsPlaybackState()).toMatchObject({ timeSeconds: 39.25, playing: true })
     } finally {
-      restore()
+      wrapper.unmount()
+    }
+  })
+
+  it('discards a paused pending seek on a new track before metadata arrives', () => {
+    const { player, store, wrapper } = mountPlayer()
+    try {
+      store.selectTrack(tracks[0]!, tracks)
+      player.seek(24)
+      expect(player.getLyricsPlaybackState()).toMatchObject({ timeSeconds: 24, playing: false })
+      store.selectTrack(tracks[1]!, tracks)
+      const audio = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0].getActiveAudio()
+      Object.defineProperty(audio, 'duration', { configurable: true, value: 65 })
+      audio.dispatchEvent(new Event('loadedmetadata'))
+      expect(store.currentTime).toBe(0)
+      expect(player.getLyricsPlaybackState()).toMatchObject({ timeSeconds: 0, seeking: false })
+    } finally {
+      wrapper.unmount()
     }
   })
 

@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, effectScope, nextTick } from 'vue'
 import { useSongLyricsPreferences } from '../composables/useSongLyricsPreferences'
+import * as lyricsEngine from '../composables/useLyricsEngine'
 import { shiftLyricTimings } from '../core/lyrics'
 import { createMemoryStore } from '../core/platform/storage'
 import { setSettingsStore } from '../platform/settings-store'
@@ -431,6 +432,54 @@ describe('LyricsPanel', () => {
     expect(wrapper.find('.lyric-waiting').exists()).toBe(false)
     await notify(3)
     expect(wrapper.get('.lyric-waiting').attributes('aria-label')).toBe('前奏')
+  })
+
+  it('positions each pending seek once and resumes the sweep without a second seek transition', async () => {
+    mockedLoadTrackLyrics.mockResolvedValueOnce(karaokeLines)
+    const createEngine = vi.spyOn(lyricsEngine, 'useLyricsEngine')
+    const state: LyricPlaybackState = {
+      timeSeconds: 0,
+      playing: false,
+      seeking: false,
+      playbackRate: 1,
+    }
+    const listeners = new Set<() => void>()
+    const { wrapper } = await mountReadyPanel({
+      getLyricsPlaybackState: () => state,
+      subscribeLyricsPlayback: (listener) => {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+    })
+    const setScene = vi.spyOn(createEngine.mock.results[0]!.value!, 'setScene')
+    const notify = () => listeners.forEach((listener) => listener())
+    const fill = () =>
+      wrapper
+        .get<HTMLElement>('.lyric-line.active .lyric-word')
+        .element.style.getPropertyValue('--lyric-word-fill')
+    notify()
+    setScene.mockClear()
+    state.seeking = true
+    state.timeSeconds = 5.25
+    notify()
+    await flushVueUpdates()
+    expect(fill()).toBe('0.250')
+    expect(setScene.mock.calls.filter(([, transition]) => transition === 'seek')).toHaveLength(1)
+    setScene.mockClear()
+    for (let i = 0; i < 10; i++) notify()
+    expect(setScene).not.toHaveBeenCalled()
+    state.timeSeconds = 5.5
+    notify()
+    expect(fill()).toBe('0.500')
+    expect(setScene).toHaveBeenCalledTimes(1)
+    setScene.mockClear()
+    state.seeking = false
+    notify()
+    state.playing = true
+    state.timeSeconds = 5.6
+    notify()
+    expect(fill()).toBe('0.600')
+    expect(setScene.mock.calls.map(([, transition]) => transition)).toEqual(['spring'])
   })
 
   it('moves waiting dots with the next lyric when seeking while paused, including another interval', async () => {

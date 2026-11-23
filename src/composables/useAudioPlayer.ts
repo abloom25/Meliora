@@ -93,9 +93,6 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   let retiringChannel: AudioChannel | null = null
   let pendingStart: { channel: AudioChannel; fail: (error: unknown) => void } | null = null
   const pendingPlayerTimeouts = new Set<number>()
-  // 当 active audio 还没有有效 duration 时，记录用户请求的 seek 时间，
-  // 等到 durationchange / loadedmetadata 后再真正写入 audio.currentTime。
-  const pendingSeekTime = ref<number | null>(null)
   let beatAnalysisDegraded = false
   // iOS 后台安全模式或 CORS 降级后没有节拍分析:队列小频谱应回退显示序号,
   // 而不是一排静止的柱子
@@ -173,6 +170,10 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     tabSync?.publish()
   }
 
+  function displayTime(channel: AudioChannel): number {
+    return channel.pendingSeekTime() ?? channel.currentTime()
+  }
+
   function getLyricsPlaybackState(): LyricPlaybackState {
     const shared = followingTab.value ? tabSync?.read() : null
     if (shared)
@@ -191,17 +192,20 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       }
     const channel = backend.active()
     const audio = backend.elementOf(channel)
+    const targetTime = channel.pendingSeekTime()
+    const seeking = targetTime !== null || audio.seeking
     return {
-      timeSeconds: channel.currentTime(),
+      timeSeconds: targetTime ?? channel.currentTime(),
       playing:
         !disposed &&
+        !seeking &&
         isPlaying.value &&
         !audio.paused &&
         !audio.ended &&
         !waitingChannels.has(channel) &&
         audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA,
       playbackRate: audio.playbackRate,
-      seeking: audio.seeking,
+      seeking,
     }
   }
 
@@ -492,7 +496,6 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     notifyLyricsPlayback()
     backend.active().setGain(1)
     automaticCrossfadeStarted = false
-    pendingSeekTime.value = null
     currentTime.value = 0
     duration.value = 0
     isPlaying.value = false
@@ -514,7 +517,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     if (navigator.onLine === false && (reason === 'unsupported' || reason === 'unknown'))
       reason = 'network'
     if (reason !== 'network' && reason !== 'not-allowed') return false
-    const position = pendingSeekTime.value ?? (channel.currentTime() || currentTime.value)
+    const position = channel.pendingSeekTime() ?? (channel.currentTime() || currentTime.value)
     const wantedPlayback = isPlaying.value
     invalidatePlayback(reason !== 'network')
     clearFailedTrack(currentTrack.value?.id ?? '')
@@ -548,8 +551,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       channel === backend.active()
     channel.load(currentTrack.value.audioUrl)
     channel.seek(position)
-    pendingSeekTime.value = channel.duration() === null ? position : null
-    currentTime.value = position
+    currentTime.value = displayTime(channel)
     void channel
       .play()
       .then(() => {
@@ -611,7 +613,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       const position = retryPosition ?? currentTime.value
       channel.load(currentTrack.value!.audioUrl)
       channel.seek(position)
-      pendingSeekTime.value = channel.duration() === null ? position : null
+      currentTime.value = displayTime(channel)
     }
     const source = channel.source()
     const trackId = currentTrack.value?.id
@@ -661,9 +663,9 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     if (!currentTrack.value) return
     listening.restartVisit()
     automaticCrossfadeStarted = false
-    pendingSeekTime.value = null
     backend.active().seek(0)
     currentTime.value = 0
+    notifyLyricsPlayback()
     void play()
   }
 
@@ -696,18 +698,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     channel.seek(resolution.time)
     if (recovery.active()) recoveryPosition = resolution.time
     currentTime.value = resolution.time
-    pendingSeekTime.value = resolution.kind === 'pending' ? resolution.time : null
     notifyLyricsPlayback()
     tabSync?.publish(true)
-  }
-
-  // 时长终于可用时,把界面上的进度对到通道真正落到的位置
-  function flushPendingSeek(channel: AudioChannel) {
-    if (channel !== backend.active()) return
-    if (pendingSeekTime.value === null) return
-    if (channel.duration() === null) return
-    currentTime.value = channel.currentTime()
-    pendingSeekTime.value = null
   }
 
   // 出声通道与预加载槽换位:新曲目那一路转正,旧的退到反方向的槽里
@@ -721,7 +713,6 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     slot.cleanup?.()
     reverseSlot.cleanup?.()
     backend.setActive(incoming)
-    notifyLyricsPlayback()
     slot.channel = spare
     slot.track = null
     slot.ready = null
@@ -817,9 +808,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         channel.setGain(0)
       }
       // 预加载好的那一路本来就在 0,只有必要时才回绕
-      if (incoming.currentTime() > 0.01) incoming.seek(0)
+      if (displayTime(incoming) > 0.01) incoming.seek(0)
       incoming.setGain(useCrossfade ? 0 : 1)
-      pendingSeekTime.value = null
 
       // 同步写入 reactivity：UI 立刻刷新到新歌（标题/封面/进度归零）。
       clearPreloadMessage()
@@ -836,6 +826,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       currentTime.value = 0
       duration.value = incoming.duration() ?? 0
       isPlaying.value = shouldPlay
+      notifyLyricsPlayback()
       refreshTargets()
       automaticCrossfadeStarted = false
       transition.release(controller)
@@ -910,7 +901,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
           } finally {
             committingSwitch = false
           }
-          currentTime.value = outgoing.currentTime()
+          currentTime.value = displayTime(outgoing)
           duration.value = outgoing.duration() ?? 0
           refreshTargets()
           mountActiveAudioForIOS()
@@ -951,7 +942,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
           pendingStart = null
           // 播放成功即解除失败标记：手动点选曾被拉黑的曲目时立即恢复
           clearFailedTrack(track.id)
-          currentTime.value = incoming.currentTime()
+          currentTime.value = displayTime(incoming)
           duration.value = incoming.duration() ?? 0
           isPlaying.value = true
           store.errorMessage = ''
@@ -1084,13 +1075,10 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       backend.active().load(track.audioUrl)
       refreshTargets()
       automaticCrossfadeStarted = false
-      // 切换到全新音频源时旧的 pending seek 时间也要丢弃
-      pendingSeekTime.value = null
       const resume = store.getResumePosition(track)
       if (resume !== null) {
         backend.active().seek(resume)
-        currentTime.value = resume
-        pendingSeekTime.value = backend.active().duration() === null ? resume : null
+        currentTime.value = displayTime(backend.active())
       }
       syncMediaSession()
       scheduleAdjacentPreload()
@@ -1142,7 +1130,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   function handleTimeUpdate(channel: AudioChannel) {
     if (followingTab.value || detachedTabPosition.value !== null || channel !== backend.active())
       return
-    if (pendingSeekTime.value === null) currentTime.value = channel.currentTime()
+    currentTime.value = displayTime(channel)
+    if (channel.pendingSeekTime() !== null) return
     const nextSlot = preloadSlots.next
     if (
       isPlaying.value &&
@@ -1171,7 +1160,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     const syncDuration = () => {
       if (!isActive()) return
       duration.value = channel.duration() ?? 0
-      flushPendingSeek(channel)
+      currentTime.value = displayTime(channel)
       notifyLyricsPlayback()
     }
 
@@ -1272,7 +1261,10 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       channelSubscriptions.push(
         channel.on(event, () => {
           if (event === 'canplay' || event === 'loadeddata') waitingChannels.delete(channel)
-          if (isActive()) notifyLyricsPlayback()
+          if (isActive()) {
+            if (event === 'seeked') currentTime.value = displayTime(channel)
+            notifyLyricsPlayback()
+          }
           if (isActive() && event !== 'timeupdate') tabSync?.publish(true)
         }),
       )
@@ -1326,7 +1318,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       const clock = getLyricsPlaybackState()
       return {
         track,
-        position: pendingSeekTime.value ?? clock.timeSeconds,
+        position: clock.timeSeconds,
         duration: duration.value,
         playing: isPlaying.value,
         advancing: clock.playing,
@@ -1340,7 +1332,6 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         listening.flush()
         pauseLocal()
         for (const channel of channels) channel.release()
-        pendingSeekTime.value = null
         detachedTabPosition.value = null
       }
       store.setSyncedTrack(state.track)
@@ -1363,7 +1354,6 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       detachedTabPosition.value = state.position
       followingTab.value = false
       currentTime.value = state.position
-      pendingSeekTime.value = null
       notifyLyricsPlayback()
     },
     async onCommand(command) {
@@ -1412,11 +1402,11 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
 
   const saveSession = () => {
     if (!coordination.canPersist()) return
-    if (pendingSeekTime.value === null && currentTrack.value) {
+    if (currentTrack.value) {
       const channel = backend.active()
       try {
         if (channel.source() === new URL(currentTrack.value.audioUrl, window.location.href).href)
-          currentTime.value = channel.currentTime()
+          currentTime.value = displayTime(channel)
       } catch {
         /* Invalid sources are handled by the track watcher. */
       }

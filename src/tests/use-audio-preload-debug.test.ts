@@ -25,6 +25,7 @@ function fixture() {
     pause: vi.fn(),
     currentTime: vi.fn(() => 12),
     seek: vi.fn(),
+    pendingSeekTime: () => null,
     duration: vi.fn(() => 180),
     setGain: vi.fn(),
     gain: vi.fn(() => 0),

@@ -47,6 +47,8 @@ export interface AudioChannel {
   pause(): void
   currentTime(): number
   seek(seconds: number): void
+  /** 尚未落位的跳转目标。展示层可用它定位，实际播放监控仍读取 currentTime。 */
+  pendingSeekTime(): number | null
   /** 时长(秒);未知时为 null */
   duration(): number | null
   setGain(gain: number): void

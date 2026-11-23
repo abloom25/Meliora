@@ -208,6 +208,8 @@ export function useLyricsWindow({
   let isDisposed = false
   let windowCloseListeners: Array<() => void> = []
   let layoutFrame = 0
+  let geometryDirty = false
+  let sweepLayoutKey: string | null = null
   let renderedTrackId: Track['id'] | undefined
   let renderedActiveIndex = -1
   let lyricsRenderKey = ''
@@ -218,10 +220,17 @@ export function useLyricsWindow({
   // 小窗自己维护一份外推时钟与 rAF 循环:主窗口在后台时 rAF 会被节流到约 1Hz,
   // 扫光必须跑在小窗自己的帧循环上才能保持平滑
   const clock = createLyricClock()
-  let timelineLines: readonly LyricLine[] = []
-  let timeline = createLyricTimeline(timelineLines)
-  let waitingTimeline = createLyricWaitingTimeline(timelineLines)
-  let timelineHasTiming = false
+  function buildTimelines(lines: readonly LyricLine[]) {
+    return {
+      scene: createLyricTimeline(lines),
+      waiting: createLyricWaitingTimeline(lines),
+      timed: lines.some((line) => line.time !== null),
+    }
+  }
+  let timelines: ReturnType<typeof buildTimelines> | null = null
+  function windowTimelines() {
+    return (timelines ??= buildTimelines(snapshot.value.lines))
+  }
   let observedScene: LyricScene | null = null
   let observedWaiting: LyricWaitingInterval | null = null
   let renderedWaiting: LyricWaitingInterval | null = null
@@ -247,11 +256,13 @@ export function useLyricsWindow({
     )
   }
 
-  function advanceScene(time: number): void {
+  function advanceScene(time: number): boolean {
     const current = snapshot.value
-    if (current.status !== 'ready' || !timelineHasTiming) return
-    const next = timeline.read(time)
-    const waiting = waitingTimeline.read(time)?.interval ?? null
+    if (!lyricsWindow || lyricsWindow.document.hidden || current.status !== 'ready') return false
+    const { scene, waiting: intervals, timed } = windowTimelines()
+    if (!timed) return false
+    const next = scene.read(time)
+    const waiting = intervals.read(time)?.interval ?? null
     const active = current.activeIndices ?? (current.activeIndex >= 0 ? [current.activeIndex] : [])
     if (
       next === observedScene &&
@@ -260,7 +271,7 @@ export function useLyricsWindow({
       next.active.length === active.length &&
       next.active.every((index, position) => index === active[position])
     )
-      return
+      return false
     // 同一时间区间复用场景引用;只有跨边界时更新完成态,不逐帧重建小窗。
     // 高亮的延续/退出不一定改变 anchor/active，仍按场景区间引用重绘。
     observedScene = next
@@ -272,6 +283,7 @@ export function useLyricsWindow({
       tempoScale: next.anchor < 0 ? 1 : lyricTempoScale(current.lines, next.anchor),
     }
     render()
+    return true
   }
   let karaokeFrame = 0
   let karaokeTimer = 0
@@ -363,26 +375,32 @@ export function useLyricsWindow({
   }
 
   function setSnapshot(value: LyricsSnapshot) {
-    if (timelineLines !== value.lines) {
-      timelineLines = value.lines
-      timeline = createLyricTimeline(timelineLines)
-      waitingTimeline = createLyricWaitingTimeline(timelineLines)
-      timelineHasTiming = timelineLines.some((line) => line.time !== null)
+    if (snapshot.value.lines !== value.lines) {
+      timelines = null
       observedScene = null
       observedWaiting = null
     }
     snapshot.value = value
-    if (
-      lyricsWindow &&
-      !lyricsWindow.document.hidden &&
-      (getPlaybackSeconds || getLyricsPlaybackState)
-    )
-      advanceScene(readPlaybackTime())
-    render()
     scheduleDebug()
+    renderSnapshot()
+  }
+
+  function renderSnapshot() {
+    if (!lyricsWindow) return
+    if (isWindowClosed(lyricsWindow)) {
+      teardownWindow(lyricsWindow)
+      return
+    }
+    if (lyricsWindow.document.hidden) return
+    if ((getPlaybackSeconds || getLyricsPlaybackState) && advanceScene(readPlaybackTime())) return
+    render()
   }
 
   function clearCache() {
+    sweepLayoutKey = null
+    timelines = null
+    observedScene = null
+    observedWaiting = null
     karaoke.release()
     stopScrollAnimations()
     previousPositions = null
@@ -426,6 +444,7 @@ export function useLyricsWindow({
       resolve?.()
     }
     if (lyricsWindow === target) {
+      geometryDirty = false
       stopKaraoke()
       releaseKaraoke()
       activeSlots = []
@@ -681,10 +700,29 @@ export function useLyricsWindow({
     if (!target || layoutFrame || isWindowClosed(target) || target.document.hidden) return
     layoutFrame = target.requestAnimationFrame(() => {
       layoutFrame = 0
-      if (lyricsWindow !== target || isWindowClosed(target)) return
+      if (lyricsWindow !== target || isWindowClosed(target) || target.document.hidden) return
+      const refreshGeometry = geometryDirty
+      geometryDirty = false
+      if (refreshGeometry) {
+        previousPositions = null
+        stopScrollAnimations()
+      }
       const positions = previousPositions
       previousPositions = null
       fitLyrics()
+      if (refreshGeometry && cachedNodes) {
+        const time = readPlaybackTime()
+        // Context rows may fit differently while every word keeps its width and font size.
+        const style = target.getComputedStyle?.(cachedNodes.lyricsContainer)
+        const key = style?.width && style.fontSize ? `${style.width}/${style.fontSize}` : null
+        if (key === null || key !== sweepLayoutKey) {
+          bindKaraoke()
+          writeKaraoke(time)
+        }
+        sweepLayoutKey = key
+        writeWaiting(time)
+        startKaraoke()
+      }
       if (positions) animateScroll(positions)
       // 先完成排版和共享 FLIP 的首帧，再露出新等待行；避免圆点抢先出现在终点。
       if (cachedNodes && cachedNodes.waitingRow.parentNode === cachedNodes.lyricsContainer) {
@@ -695,16 +733,14 @@ export function useLyricsWindow({
   }
 
   function resetLayout(): void {
-    scheduleDebug()
     if (!lyricsWindow || lyricsWindow.document.hidden) return
-    previousPositions = null
-    stopScrollAnimations()
-    bindKaraoke()
-    writeKaraoke(readPlaybackTime())
-    writeWaiting(readPlaybackTime())
-    stopKaraoke()
-    startKaraoke()
+    geometryDirty = true
     scheduleLayout()
+  }
+
+  function invalidateSweepLayout(): void {
+    sweepLayoutKey = null
+    resetLayout()
   }
 
   function registerLayout(target: Window): void {
@@ -721,7 +757,7 @@ export function useLyricsWindow({
         handlePlaybackChange()
         // 隐藏期间只接收快照而没有更新 DOM；暂停或活跃行未变时 advanceScene 不会触发 render。
         render()
-        scheduleLayout()
+        invalidateSweepLayout()
       }
     }
     target.document.addEventListener('visibilitychange', visibilityChanged)
@@ -734,7 +770,13 @@ export function useLyricsWindow({
     viewport?.addEventListener('resize', resetLayout, { passive: true })
     windowCloseListeners.push(() => viewport?.removeEventListener('resize', resetLayout))
     reducedMotion = target.matchMedia?.('(prefers-reduced-motion: reduce)') ?? null
-    if (reducedMotion) windowCloseListeners.push(listenMediaQuery(reducedMotion, resetLayout))
+    if (reducedMotion)
+      windowCloseListeners.push(
+        listenMediaQuery(reducedMotion, () => {
+          stopKaraoke()
+          invalidateSweepLayout()
+        }),
+      )
     // 必须用弹窗自己的观察器和帧循环,主页面在后台时仍能响应拖动窗口。
     const Observer = (target as Window & typeof globalThis).ResizeObserver
     if (Observer && cachedNodes) {
@@ -743,11 +785,11 @@ export function useLyricsWindow({
       windowCloseListeners.push(() => observer.disconnect())
     }
     void target.document.fonts?.ready.then(() => {
-      if (lyricsWindow === target) resetLayout()
+      if (lyricsWindow === target) invalidateSweepLayout()
     })
-    target.document.fonts?.addEventListener?.('loadingdone', resetLayout)
+    target.document.fonts?.addEventListener?.('loadingdone', invalidateSweepLayout)
     windowCloseListeners.push(() =>
-      target.document.fonts?.removeEventListener?.('loadingdone', resetLayout),
+      target.document.fonts?.removeEventListener?.('loadingdone', invalidateSweepLayout),
     )
   }
 
@@ -908,6 +950,7 @@ export function useLyricsWindow({
   }
 
   function bindKaraoke() {
+    sweepLayoutKey = null
     const active = activeSlots.map(({ slot }) =>
       Number(cachedNodes!.lineNodes[slot]!.dataset.index),
     )
@@ -949,10 +992,6 @@ export function useLyricsWindow({
     })
   }
 
-  function shouldRunKaraoke(): boolean {
-    return Boolean(lyricsWindow && snapshot.value.status === 'ready' && timelineHasTiming)
-  }
-
   function karaokeTick() {
     karaokeFrame = 0
     karaokeTimer = 0
@@ -968,8 +1007,16 @@ export function useLyricsWindow({
 
   function startKaraoke() {
     const target = lyricsWindow
-    if (karaokeFrame || karaokeTimer || !target || target.document.hidden || !shouldRunKaraoke())
+    if (
+      karaokeFrame ||
+      karaokeTimer ||
+      !target ||
+      target.document.hidden ||
+      snapshot.value.status !== 'ready'
+    )
       return
+    const { scene, waiting, timed } = windowTimelines()
+    if (!timed) return
     const playback = readPlaybackState()
     // 等待动画复用现有帧循环；暂停、隐藏或关闭动画后仍仅在媒体边界唤醒。
     if (playback.playing && !playback.seeking && renderedWaiting && canAnimateScroll()) {
@@ -977,8 +1024,8 @@ export function useLyricsWindow({
       return
     }
     const nextBoundary = Math.min(
-      timeline.nextBoundary(playback.timeSeconds) ?? Number.POSITIVE_INFINITY,
-      waitingTimeline.nextBoundary(playback.timeSeconds) ?? Number.POSITIVE_INFINITY,
+      scene.nextBoundary(playback.timeSeconds) ?? Number.POSITIVE_INFINITY,
+      waiting.nextBoundary(playback.timeSeconds) ?? Number.POSITIVE_INFINITY,
     )
     const plan = scheduleLyricRender(
       playback,
@@ -1090,10 +1137,11 @@ export function useLyricsWindow({
         ? [active]
         : []
     const time = readPlaybackTime()
-    const waiting = waitingTimeline.read(time)?.interval ?? null
+    const indices = windowTimelines()
+    const waiting = indices.waiting.read(time)?.interval ?? null
     const focus = waiting?.nextAnchor ?? active
     const hasFocus = focus >= 0 && focus < lines.length
-    const timingScene = timeline.read(time)
+    const timingScene = indices.scene.read(time)
     const held = timingScene.anchor === active && timingScene.held
     // 旧调用方可能只提供手动定位的快照；时间轴与快照对齐后使用独立视觉高亮。
     const highlightedIndices =
@@ -1282,8 +1330,7 @@ export function useLyricsWindow({
       }
       lyricsWindow = win
       isOpen.value = true
-      if (getPlaybackSeconds || getLyricsPlaybackState) advanceScene(readPlaybackTime())
-      render()
+      renderSnapshot()
       recordLifecycle('opened')
     } catch (error) {
       if (debugEnabled?.value && !isDisposed) {
@@ -1351,7 +1398,7 @@ export function useLyricsWindow({
     () => {
       if (!lyricsWindow) return
       writeLyricScale(lyricsWindow)
-      resetLayout()
+      invalidateSweepLayout()
     },
   )
   watch(
