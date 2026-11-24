@@ -84,12 +84,15 @@ describe('song lyric settings', () => {
     expect(loadTrackLyricsChoices).toHaveBeenCalledTimes(2)
   })
 
-  it('keeps calibration disabled until an actual lyric source has resolved', async () => {
+  it('collapses calibration until a source resolves and keeps source selection available', async () => {
     const { wrapper, store } = setup()
     const preferences = preferencesFor(store)
     const earlier = wrapper.get<HTMLButtonElement>('[aria-label="歌词提前 0.1 秒"]')
     const later = wrapper.get<HTMLButtonElement>('[aria-label="歌词延后 0.1 秒"]')
     const reset = wrapper.get<HTMLButtonElement>('.offset-value')
+    const region = earlier.element.closest('.collapse-body')!
+    expect(region.hasAttribute('inert')).toBe(true)
+    expect(wrapper.get('[aria-label="选择本曲歌词来源"]').element.closest('[inert]')).toBeNull()
     expect(earlier.element.disabled).toBe(true)
     expect(later.element.disabled).toBe(true)
     expect(reset.element.disabled).toBe(true)
@@ -100,8 +103,12 @@ describe('song lyric settings', () => {
     preferences.reportSource('local')
     await nextTick()
     expect(earlier.element.disabled).toBe(false)
+    expect(region.hasAttribute('inert')).toBe(false)
     expect(later.element.disabled).toBe(false)
     expect(reset.element.disabled).toBe(true)
+    preferences.reportSource(null)
+    await nextTick()
+    expect(region.hasAttribute('inert')).toBe(true)
   })
 
   it('adjusts the resolved source by 0.1 seconds and resets through the displayed value', async () => {

@@ -81,6 +81,7 @@ export type BeatTimelineBuilder = (
 ) => Promise<BeatTimeline>
 
 export interface BeatPreanalysisDependencies {
+  onDecodedAudio?: (audio: BeatAudioData) => void
   persistent?: { trackKey: string; eligible: () => boolean }
   resultCache?: BeatResultStore
   /** Read from the active media element before requesting a full-file decode. */
@@ -944,6 +945,7 @@ export async function buildBeatTimeline(
     })
     preparation.signal.throwIfAborted()
     const { channels, sampleRate } = audio!
+    dependencies.onDecodedAudio?.(audio!)
     durationSeconds = channels[0]!.length / sampleRate
     if (checkpoint && (!matchesAudio(checkpoint) || (restoredFromDisk && !canRestore()))) {
       checkpoint = undefined

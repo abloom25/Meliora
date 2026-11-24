@@ -27,6 +27,7 @@ const defaultSettings: PlayerSettings = {
   volume: 0.72,
   playMode: 'loop',
   smoothTrackChange: true,
+  autoTransitionMode: 'standard',
   preloadNextTrack: true,
   adaptivePerformance: true,
   tabCoordination: true,
@@ -64,6 +65,7 @@ export function migrateSettings(saved: SavedPlayerSettings): PlayerSettings {
     volume: sanitizeNumber(input.volume, defaultSettings.volume, 0, 1),
     playMode: sanitizePlayMode(input.playMode),
     smoothTrackChange: sanitizeBoolean(input.smoothTrackChange, defaultSettings.smoothTrackChange),
+    autoTransitionMode: input.autoTransitionMode === 'smart-mix' ? 'smart-mix' : 'standard',
     preloadNextTrack: sanitizeBoolean(input.preloadNextTrack, defaultSettings.preloadNextTrack),
     adaptivePerformance: sanitizeBoolean(
       input.adaptivePerformance,

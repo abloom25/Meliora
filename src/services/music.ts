@@ -1,5 +1,5 @@
 import type { Track } from '../core/types'
-import type { PublicMusicConfig } from '../../shared/music-config'
+import type { MetingPlaylistConfig, PublicMusicConfig } from '../../shared/music-config'
 import { musicConfig } from '../config/music'
 import { mergeTrackLyricsProvider } from './lyrics'
 import { localMusicAdapter } from './music-adapters/local'
@@ -12,8 +12,17 @@ import {
 } from '../../shared/music-sources'
 import { deduplicateTracks, mergeTrackShareAliases, trackIdentity } from '../core/library/tracks'
 
+export interface LibraryPlaylist {
+  id: string
+  label: string
+  platform: string
+  cover?: string
+  trackKeys: string[]
+}
+
 export interface TrackLoadResult {
   tracks: Track[]
+  playlists: LibraryPlaylist[]
   failedSources: number
 }
 
@@ -38,6 +47,7 @@ const MUSIC_SOURCE_TIMEOUT_MS = 8000
 const MUSIC_SOURCE_CONCURRENCY = 3
 
 interface ConfiguredSource {
+  playlist: Omit<LibraryPlaylist, 'trackKeys'>
   requiresNetwork: boolean
   load(config: PublicMusicConfig, signal?: AbortSignal): Promise<Track[]>
 }
@@ -45,8 +55,10 @@ interface ConfiguredSource {
 function createConfiguredSource<TSource>(
   adapter: MusicProviderAdapter<TSource>,
   source: TSource,
+  playlist: ConfiguredSource['playlist'],
 ): ConfiguredSource {
   return {
+    playlist,
     requiresNetwork: adapter.requiresNetwork !== false,
     load(config, signal) {
       return adapter.load(source, {
@@ -75,9 +87,25 @@ function createConfiguredSources(
     const adapter = adapters[kind.id]
     if (!adapter) continue
     const entries = musicSourceEntries(config, kind).filter(isEntryEnabled)
-    const configured = entries.map((entry) => createConfiguredSource(adapter, entry as never))
-    if (adapter.requiresNetwork === false && configured.length) {
+    const group = {
+      id: kind.id,
+      label: kind.label,
+      platform: kind.id === 'local' ? '本地曲库' : kind.label,
+    }
+    const configured = entries.map((entry) => {
+      if (kind.entriesKey !== 'playlists')
+        return createConfiguredSource(adapter, entry as never, group)
+      const { server, playlistId, name, cover } = entry as MetingPlaylistConfig
+      return createConfiguredSource(adapter, entry as never, {
+        id: `${server}:${playlistId}`,
+        label: name?.trim() || `歌单 ${playlistId}`,
+        platform: server === 'netease' ? '网易云音乐' : 'QQ 音乐',
+        cover: cover?.trim() || undefined,
+      })
+    })
+    if (kind.entriesKey !== 'playlists' && adapter.requiresNetwork === false && configured.length) {
       sources.push({
+        playlist: group,
         requiresNetwork: false,
         async load(config, signal) {
           return (await Promise.all(configured.map((source) => source.load(config, signal)))).flat()
@@ -110,7 +138,7 @@ async function settleConfiguredSources(
       settled[sourceIndex] = { status: 'rejected', reason }
     }
     if (options.signal?.aborted) throw options.signal.reason
-    options.onProgress?.(collectResults(settled))
+    options.onProgress?.(collectResults(settled, sources))
   }
 
   async function worker() {
@@ -129,12 +157,26 @@ async function settleConfiguredSources(
   return settled
 }
 
-function collectResults(settled: PromiseSettledResult<Track[]>[]): TrackLoadResult {
+function collectResults(
+  settled: PromiseSettledResult<Track[]>[],
+  sources: ConfiguredSource[],
+): TrackLoadResult {
   const tracks: Track[] = []
+  const groups = new Map<string, ConfiguredSource['playlist'] & { keys: Set<string> }>()
   let failedSources = 0
-  settled.forEach((result) => {
-    if (result.status === 'fulfilled') tracks.push(...result.value)
-    else failedSources += 1
+  settled.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      failedSources += 1
+      return
+    }
+    const playlist = sources[index]!.playlist
+    const group = groups.get(playlist.id) ?? { ...playlist, keys: new Set<string>() }
+    groups.set(playlist.id, group)
+    for (const track of result.value) {
+      group.keys.add(trackIdentity(track))
+      group.cover ??= track.cover || undefined
+      tracks.push(track)
+    }
   })
   return {
     tracks: deduplicateTracks(tracks, (kept, duplicate) => {
@@ -142,6 +184,10 @@ function collectResults(settled: PromiseSettledResult<Track[]>[]): TrackLoadResu
       mergeTrackShareAliases(kept, duplicate)
     }),
     failedSources,
+    playlists: Array.from(groups.values(), ({ keys, ...playlist }) => ({
+      ...playlist,
+      trackKeys: [...keys],
+    })),
   }
 }
 
@@ -177,7 +223,7 @@ export async function loadConfiguredTracks(
       ? (result) => options.onProgress!(retainTracks(result))
       : undefined,
   })
-  return retainTracks(collectResults(settled))
+  return retainTracks(collectResults(settled, sources))
 }
 
 function injectPreconnect(url: string) {

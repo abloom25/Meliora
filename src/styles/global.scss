@@ -129,6 +129,26 @@ button:disabled {
   }
 }
 
+.meta-swap-enter-active,
+.meta-swap-leave-active {
+  transition:
+    opacity 300ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 300ms ease,
+    transform 380ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.meta-swap-enter-from,
+.meta-swap-leave-to {
+  opacity: 0;
+  filter: blur(12px);
+  transform: translateY(10px);
+}
+.meta-swap-enter-to,
+.meta-swap-leave-from {
+  opacity: 1;
+  filter: blur(0);
+  transform: translateY(0);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

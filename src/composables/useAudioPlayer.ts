@@ -15,6 +15,7 @@ import {
   type PlaybackFailureReason,
 } from '../core/audio/failure'
 import { previousMeansRestart, resolveSeek, shouldStartAutoCrossfade } from '../core/audio/timeline'
+import { planSmartMix, type MixTransition } from '../core/audio/smart-mix'
 import { useBeatAnalyser } from '../platform/web/useBeatAnalyser'
 import { useEqualizer } from './useEqualizer'
 import {
@@ -86,6 +87,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   const { cancelGainAnimation, clearGainAnimationFrames, crossfadePlayers, fadePlayer } =
     createAudioGain()
   let automaticCrossfadeStarted = false
+  let mixTimer: number | undefined
   let playbackVersion = 0
   let allowInterruptedStart = false
   let disposed = false
@@ -255,6 +257,14 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     resetBeatTracking,
     debugSnapshot,
   } = useBeatAnalyser({
+    smartMixEnabled: computed(
+      () =>
+        settings.value.autoTransitionMode === 'smart-mix' &&
+        settings.value.preloadNextTrack &&
+        !followingTab.value &&
+        detachedTabPosition.value === null &&
+        backend.supportsOverlap(),
+    ),
     resourcePressure: budget.pressure,
     visualIntervalMs: budget.visualIntervalMs,
     observeVisualFrame: budget.observeFrame,
@@ -426,6 +436,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
 
   // 用户的新操作接管播放；旧 Promise、跳歌定时器和增益动画不再有写入权。
   function invalidatePlayback(resetRecovery = true): void {
+    cancelMixTimer()
     progressWatchdog.reset()
     allowInterruptedStart = false
     clearWaitingTimeout()
@@ -680,6 +691,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       return
     }
     if (Number.isFinite(time) && transition.isPreparing()) invalidatePlayback()
+    cancelMixTimer()
     automaticCrossfadeStarted = false
     // 时长未知时通道会自己记下目标位置、等时长可用再落位;
     // 界面要立刻反映用户意图,所以两种结果都同步 currentTime
@@ -724,6 +736,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   }
 
   interface SwitchOptions {
+    mix?: MixTransition
     shouldPlay: boolean
     direction: PreloadDirection
     waitForReady: boolean
@@ -741,8 +754,14 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
     // 异常时也释放准备阶段；任务身份继续保护异步播放与淡入淡出的回调。
     try {
       const wasPlaying = isPlaying.value
+      const mix = switchOptions.mix
       const useCrossfade =
-        !iosBackgroundSafeAudio && settings.value.smoothTrackChange && wasPlaying && shouldPlay
+        !iosBackgroundSafeAudio &&
+        wasPlaying &&
+        shouldPlay &&
+        (mix !== undefined ||
+          (settings.value.smoothTrackChange &&
+            (!waitForReady || settings.value.autoTransitionMode === 'standard')))
       const slot = findSlotByTrack(track) ?? preloadSlots[requestedDirection]
       const direction = slot.direction
 
@@ -786,7 +805,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
       for (const channel of channels) cancelGainAnimation(channel)
       const previous = backend.active()
       const previousGain = previous.gain()
-      if (useCrossfade) {
+      if (useCrossfade && !mix) {
         void fadePlayer(previous, previousGain, 0, FADE_OUT_DURATION_MS)
       }
 
@@ -808,7 +827,8 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         channel.setGain(0)
       }
       // 预加载好的那一路本来就在 0,只有必要时才回绕
-      if (displayTime(incoming) > 0.01) incoming.seek(0)
+      const offset = mix?.offset ?? 0
+      if (Math.abs(displayTime(incoming) - offset) > 0.01) incoming.seek(offset)
       incoming.setGain(useCrossfade ? 0 : 1)
 
       // 同步写入 reactivity：UI 立刻刷新到新歌（标题/封面/进度归零）。
@@ -823,7 +843,7 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
         // subscriber is released; the rotated spare slot must no longer own it.
         void nextTick(releaseIncomingLyrics)
       }
-      currentTime.value = 0
+      currentTime.value = offset
       duration.value = incoming.duration() ?? 0
       isPlaying.value = shouldPlay
       notifyLyricsPlayback()
@@ -950,7 +970,13 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
           if (useCrossfade && retiringChannel === outgoing) {
             const fadeInPromise =
               waitForReady && outgoing !== incoming
-                ? crossfadePlayers(outgoing, incoming)
+                ? crossfadePlayers(
+                    outgoing,
+                    incoming,
+                    mix
+                      ? Math.max(0, mix.startAt + mix.seconds - outgoing.currentTime()) * 1000
+                      : undefined,
+                  )
                 : fadePlayer(incoming, 0, 1, FADE_IN_DURATION_MS)
             void fadeInPromise.then((completed) => {
               if (!completed || !transition.isCurrent(controller)) return
@@ -1127,13 +1153,81 @@ export function useAudioPlayer(options: UseAudioPlayerOptions = {}) {
   watch(isPlaying, syncMediaSession)
   watch([isPlaying, () => currentTrack.value?.audioUrl], notifyLyricsPlayback, { flush: 'post' })
 
+  function cancelMixTimer(): void {
+    window.clearTimeout(mixTimer)
+    mixTimer = undefined
+  }
+
+  function trySmartMix(channel: AudioChannel, armTimer: boolean): void {
+    const track = currentTrack.value
+    const slot = preloadSlots.next
+    const target = slot.track
+    const audio = backend.elementOf(channel)
+    const total = channel.duration()
+    if (
+      disposed ||
+      !localPlaying.value ||
+      detachedTabPosition.value !== null ||
+      !coordination.owns() ||
+      settings.value.autoTransitionMode !== 'smart-mix' ||
+      !settings.value.preloadNextTrack ||
+      settings.value.playMode === 'single' ||
+      !backend.supportsOverlap() ||
+      !track ||
+      !target ||
+      channel !== backend.active() ||
+      channel.ended() ||
+      audio.paused ||
+      audio.seeking ||
+      audio.playbackRate !== 1 ||
+      channel.pendingSeekTime() !== null ||
+      waitingChannels.has(channel) ||
+      transition.isPreparing() ||
+      retiringChannel ||
+      !total ||
+      total - channel.currentTime() > 9 ||
+      !slotCanStart(slot, target) ||
+      backend.elementOf(slot.channel).readyState < HTMLMediaElement.HAVE_FUTURE_DATA
+    )
+      return
+    const predicted = predictNextTrack(false)
+    if (predicted?.id !== target.id || predicted.audioUrl !== target.audioUrl) return
+    const mix = planSmartMix(
+      total,
+      slot.channel.duration() ?? 0,
+      preanalysis.mixAnalysis(track.audioUrl),
+      preanalysis.mixAnalysis(target.audioUrl),
+      channel.currentTime(),
+    )
+    if (!mix) return
+    const delay = mix.startAt - channel.currentTime()
+    if (delay > 0.012) {
+      // timeupdate 通常相隔数百毫秒。靠近选定拍点时单独唤醒，并再次按媒体时钟确认。
+      if (armTimer && delay <= 0.5 && mixTimer === undefined) {
+        mixTimer = window.setTimeout(() => {
+          mixTimer = undefined
+          trySmartMix(channel, false)
+        }, delay * 1000)
+      }
+      return
+    }
+    void switchToTrack(target, {
+      mix,
+      shouldPlay: true,
+      direction: 'next',
+      waitForReady: true,
+      updateStore: () => store.nextTrack(false, target.id),
+    })
+  }
+
   function handleTimeUpdate(channel: AudioChannel) {
     if (followingTab.value || detachedTabPosition.value !== null || channel !== backend.active())
       return
     currentTime.value = displayTime(channel)
     if (channel.pendingSeekTime() !== null) return
     const nextSlot = preloadSlots.next
-    if (
+    if (settings.value.autoTransitionMode === 'smart-mix') trySmartMix(channel, true)
+    else if (
       isPlaying.value &&
       shouldStartAutoCrossfade(channel.currentTime(), channel.duration(), {
         smoothTrackChange: settings.value.smoothTrackChange,

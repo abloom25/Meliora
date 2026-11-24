@@ -6,7 +6,7 @@ import { usePlayerLibrary } from '../composables/usePlayerLibrary'
 import { usePlayerStore } from '../stores/player'
 import { loadConfiguredTracks, type TrackLoadResult } from '../services/music'
 import type { Track } from '../core/types'
-import { createTrackShareId } from '../core/library/tracks'
+import { createTrackShareId, trackIdentity } from '../core/library/tracks'
 
 vi.mock('../services/music', () => ({
   loadConfiguredTracks: vi.fn(),
@@ -53,6 +53,48 @@ describe('player library lifecycle', () => {
     window.history.replaceState(null, '', '/')
   })
 
+  it('searches the selected playlist in its own order and recovers when it is removed', async () => {
+    const other = { ...track, id: 'other', title: 'Other' }
+    const a = { id: 'a', label: 'A', platform: '网易云音乐', trackKeys: [trackIdentity(track)] }
+    const b = {
+      id: 'b',
+      label: 'B',
+      platform: 'QQ 音乐',
+      trackKeys: [trackIdentity(other), trackIdentity(track)],
+    }
+    vi.mocked(loadConfiguredTracks).mockResolvedValue({
+      tracks: [track, other],
+      playlists: [a, b],
+      failedSources: 0,
+    })
+    const { library, wrapper } = setup()
+    await library.loadTracks()
+    expect(library.selectedPlaylistId.value).toBe('a')
+    expect(library.filteredTracks.value).toEqual([track])
+    const all = library.playlists.value[0]!
+    expect(all).toMatchObject({ label: '全部歌曲', platform: '共 2 首' })
+    library.selectedPlaylistId.value = all.id
+    expect(library.filteredTracks.value).toEqual([track, other])
+    library.query.value = 'other'
+    expect(library.filteredTracks.value).toEqual([other])
+    await library.loadTracks()
+    expect(library.selectedPlaylistId.value).toBe(all.id)
+    library.query.value = ''
+    library.selectedPlaylistId.value = 'b'
+    expect(library.filteredTracks.value).toEqual([other, track])
+    library.query.value = 'other'
+    expect(library.filteredTracks.value).toEqual([other])
+    vi.mocked(loadConfiguredTracks).mockResolvedValue({
+      tracks: [track],
+      playlists: [a],
+      failedSources: 0,
+    })
+    await library.loadTracks()
+    expect(library.selectedPlaylistId.value).toBe('a')
+    expect(library.filteredTracks.value).toEqual([])
+    wrapper.unmount()
+  })
+
   it('ignores stale results and keeps the newest request loading', async () => {
     const old = deferred()
     const latest = deferred()
@@ -63,11 +105,11 @@ describe('player library lifecycle', () => {
     try {
       const first = library.loadTracks()
       const second = library.loadTracks()
-      old.resolve({ tracks: [], failedSources: 1 })
+      old.resolve({ tracks: [], playlists: [], failedSources: 1 })
       await first
       expect(library.loading.value).toBe(true)
       expect(showNotice).not.toHaveBeenCalled()
-      latest.resolve({ tracks: [track], failedSources: 0 })
+      latest.resolve({ tracks: [track], playlists: [], failedSources: 0 })
       await second
       expect(store.tracks.map((entry) => entry.id)).toEqual(['new'])
       expect(library.loading.value).toBe(false)
@@ -84,7 +126,7 @@ describe('player library lifecycle', () => {
     window.history.replaceState(null, '', '/?share=new')
     const loading = library.loadTracks()
     wrapper.unmount()
-    pending.resolve({ tracks: [track], failedSources: 1 })
+    pending.resolve({ tracks: [track], playlists: [], failedSources: 1 })
     await loading
     expect(store.tracks).toEqual([])
     expect(window.location.search).toBe('?share=new')
@@ -104,15 +146,19 @@ describe('player library lifecycle', () => {
     window.history.replaceState(null, '', `/?share=${createTrackShareId(track)}&view=lyrics#saved`)
     try {
       const loading = library.loadTracks()
-      progress({ tracks: [{ ...track, id: 'early', title: 'Early' }], failedSources: 0 })
+      progress({
+        tracks: [{ ...track, id: 'early', title: 'Early' }],
+        playlists: [],
+        failedSources: 0,
+      })
       expect(store.tracks).toHaveLength(1)
       expect(library.loading.value).toBe(false)
       expect(window.location.search).toContain('share=')
-      progress({ tracks: [track], failedSources: 0 })
+      progress({ tracks: [track], playlists: [], failedSources: 0 })
       expect(store.currentTrackId).toBe(track.id)
       expect(window.location.search).toBe('?view=lyrics')
       expect(window.location.hash).toBe('#saved')
-      pending.resolve({ tracks: [track], failedSources: 0 })
+      pending.resolve({ tracks: [track], playlists: [], failedSources: 0 })
       await loading
     } finally {
       wrapper.unmount()
@@ -132,10 +178,10 @@ describe('player library lifecycle', () => {
       const old = library.loadTracks()
       const latest = library.loadTracks()
       expect(requests[0]?.signal?.aborted).toBe(true)
-      requests[0]?.onProgress?.({ tracks: [track], failedSources: 0 })
+      requests[0]?.onProgress?.({ tracks: [track], playlists: [], failedSources: 0 })
       expect(store.tracks).toEqual([])
-      first.resolve({ tracks: [], failedSources: 0 })
-      second.resolve({ tracks: [track], failedSources: 0 })
+      first.resolve({ tracks: [], playlists: [], failedSources: 0 })
+      second.resolve({ tracks: [track], playlists: [], failedSources: 0 })
       await Promise.all([old, latest])
       expect(store.tracks[0]?.id).toBe(track.id)
     } finally {
@@ -161,13 +207,17 @@ describe('player library lifecycle', () => {
     )
     try {
       const loading = library.loadTracks()
-      progress({ tracks: [{ ...track, id: 'early', title: 'Early' }], failedSources: 0 })
+      progress({
+        tracks: [{ ...track, id: 'early', title: 'Early' }],
+        playlists: [],
+        failedSources: 0,
+      })
       expect(open).not.toHaveBeenCalled()
-      progress({ tracks: [track], failedSources: 0 })
+      progress({ tracks: [track], playlists: [], failedSources: 0 })
       expect(open).toHaveBeenCalledExactlyOnceWith(track, 80.125)
       expect(window.location.search).toBe('?view=lyrics')
       expect(window.location.hash).toBe('#saved')
-      pending.resolve({ tracks: [track], failedSources: 0 })
+      pending.resolve({ tracks: [track], playlists: [], failedSources: 0 })
       await loading
       expect(open).toHaveBeenCalledTimes(1)
     } finally {
@@ -178,7 +228,11 @@ describe('player library lifecycle', () => {
   it.each(['', '&t=NaN', '&t=-10', '&t=Infinity', '&t=86401'])(
     'opens a song without an unsafe or absent timestamp: %s',
     async (time) => {
-      vi.mocked(loadConfiguredTracks).mockResolvedValue({ tracks: [track], failedSources: 0 })
+      vi.mocked(loadConfiguredTracks).mockResolvedValue({
+        tracks: [track],
+        playlists: [],
+        failedSources: 0,
+      })
       const open = vi.fn()
       const { library, wrapper } = setup(open)
       window.history.replaceState(null, '', `/?share=${createTrackShareId(track)}${time}`)
@@ -193,7 +247,11 @@ describe('player library lifecycle', () => {
   )
 
   it('never treats a timestamp without a shared song as a seek request', async () => {
-    vi.mocked(loadConfiguredTracks).mockResolvedValue({ tracks: [track], failedSources: 0 })
+    vi.mocked(loadConfiguredTracks).mockResolvedValue({
+      tracks: [track],
+      playlists: [],
+      failedSources: 0,
+    })
     const open = vi.fn()
     const { library, wrapper } = setup(open)
     window.history.replaceState(null, '', '/?t=80')
@@ -207,7 +265,11 @@ describe('player library lifecycle', () => {
   })
 
   it('keeps legacy shared song selection paused when there is no audio owner', async () => {
-    vi.mocked(loadConfiguredTracks).mockResolvedValue({ tracks: [track], failedSources: 0 })
+    vi.mocked(loadConfiguredTracks).mockResolvedValue({
+      tracks: [track],
+      playlists: [],
+      failedSources: 0,
+    })
     const { library, wrapper, store } = setup()
     store.isPlaying = true
     window.history.replaceState(null, '', `/?share=${createTrackShareId(track)}`)

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import SegmentedControl from './SegmentedControl.vue'
   import { ChevronLeft, ChevronRight, LocateFixed, Pause, Play, X } from '@lucide/vue'
   import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
   import type { BeatComparisonSnapshot } from '../core/analysis/beat-comparison'
@@ -69,13 +70,20 @@
   ] as const
   type DebugTab = (typeof tabs)[number]['id']
   const activeTab = ref<DebugTab>('beat')
+  const slideOffset = ref('36px')
+  function selectTab(index: number): void {
+    const tab = tabs[index]
+    if (!tab || tab.id === activeTab.value) return
+    slideOffset.value =
+      index > tabs.findIndex((item) => item.id === activeTab.value) ? '36px' : '-36px'
+    activeTab.value = tab.id
+  }
   watch(activeTab, (tab) => emit('comparison-visible', tab === 'comparison'), {
     flush: 'sync',
     immediate: true,
   })
   onBeforeUnmount(() => emit('comparison-visible', false))
   const tabId = useId()
-  const tabList = ref<HTMLElement | null>(null)
   async function onTabKeydown(event: KeyboardEvent, index: number): Promise<void> {
     let nextIndex: number
     if (event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length
@@ -86,9 +94,9 @@
     event.preventDefault()
     const nextTab = tabs[nextIndex]
     if (!nextTab) return
-    activeTab.value = nextTab.id
+    selectTab(nextIndex)
     await nextTick()
-    tabList.value?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[nextIndex]?.focus()
+    document.getElementById(`${tabId}-tab-${nextTab.id}`)?.focus()
   }
   const reasonLabels: Record<BeatHighlightReason, string> = {
     ready: '当前位置可高亮',
@@ -342,7 +350,11 @@
 </script>
 
 <template>
-  <section class="player-debug-panel" aria-label="播放器调试信息">
+  <section
+    class="player-debug-panel"
+    aria-label="播放器调试信息"
+    :style="{ '--tab-slide': slideOffset }"
+  >
     <header class="debug-header">
       <div>
         <h2>播放调试</h2>
@@ -357,7 +369,7 @@
         <X :size="18" aria-hidden="true" />
       </button>
     </header>
-    <div ref="tabList" class="debug-tabs" role="tablist" aria-label="调试分类">
+    <SegmentedControl class="debug-tabs" :value="activeTab" role="tablist" aria-label="调试分类">
       <button
         v-for="(tab, index) in tabs"
         :id="`${tabId}-tab-${tab.id}`"
@@ -367,12 +379,12 @@
         :aria-selected="activeTab === tab.id"
         :aria-controls="`${tabId}-panel-${tab.id}`"
         :tabindex="activeTab === tab.id ? 0 : -1"
-        @click="activeTab = tab.id"
+        @click="selectTab(index)"
         @keydown="onTabKeydown($event, index)"
       >
         {{ tab.label }}
       </button>
-    </div>
+    </SegmentedControl>
     <Transition name="debug-page" mode="out-in">
       <div
         :id="`${tabId}-panel-${activeTab}`"
@@ -890,41 +902,21 @@
     outline-offset: -3px;
   }
   .debug-tabs {
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 4px;
-    flex-shrink: 0;
     margin: 10px 20px 0;
-    padding: 4px;
-    border-radius: 10px;
-    background: rgba(255, 255, 255, 0.045);
-  }
-  .debug-tabs button {
-    min-inline-size: 0;
-    min-block-size: 32px;
-    padding: 5px 3px;
-    border: 0;
-    border-radius: 7px;
-    background: transparent;
-    color: var(--text-subtle);
-    font: inherit;
-    font-size: 0.68rem;
-    cursor: pointer;
-    transition:
-      color 180ms cubic-bezier(0.16, 1, 0.3, 1),
-      background 180ms cubic-bezier(0.16, 1, 0.3, 1);
-  }
-  .debug-tabs button[aria-selected='true'] {
-    background: rgba(255, 255, 255, 0.12);
-    color: var(--text);
   }
   .debug-page-enter-active,
   .debug-page-leave-active {
-    transition: opacity 180ms cubic-bezier(0.16, 1, 0.3, 1);
+    transition:
+      opacity 180ms ease,
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
   }
-  .debug-page-enter-from,
+  .debug-page-enter-from {
+    opacity: 0;
+    transform: translateX(var(--tab-slide));
+  }
   .debug-page-leave-to {
     opacity: 0;
+    transform: translateX(calc(-1 * var(--tab-slide)));
   }
   .debug-section {
     margin-inline: 20px;
@@ -1283,9 +1275,6 @@
     }
   }
   @media (pointer: coarse) {
-    .debug-tabs button {
-      min-block-size: 40px;
-    }
     .debug-button,
     .debug-icon-button {
       min-block-size: 40px;
@@ -1295,7 +1284,6 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
-    .debug-tabs button,
     .debug-page-enter-active,
     .debug-page-leave-active {
       transition: none;

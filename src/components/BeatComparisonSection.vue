@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import SegmentedControl from './SegmentedControl.vue'
   import { computed, onMounted, ref, shallowRef, watch } from 'vue'
   import { Download, Pause, Play, Square } from '@lucide/vue'
   import type {
@@ -257,23 +258,15 @@
         {{ safeError(exportError) }}
       </p>
     </div>
-    <div class="comparison-metrics" role="group" aria-label="对比数据类型">
-      <button
-        type="button"
-        class="comparison-button"
-        :aria-pressed="metric === 'level'"
-        @click="metric = 'level'"
-      >
-        高亮强度
-      </button>
-      <button
-        type="button"
-        class="comparison-button"
-        :aria-pressed="metric === 'sustain'"
-        @click="metric = 'sustain'"
-      >
-        持续能量
-      </button>
+    <div class="comparison-metrics">
+      <SegmentedControl :value="metric" role="group" aria-label="对比数据类型">
+        <button type="button" :aria-pressed="metric === 'level'" @click="metric = 'level'">
+          高亮强度
+        </button>
+        <button type="button" :aria-pressed="metric === 'sustain'" @click="metric = 'sustain'">
+          持续能量
+        </button>
+      </SegmentedControl>
       <span>频率 ×{{ selectedFlashRate }} · 播放 {{ fixed(playbackSeconds, 2) }} s</span>
     </div>
     <div class="comparison-chart">
@@ -522,8 +515,7 @@
       background 180ms cubic-bezier(0.16, 1, 0.3, 1),
       opacity 180ms cubic-bezier(0.16, 1, 0.3, 1);
   }
-  .comparison-button:not(:disabled):hover,
-  .comparison-metrics button[aria-pressed='true'] {
+  .comparison-button:not(:disabled):hover {
     background: rgba(255, 255, 255, 0.12);
     color: var(--text);
   }

@@ -90,10 +90,31 @@ describe('SettingsPanel', () => {
     }
   })
 
+  it('opens playback first and exposes one labelled category at a time with keyboard navigation', async () => {
+    const { wrapper } = mountPanel()
+    try {
+      const tabs = wrapper.findAll('[role="tab"]')
+      const visiblePanel = () => wrapper.get('[role="tabpanel"][aria-hidden="false"]')
+      expect(tabs.map((tab) => tab.text())).toEqual(['播放', '歌词', '外观', '更多'])
+      expect(visiblePanel().text()).toContain('智能混音')
+      expect(visiblePanel().text()).not.toContain('缓存管理')
+      await tabs[0]!.trigger('keydown', { key: 'ArrowRight' })
+      expect(visiblePanel().attributes('aria-labelledby')).toBe(tabs[1]!.attributes('id'))
+      expect(visiblePanel().text()).toContain('歌词缩放')
+      await tabs[1]!.trigger('keydown', { key: 'End' })
+      expect(visiblePanel().text()).toContain('缓存管理')
+      expect(tabs[3]!.attributes('tabindex')).toBe('0')
+      await tabs[2]!.trigger('click')
+      expect(visiblePanel().text()).toContain('动态封面背景')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('exposes simple performance, coordination and opt-in synchronization switches', async () => {
     const { wrapper, store } = mountPanel()
     try {
-      const playback = sectionByTitle(wrapper, '播放')!
+      const playback = sectionByTitle(wrapper, '性能与多标签页')!
       expect(store.settings.adaptivePerformance).toBe(true)
       expect(store.settings.tabCoordination).toBe(true)
       expect(store.settings.syncTabPlayback).toBe(false)
@@ -1110,6 +1131,22 @@ describe('SettingsPanel', () => {
       expect(store.settings.lyricScale).toBe(1.2)
       await lyrics.get('input[aria-label="小窗独立字号"]').setValue(false)
       expect(store.settings.lyricWindowScale).toBeNull()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('enables smart automatic transitions independently of manual fades and restores the default', async () => {
+    const { wrapper, store } = mountPanel()
+    try {
+      const section = sectionByTitle(wrapper, '切歌与续播')!
+      await section.get('input[aria-label="平滑切歌"]').setValue(false)
+      await section.get('input[aria-label="智能混音"]').setValue(true)
+      expect(store.settings.autoTransitionMode).toBe('smart-mix')
+      expect(store.settings.smoothTrackChange).toBe(false)
+      await section.get('.section-reset').trigger('click')
+      await section.get('.section-reset').trigger('click')
+      expect(store.settings.autoTransitionMode).toBe('standard')
     } finally {
       wrapper.unmount()
     }

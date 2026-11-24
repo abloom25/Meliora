@@ -86,6 +86,7 @@ export interface PlayerSettings {
   volume: number
   playMode: PlayMode
   smoothTrackChange: boolean
+  autoTransitionMode: 'standard' | 'smart-mix'
   preloadNextTrack: boolean
   adaptivePerformance: boolean
   tabCoordination: boolean

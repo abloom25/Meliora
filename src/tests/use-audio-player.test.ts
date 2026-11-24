@@ -30,6 +30,7 @@ vi.mock('../platform/web/useBeatAnalyser', () => ({
     preanalysis: {
       status: { value: { phase: 'idle', progress: 0, error: null } },
       timeline: { value: null },
+      mixAnalysis: () => ({ timeline: null, silence: { leading: 0.3, trailing: 0.1 } }),
       start: vi.fn(),
       reset: vi.fn(),
       retry: vi.fn(),
@@ -1079,6 +1080,47 @@ describe('useAudioPlayer', () => {
       wrapper.unmount()
     } finally {
       vi.stubGlobal('Audio', originalAudio)
+    }
+  })
+
+  it('mixes the prepared successor from its intro cue and cancels the overlap on seek', async () => {
+    vi.useFakeTimers()
+    const restore = stubAudioPlay()
+    vi.spyOn(HTMLMediaElement.prototype, 'paused', 'get').mockReturnValue(false)
+    vi.spyOn(HTMLMediaElement.prototype, 'duration', 'get').mockReturnValue(30)
+    vi.spyOn(HTMLMediaElement.prototype, 'readyState', 'get').mockReturnValue(4)
+    const { wrapper, store, player } = mountPlayer()
+    try {
+      store.settings.autoTransitionMode = 'smart-mix'
+      store.settings.smoothTrackChange = false
+      store.selectTrack(tracks[0]!, tracks)
+      await player.play()
+      await vi.advanceTimersByTimeAsync(1)
+      const analysis = vi.mocked(useBeatAnalyser).mock.calls.at(-1)![0]
+      const outgoing = analysis.getActiveAudio()
+      const incoming = analysis.players.find((audio) => audio.src.endsWith('/2.mp3'))!
+      incoming.dispatchEvent(new Event('canplay'))
+      outgoing.currentTime = 28.3
+      outgoing.dispatchEvent(new Event('timeupdate'))
+      player.seek(10)
+      await vi.advanceTimersByTimeAsync(400)
+      expect(store.currentTrackId).toBe('1')
+      outgoing.currentTime = 28.66
+      outgoing.dispatchEvent(new Event('timeupdate'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(store.currentTrackId).toBe('2')
+      expect(incoming.currentTime).toBeCloseTo(0.3)
+      expect(outgoing.volume).toBeCloseTo(store.settings.volume)
+      await vi.advanceTimersByTimeAsync(600)
+      expect(incoming.volume).toBeGreaterThan(0)
+      expect(outgoing.volume).toBeGreaterThan(0)
+      player.seek(5)
+      expect(outgoing.volume).toBe(0)
+      expect(incoming.volume).toBeCloseTo(store.settings.volume)
+    } finally {
+      wrapper.unmount()
+      restore()
+      vi.useRealTimers()
     }
   })
 

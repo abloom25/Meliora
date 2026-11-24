@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import SegmentedControl from './SegmentedControl.vue'
   import { Check, Download, LoaderCircle, RotateCcw, Trash2, X } from '@lucide/vue'
   import { computed, onMounted, ref, watch } from 'vue'
   import { BEAT_THIS_MODELS } from '../core/analysis/beat-this-models'
@@ -22,9 +23,6 @@
     { value: 'beat-this-small', label: 'Small' },
     { value: 'beat-this-standard', label: '标准版' },
   ] as const
-  const selectedModeIndex = computed(() =>
-    modeOptions.findIndex((option) => option.value === selectedMode.value),
-  )
   const modelDetailsRef = ref<HTMLElement | null>(null)
 
   function holdModelDetailsHeight(element: Element): void {
@@ -334,7 +332,12 @@
       <strong>节奏识别</strong>
       <span class="beat-analysis-size">当前：{{ activeModeLabel }}</span>
     </div>
-    <div class="beat-analysis-modes" role="group" aria-label="节奏识别模式">
+    <SegmentedControl
+      class="beat-analysis-modes"
+      :value="selectedMode"
+      role="group"
+      aria-label="节奏识别模式"
+    >
       <button
         v-for="option in modeOptions"
         :key="option.value"
@@ -345,12 +348,7 @@
       >
         {{ option.label }}
       </button>
-      <span
-        class="beat-mode-indicator"
-        :style="{ transform: `translateX(calc(${selectedModeIndex} * (100% + 4px)))` }"
-        aria-hidden="true"
-      />
-    </div>
+    </SegmentedControl>
     <div ref="modelDetailsRef" class="beat-model-details">
       <Transition
         name="beat-model-switch"
@@ -574,14 +572,8 @@
     text-decoration: none;
   }
   .beat-analysis-modes {
-    position: relative;
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 4px;
     margin-top: 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
   }
-  .beat-analysis-modes button,
   .beat-analysis-action {
     display: inline-flex;
     justify-content: center;
@@ -600,46 +592,6 @@
       background 220ms cubic-bezier(0.16, 1, 0.3, 1),
       color 220ms cubic-bezier(0.16, 1, 0.3, 1),
       border-color 220ms cubic-bezier(0.16, 1, 0.3, 1);
-  }
-  .beat-analysis-modes button {
-    position: relative;
-    min-width: 0;
-    min-block-size: 44px;
-    padding: 10px 4px 13px;
-    border: 0;
-    border-radius: 0;
-    color: var(--text-subtle);
-    font-size: 0.77rem;
-    font-weight: 550;
-    white-space: nowrap;
-    transition: color 220ms cubic-bezier(0.16, 1, 0.3, 1);
-
-    &:hover {
-      color: var(--text-muted);
-    }
-    &[aria-pressed='true'] {
-      color: var(--text);
-    }
-  }
-  .beat-mode-indicator {
-    position: absolute;
-    inset: auto auto 0 0;
-    width: calc((100% - 8px) / 3);
-    height: 2px;
-    color: var(--text);
-    font-size: 0.77rem;
-    pointer-events: none;
-    transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1);
-
-    &::after {
-      content: '';
-      position: absolute;
-      inset: 0 auto 0 calc(50% - 0.65em);
-      width: 1.3em;
-      border-radius: 2px;
-      background: currentColor;
-      opacity: 0.9;
-    }
   }
   .beat-model-details {
     overflow: clip;
@@ -696,7 +648,6 @@
   .beat-basic-detail {
     margin-top: 10px !important;
   }
-  .beat-analysis-modes button:disabled,
   .beat-analysis-action:disabled {
     opacity: 0.45;
     cursor: default;
@@ -704,14 +655,9 @@
   .beat-analysis-action:not(:disabled):hover {
     background: rgba(255, 255, 255, 0.15);
   }
-  .beat-analysis-modes button:focus-visible,
   .beat-analysis-action:focus-visible {
     outline: 2px solid currentColor;
     outline-offset: 2px;
-  }
-  .beat-analysis-modes button:focus-visible {
-    outline-offset: -3px;
-    border-radius: 6px;
   }
   .beat-analysis-feedback {
     margin-top: 12px;
@@ -958,8 +904,6 @@
     .beat-analysis-progress.indeterminate span {
       animation: none;
     }
-    .beat-analysis-modes button,
-    .beat-mode-indicator,
     .beat-model-details,
     .beat-model-switch-enter-active,
     .beat-model-switch-leave-active,
@@ -975,13 +919,6 @@
   @media (prefers-contrast: more) {
     .beat-analysis-action {
       outline: 1px solid currentColor;
-    }
-    .beat-analysis-modes button {
-      color: var(--text);
-    }
-    .beat-mode-indicator {
-      height: 3px;
-      opacity: 1;
     }
     .beat-analysis-status,
     .beat-analysis-position,

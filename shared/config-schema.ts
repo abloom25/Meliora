@@ -186,6 +186,12 @@ export function validateMusicConfig(
         return
       }
       const playlist = item
+      if (playlist.name !== undefined && typeof playlist.name !== 'string') {
+        errors.push(`playlists[${index}].name 必须是字符串`)
+      }
+      if (playlist.cover !== undefined && typeof playlist.cover !== 'string') {
+        errors.push(`playlists[${index}].cover 必须是字符串`)
+      }
       if (playlist.server !== 'netease' && playlist.server !== 'tencent') {
         errors.push(`playlists[${index}].server 必须是 netease 或 tencent`)
       }
@@ -252,6 +258,8 @@ export function validateMusicConfig(
         playlistId: (item.playlistId as string).trim(),
       }
       if (typeof item.enabled === 'boolean') playlist.enabled = item.enabled
+      if (typeof item.name === 'string' && item.name.trim()) playlist.name = item.name.trim()
+      if (typeof item.cover === 'string' && item.cover.trim()) playlist.cover = item.cover.trim()
       return playlist
     }),
     localTracks: (config.localTracks as Record<string, unknown>[]).map((item) => {

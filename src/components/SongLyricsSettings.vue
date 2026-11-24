@@ -233,56 +233,58 @@
       </p>
       <p v-if="failed" class="source-message" role="status">歌词刷新失败，请稍后重试。</p>
     </div>
-    <div class="lyrics-offset-section">
-      <div class="offset-heading">
-        <strong>时间校准</strong>
-        <div class="offset-controls" role="group" aria-label="本曲歌词时间校准">
-          <button
-            type="button"
-            :disabled="!preferences.resolvedSource.value"
-            aria-label="歌词提前 0.1 秒"
-            title="提前 0.1 秒"
-            @click="adjustOffset(-100)"
-          >
-            <Minus :size="16" aria-hidden="true" />
-          </button>
-          <button
-            class="offset-value"
-            type="button"
-            :disabled="!preferences.resolvedSource.value || preferences.offsetMs.value === 0"
-            aria-label="重置本曲歌词时间"
-            :aria-describedby="`${sectionId}-offset`"
-            :title="`${offsetLabel}，点击重置`"
-            @click="preferences.setOffset(0)"
-          >
-            <output
-              :id="`${sectionId}-offset`"
-              :aria-label="offsetLabel"
-              aria-live="polite"
-              aria-atomic="true"
-              >{{ offsetValue }}<span class="offset-unit">秒</span></output
+    <Collapse :expanded="!!preferences.resolvedSource.value">
+      <div class="lyrics-offset-section">
+        <div class="offset-heading">
+          <strong>时间校准</strong>
+          <div class="offset-controls" role="group" aria-label="本曲歌词时间校准">
+            <button
+              type="button"
+              :disabled="!preferences.resolvedSource.value"
+              aria-label="歌词提前 0.1 秒"
+              title="提前 0.1 秒"
+              @click="adjustOffset(-100)"
             >
-          </button>
-          <button
-            type="button"
-            :disabled="!preferences.resolvedSource.value"
-            aria-label="歌词延后 0.1 秒"
-            title="延后 0.1 秒"
-            @click="adjustOffset(100)"
-          >
-            <Plus :size="16" aria-hidden="true" />
-          </button>
+              <Minus :size="16" aria-hidden="true" />
+            </button>
+            <button
+              class="offset-value"
+              type="button"
+              :disabled="!preferences.resolvedSource.value || preferences.offsetMs.value === 0"
+              aria-label="重置本曲歌词时间"
+              :aria-describedby="`${sectionId}-offset`"
+              :title="`${offsetLabel}，点击重置`"
+              @click="preferences.setOffset(0)"
+            >
+              <output
+                :id="`${sectionId}-offset`"
+                :aria-label="offsetLabel"
+                aria-live="polite"
+                aria-atomic="true"
+                >{{ offsetValue }}<span class="offset-unit">秒</span></output
+              >
+            </button>
+            <button
+              type="button"
+              :disabled="!preferences.resolvedSource.value"
+              aria-label="歌词延后 0.1 秒"
+              title="延后 0.1 秒"
+              @click="adjustOffset(100)"
+            >
+              <Plus :size="16" aria-hidden="true" />
+            </button>
+          </div>
         </div>
+        <p class="source-message">每次 0.1 秒 · 点数值重置</p>
+        <LyricsTimingCalibration
+          :context="calibration"
+          :get-playback-state="getPlaybackState"
+          :playing="isPlaying"
+          :offset-ms="preferences.offsetMs.value"
+          :on-apply="preferences.setOffset"
+        />
       </div>
-      <p class="source-message">每次 0.1 秒 · 点数值重置</p>
-      <LyricsTimingCalibration
-        :context="calibration"
-        :get-playback-state="getPlaybackState"
-        :playing="isPlaying"
-        :offset-ms="preferences.offsetMs.value"
-        :on-apply="preferences.setOffset"
-      />
-    </div>
+    </Collapse>
   </div>
 </template>
 
@@ -290,7 +292,6 @@
   .song-lyrics-settings {
     display: grid;
     min-width: 0;
-    gap: 14px;
     padding: 15px 14px;
     border-top: 1px solid rgba(255, 255, 255, 0.075);
   }
@@ -301,6 +302,7 @@
   .lyrics-offset-section {
     display: grid;
     gap: 10px;
+    margin-top: 14px;
     padding-top: 14px;
     border-top: 1px solid rgba(255, 255, 255, 0.075);
   }
@@ -569,9 +571,9 @@
   @media (max-width: 720px) {
     .song-lyrics-settings {
       padding: 13px 12px;
-      gap: 12px;
     }
     .lyrics-offset-section {
+      margin-top: 12px;
       padding-top: 12px;
     }
     strong {

@@ -54,6 +54,7 @@ const PULSE_WEIGHTS = [0.28, 0.2, 0.12, 0.06, 0.03]
 const SEEK_SETTLE_MS = 180
 
 export interface BeatAnalyserOptions {
+  smartMixEnabled?: Ref<boolean>
   resourcePressure?: Readonly<Ref<PlaybackResourcePressure>>
   visualIntervalMs?: Readonly<Ref<number>>
   observeVisualFrame?: (now: number) => void
@@ -145,7 +146,8 @@ export function useBeatAnalyser(options: BeatAnalyserOptions) {
     adjacent: options.adjacent,
     preloadEnabled: options.preloadEnabled,
     getPlaybackState: playbackState,
-    enabled: visualEnabled,
+    smartMixEnabled: options.smartMixEnabled,
+    enabled: computed(() => visualEnabled.value || options.smartMixEnabled?.value === true),
     modelAvailable: computed(() => !selectedState.value || selectedState.value.phase === 'ready'),
     preservePreviewOnUnavailable: computed(
       () => selectedState.value?.phase === 'error' && !options.unavailableReason?.value,

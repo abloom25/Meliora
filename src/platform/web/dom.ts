@@ -8,7 +8,7 @@ export function getFocusableEdges(container: HTMLElement): {
   // Roving tabs remain programmatically focusable, but negative tabindex removes
   // them from the sequential Tab order and therefore from the trap's boundaries.
   const list = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-    (element) => element.tabIndex >= 0,
+    (element) => element.tabIndex >= 0 && !element.closest('[hidden], [inert]'),
   )
   if (!list.length) return { first: null, last: null }
   return { first: list[0]!, last: list[list.length - 1]! }

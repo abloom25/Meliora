@@ -47,6 +47,26 @@ beforeEach(() => {
 })
 
 describe('cache management settings', () => {
+  it('shows only models with cached data or ongoing work, including zero-byte downloads', async () => {
+    state.models.value.small.phase = 'missing'
+    state.modelBytes.value = { small: 0, standard: 0, runtime: 0 }
+    const wrapper = mount(CacheManagementSection)
+    expect(wrapper.text()).toContain('暂无模型缓存')
+    expect(wrapper.find('.cache-model').exists()).toBe(false)
+    state.modelBytes.value.runtime = 1024
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('共用运行文件')
+    expect(wrapper.text()).not.toContain('暂无模型缓存')
+    state.models.value.small.phase = 'downloading'
+    state.modelBytes.value.standard = 2048
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('.cache-model').map((row) => row.text())).toEqual([
+      expect.stringContaining('正在下载'),
+      expect.stringContaining('部分下载'),
+    ])
+    wrapper.unmount()
+  })
+
   it('requires confirmation for a category clear and keeps categories independent', async () => {
     const wrapper = mount(CacheManagementSection)
     const clear = wrapper.findAll('button').find((button) => button.text() === '清除歌词缓存')!

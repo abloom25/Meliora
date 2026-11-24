@@ -25,6 +25,7 @@ const defaultSettings: PlayerSettings = {
   volume: 0.7,
   playMode: 'loop',
   smoothTrackChange: true,
+  autoTransitionMode: 'standard',
   preloadNextTrack: true,
   adaptivePerformance: true,
   tabCoordination: true,

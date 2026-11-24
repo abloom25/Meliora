@@ -6,8 +6,12 @@
   import Dropdown from '../../components/Dropdown.vue'
   import ConfirmModal from './ConfirmModal.vue'
   import BaseInput from '../../components/BaseInput.vue'
+  import { usePlaylistDetails } from '../../composables/usePlaylistDetails'
 
   const props = defineProps<{ playlists: MetingPlaylistConfig[] }>()
+  const details = usePlaylistDetails(() => props.playlists)
+  const metadata = (item: MetingPlaylistConfig) =>
+    details.get(`${item.server}:${item.playlistId.trim()}`)
   const emit = defineEmits<{ 'update:playlists': [value: MetingPlaylistConfig[]] }>()
 
   const editingIndex = ref<number | null>(null)
@@ -45,6 +49,10 @@
     const next = props.playlists.map((item, i) => {
       if (i !== index) return item
       const patched = { ...item, ...patch }
+      if (patched.server !== item.server || patched.playlistId.trim() !== item.playlistId.trim()) {
+        delete patched.name
+        delete patched.cover
+      }
       // patch 会创建新对象,把旧对象的 uid 转移过去,保持列表 key 稳定
       const uid = playlistUids.get(toRaw(item))
       if (uid) playlistUids.set(patched, uid)
@@ -98,7 +106,10 @@
   }
 
   function saveEdit(index: number) {
-    if (!props.playlists[index]?.playlistId.trim()) return
+    const item = props.playlists[index]
+    if (!item?.playlistId.trim()) return
+    const resolved = metadata(item)
+    if (resolved) update(index, resolved)
     editingIndex.value = null
   }
 
@@ -162,6 +173,9 @@
                 @update:model-value="update(index, { playlistId: $event })"
               />
               <small v-if="!playlist.playlistId.trim()" class="field-error">歌单 ID 不能为空</small>
+              <small v-if="metadata(playlist)" class="resolved-playlist">{{
+                metadata(playlist)?.name
+              }}</small>
             </div>
 
             <div class="edit-actions">
@@ -183,10 +197,19 @@
 
         <template v-else>
           <div class="playlist-info">
+            <img
+              v-if="metadata(playlist)?.cover || playlist.cover"
+              class="playlist-thumbnail"
+              :src="metadata(playlist)?.cover || playlist.cover"
+              alt=""
+              loading="lazy"
+            />
             <span class="server-tag" :class="playlist.server">
               {{ serverLabel(playlist.server) }}
             </span>
-            <span class="playlist-id">{{ playlist.playlistId || '未设置' }}</span>
+            <span class="playlist-id">{{
+              metadata(playlist)?.name || playlist.name || playlist.playlistId || '未设置'
+            }}</span>
           </div>
 
           <div class="row-actions">
@@ -288,6 +311,15 @@
     gap: 10px;
     min-width: 0;
     flex: 1;
+  }
+  .playlist-thumbnail {
+    width: 34px;
+    height: 34px;
+    object-fit: cover;
+    border-radius: 7px;
+  }
+  .resolved-playlist {
+    color: var(--text-muted);
   }
 
   .server-tag {

@@ -7,14 +7,6 @@ import {
 
 export type LibraryView = 'all' | 'queue' | 'recent' | 'frequent' | 'favorites'
 
-export const LIBRARY_VIEWS: readonly { value: LibraryView; label: string }[] = [
-  { value: 'all', label: '全部' },
-  { value: 'queue', label: '队列' },
-  { value: 'recent', label: '最近' },
-  { value: 'frequent', label: '常听' },
-  { value: 'favorites', label: '收藏' },
-]
-
 export function sanitizeFavoriteKeys(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return [

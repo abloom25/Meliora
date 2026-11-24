@@ -6,9 +6,16 @@
 
 export type MusicServer = 'netease' | 'tencent'
 
+export interface PlaylistDetails {
+  name: string
+  cover?: string
+}
+
 export interface MetingPlaylistConfig {
   server: MusicServer
   playlistId: string
+  name?: string
+  cover?: string
   enabled?: boolean
 }
 

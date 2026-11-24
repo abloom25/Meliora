@@ -11,6 +11,7 @@
   import Collapse from './Collapse.vue'
   import BeatAnalysisSettings from './BeatAnalysisSettings.vue'
   import EqualizerPanel from './EqualizerPanel.vue'
+  import SettingsTabs from './SettingsTabs.vue'
   import SettingSlider from './SettingSlider.vue'
   import SettingToggleRow from './SettingToggleRow.vue'
   import SettingsSectionHeader from './SettingsSectionHeader.vue'
@@ -31,12 +32,14 @@
   const { settings } = storeToRefs(store)
 
   // 各分组「恢复默认」覆盖的设置项。均衡器有自己的预设,不在这里重置
-  const PLAYBACK_KEYS: readonly ResettableSettingKey[] = [
-    'volume',
-    'playMode',
+  const PLAYBACK_KEYS: readonly ResettableSettingKey[] = ['volume', 'playMode']
+  const TRANSITION_KEYS: readonly ResettableSettingKey[] = [
     'smoothTrackChange',
+    'autoTransitionMode',
     'preloadNextTrack',
     'skipOnError',
+  ]
+  const SYSTEM_KEYS: readonly ResettableSettingKey[] = [
     'adaptivePerformance',
     'tabCoordination',
     'syncTabPlayback',
@@ -217,374 +220,400 @@
 </script>
 
 <template>
-  <div class="settings-scroll">
-    <section class="settings-section song-info-section">
-      <SettingsSectionHeader title="歌曲信息" />
-      <!-- 固定信息槽位,异步字段只替换内容,不再插入/移除整行挤动下方设置。 -->
-      <div class="song-info-content" :aria-busy="songInfoLoading">
-        <p class="song-info-title" :title="songTitle">
-          <SongInfoValue :loading="songInfoLoading" :value-key="songTitle">{{
-            songTitle || '尚未选择歌曲'
-          }}</SongInfoValue>
-        </p>
-        <p class="song-info-artist" :title="songInfo?.track?.artist">
-          <SongInfoValue :loading="songInfoLoading" :value-key="songInfo?.track?.artist">{{
-            songInfo?.track ? songInfo.track.artist || '未知歌手' : '选择歌曲后查看歌曲和歌词来源'
-          }}</SongInfoValue>
-        </p>
-        <dl class="song-info-details">
-          <div class="song-info-row">
-            <dt>专辑</dt>
-            <dd class="song-info-album" :title="songInfo?.track?.album">
-              <SongInfoValue :loading="songInfoLoading" :value-key="songInfo?.track?.album">{{
-                songInfo?.track?.album || '未提供'
-              }}</SongInfoValue>
-            </dd>
-          </div>
-          <div class="song-info-row">
-            <dt>时长</dt>
-            <dd class="song-info-duration" :aria-busy="durationLoading">
-              <SongInfoValue
-                :loading="durationLoading"
-                :value-key="songDuration"
-                loading-label="正在加载时长"
-              >
-                {{ songDuration || (songInfo?.track ? '暂不可用' : '—') }}
-              </SongInfoValue>
-            </dd>
-          </div>
-          <div class="song-info-row">
-            <dt>音乐类型</dt>
-            <dd>
-              <SongInfoValue :loading="songInfoLoading" :value-key="songInfo?.track?.kind">{{
-                songInfo?.track ? MUSIC_KIND_LABELS[songInfo.track.kind] : '—'
-              }}</SongInfoValue>
-            </dd>
-          </div>
-          <div
-            class="song-info-row song-info-lyrics"
-            aria-live="polite"
-            aria-atomic="true"
-            :aria-busy="lyricSourceLoading"
-          >
-            <dt>歌词来源</dt>
-            <dd class="song-info-lyric-value">
-              <SongInfoValue
-                :loading="lyricSourceLoading"
-                :value-key="lyricSourceKey"
-                loading-label="正在加载歌词来源"
-              >
-                <span class="song-info-lyric-result">
-                  <span class="song-info-source" :title="lyricSourceLabel">
-                    {{ songInfo?.track ? lyricSourceLabel : '—' }}
-                  </span>
-                  <span v-if="lyricSourceReady" class="song-info-timing">
-                    {{ songInfo?.hasWordTiming ? '逐字' : '逐行' }}
-                  </span>
-                </span>
-              </SongInfoValue>
-            </dd>
-          </div>
-        </dl>
-      </div>
-      <SongLyricsSettings
-        :get-calibration-lyrics="getCalibrationLyrics"
-        :get-playback-state="getPlaybackState"
-      />
-    </section>
-
-    <ListeningStatsSection
-      v-if="listeningStats && clearListeningHistory"
-      :stats="listeningStats"
-      :track="songInfo?.track"
-      :on-clear="clearListeningHistory"
-    />
-    <CacheManagementSection :current-track="songInfo?.track" />
-
-    <section class="settings-section">
-      <SettingsSectionHeader title="播放" resettable @reset="store.resetSettings(PLAYBACK_KEYS)" />
-      <p v-if="store.hasResumePosition" class="resume-hint">
-        上次听到 {{ resumeTimeLabel }}，点击播放后继续收听。
-      </p>
-      <SettingSlider
-        v-model="settings.volume"
-        label="音量"
-        :value-text="volumeLabel"
-        :min="0"
-        :max="1"
-        :step="0.01"
-      >
-        <template #icon><SlidersHorizontal :size="17" /></template>
-      </SettingSlider>
-      <div class="setting-row">
-        <span><strong>播放模式</strong><small>顺序 / 随机 / 单曲循环</small></span>
-        <button class="value-button" @click="emit('cyclePlayMode')">
-          {{ playModeText }}
-        </button>
-      </div>
-      <SettingToggleRow
-        v-model="settings.smoothTrackChange"
-        label="平滑切歌"
-        description="切歌前淡出，载入后淡入"
-      />
-      <SettingToggleRow
-        v-model="settings.preloadNextTrack"
-        label="预加载前后歌曲"
-        description="当前歌曲载入后准备上一首和下一首"
-      />
-      <SleepTimerControl
-        :minutes="sleepTimer.minutes"
-        :remaining="sleepTimer.remaining"
-        :display-minutes="sleepTimer.displayMinutes"
-        :progress="sleepTimer.progress"
-        :options="sleepTimer.options"
-        :format-remaining="sleepTimer.formatRemaining"
-        @input="emit('sleepTimerInput', $event)"
-        @change="emit('sleepTimerChange', $event)"
-      />
-      <SettingToggleRow
-        v-model="settings.adaptivePerformance"
-        label="自动性能调整"
-        description="卡顿或缓冲时，自动降低背景动效和预分析负担"
-      />
-      <SettingToggleRow
-        v-model="settings.tabCoordination"
-        label="多标签页协调"
-        description="只让一个页面出声；关闭后，各页面独立播放"
-      />
-      <Collapse :expanded="settings.tabCoordination">
-        <SettingToggleRow
-          v-model="settings.syncTabPlayback"
-          label="同步所有标签页播放"
-          description="共享歌曲、歌词和进度，在任意页面控制播放"
+  <SettingsTabs>
+    <template #playback>
+      <section class="settings-section">
+        <SettingsSectionHeader
+          title="播放"
+          resettable
+          @reset="store.resetSettings(PLAYBACK_KEYS)"
         />
-      </Collapse>
-      <SettingToggleRow
-        v-model="settings.skipOnError"
-        label="失败后自动跳过"
-        description="继续尝试下一首歌曲"
-      />
-    </section>
-
-    <EqualizerPanel
-      :enabled="settings.equalizer.enabled"
-      :preset="settings.equalizer.preset"
-      :bands="settings.equalizer.bands"
-      @update:enabled="settings.equalizer.enabled = $event"
-      @update:preset="settings.equalizer.preset = $event"
-      @update:bands="settings.equalizer.bands = $event"
-    />
-
-    <section class="settings-section">
-      <SettingsSectionHeader title="歌词" resettable @reset="store.resetSettings(LYRICS_KEYS)" />
-      <SettingSlider
-        v-model="settings.lyricScale"
-        label="歌词缩放"
-        description="在适合当前窗口的字号上按比例调整"
-        :value-text="lyricScaleLabel"
-        :min="0.75"
-        :max="1.5"
-        :step="0.05"
-      />
-      <SettingToggleRow
-        v-model="settings.lyricAnimation"
-        label="歌词动画"
-        description="开启牵拉、逐字扫光与状态切换动画"
-      />
-      <!-- 弹簧只在牵拉动画开着时才有作用对象 -->
-      <Collapse :expanded="settings.lyricAnimation">
+        <p v-if="store.hasResumePosition" class="resume-hint">
+          上次听到 {{ resumeTimeLabel }}，点击播放后继续收听。
+        </p>
         <SettingSlider
-          v-model="settings.lyricSpring"
-          label="歌词弹簧"
-          description="越大越紧绷利落,越小越绵软拖沓"
-          :value-text="lyricSpringLabel"
-          :min="0.5"
-          :max="2"
+          v-model="settings.volume"
+          label="音量"
+          :value-text="volumeLabel"
+          :min="0"
+          :max="1"
+          :step="0.01"
+        >
+          <template #icon><SlidersHorizontal :size="17" /></template>
+        </SettingSlider>
+        <div class="setting-row">
+          <span><strong>播放模式</strong><small>顺序 / 随机 / 单曲循环</small></span>
+          <button class="value-button" @click="emit('cyclePlayMode')">
+            {{ playModeText }}
+          </button>
+        </div>
+        <SleepTimerControl
+          :minutes="sleepTimer.minutes"
+          :remaining="sleepTimer.remaining"
+          :display-minutes="sleepTimer.displayMinutes"
+          :progress="sleepTimer.progress"
+          :options="sleepTimer.options"
+          :format-remaining="sleepTimer.formatRemaining"
+          @input="emit('sleepTimerInput', $event)"
+          @change="emit('sleepTimerChange', $event)"
+        />
+      </section>
+      <section class="settings-section">
+        <SettingsSectionHeader
+          title="切歌与续播"
+          resettable
+          @reset="store.resetSettings(TRANSITION_KEYS)"
+        />
+        <SettingToggleRow
+          v-model="settings.preloadNextTrack"
+          label="预加载前后歌曲"
+          description="当前歌曲载入后准备上一首和下一首"
+        />
+        <Collapse :expanded="settings.preloadNextTrack">
+          <SettingToggleRow
+            v-model="settings.smoothTrackChange"
+            label="平滑切歌"
+            description="切换歌曲时淡入淡出"
+          />
+          <SettingToggleRow
+            :model-value="settings.autoTransitionMode === 'smart-mix'"
+            label="智能混音"
+            description="自动续播时按节拍衔接"
+            @update:model-value="settings.autoTransitionMode = $event ? 'smart-mix' : 'standard'"
+          />
+          <SettingToggleRow
+            v-model="settings.skipOnError"
+            label="失败后自动跳过"
+            description="继续尝试下一首歌曲"
+          />
+        </Collapse>
+      </section>
+      <EqualizerPanel
+        :enabled="settings.equalizer.enabled"
+        :preset="settings.equalizer.preset"
+        :bands="settings.equalizer.bands"
+        @update:enabled="settings.equalizer.enabled = $event"
+        @update:preset="settings.equalizer.preset = $event"
+        @update:bands="settings.equalizer.bands = $event"
+      />
+    </template>
+    <template #lyrics>
+      <section class="settings-section">
+        <SettingsSectionHeader title="歌词" resettable @reset="store.resetSettings(LYRICS_KEYS)" />
+        <SettingSlider
+          v-model="settings.lyricScale"
+          label="歌词缩放"
+          description="在适合当前窗口的字号上按比例调整"
+          :value-text="lyricScaleLabel"
+          :min="0.75"
+          :max="1.5"
           :step="0.05"
         />
-      </Collapse>
-      <SettingToggleRow
-        v-model="settings.lyricTranslation"
-        label="歌词翻译"
-        description="显示歌词中解析出的翻译文本"
-      />
-      <SettingToggleRow
-        v-model="settings.lyricRomanization"
-        label="歌词罗马音"
-        description="独立显示歌词中已有的罗马音或音译"
-      />
-      <template v-if="capabilities.lyricsWindowSupported">
         <SettingToggleRow
-          v-model="separateWindowScale"
-          label="小窗独立字号"
-          description="关闭后，小窗跟随上面的歌词缩放比例"
+          v-model="settings.lyricAnimation"
+          label="歌词动画"
+          description="开启牵拉、逐字扫光与状态切换动画"
         />
-        <Collapse :expanded="separateWindowScale">
+        <!-- 弹簧只在牵拉动画开着时才有作用对象 -->
+        <Collapse :expanded="settings.lyricAnimation">
           <SettingSlider
-            v-model="windowScale"
-            label="小窗歌词缩放"
-            :value-text="`${Math.round(windowScale * 100)}%`"
-            :min="0.75"
-            :max="1.5"
+            v-model="settings.lyricSpring"
+            label="歌词弹簧"
+            description="越大越紧绷利落,越小越绵软拖沓"
+            :value-text="lyricSpringLabel"
+            :min="0.5"
+            :max="2"
             :step="0.05"
           />
         </Collapse>
-      </template>
-      <SettingToggleRow
-        v-if="!capabilities.portableDevice"
-        v-model="settings.progressLyricPreview"
-        label="进度条歌词预览"
-        description="悬停进度条时显示对应时间的歌词"
-      />
-      <button
-        v-if="capabilities.lyricsWindowSupported"
-        class="setting-row window-setting-row"
-        :class="{ active: capabilities.lyricsWindowOpen }"
-        :disabled="!capabilities.hasCurrentTrack"
-        @click="emit('openLyricsWindow')"
-      >
-        <span>
-          <strong>歌词小窗</strong>
-          <small>{{
-            capabilities.lyricsWindowOpen
-              ? '小窗已打开'
-              : capabilities.hasCurrentTrack
-                ? '在独立小窗中显示歌曲与歌词'
-                : '选择歌曲后可用'
-          }}</small>
-        </span>
-        <PictureInPicture2 :size="20" />
-      </button>
-    </section>
-
-    <section class="settings-section">
-      <SettingsSectionHeader title="显示" resettable @reset="store.resetSettings(DISPLAY_KEYS)" />
-      <SettingToggleRow
-        v-model="settings.autoHideChrome"
-        label="自动隐藏上下控件"
-        description="鼠标闲置 30 秒后只保留歌曲内容"
-      />
-      <div
-        v-if="!capabilities.portableDevice && capabilities.fullscreenSupported"
-        class="setting-row toggle-row"
-      >
-        <span
-          ><strong>全屏模式</strong
-          ><small>{{
-            capabilities.fullscreenActive ? '已进入全屏' : '让播放器占满整个屏幕'
-          }}</small></span
+        <SettingToggleRow
+          v-model="settings.lyricTranslation"
+          label="歌词翻译"
+          description="显示歌词中解析出的翻译文本"
+        />
+        <SettingToggleRow
+          v-model="settings.lyricRomanization"
+          label="歌词罗马音"
+          description="独立显示歌词中已有的罗马音或音译"
+        />
+        <template v-if="capabilities.lyricsWindowSupported">
+          <SettingToggleRow
+            v-model="separateWindowScale"
+            label="小窗独立字号"
+            description="关闭后，小窗跟随上面的歌词缩放比例"
+          />
+          <Collapse :expanded="separateWindowScale">
+            <SettingSlider
+              v-model="windowScale"
+              label="小窗歌词缩放"
+              :value-text="`${Math.round(windowScale * 100)}%`"
+              :min="0.75"
+              :max="1.5"
+              :step="0.05"
+            />
+          </Collapse>
+        </template>
+        <SettingToggleRow
+          v-if="!capabilities.portableDevice"
+          v-model="settings.progressLyricPreview"
+          label="进度条歌词预览"
+          description="悬停进度条时显示对应时间的歌词"
+        />
+        <button
+          v-if="capabilities.lyricsWindowSupported"
+          class="setting-row window-setting-row"
+          :class="{ active: capabilities.lyricsWindowOpen }"
+          :disabled="!capabilities.hasCurrentTrack"
+          @click="emit('openLyricsWindow')"
         >
-        <ToggleSwitch
-          :model-value="capabilities.fullscreenActive"
-          aria-label="全屏模式"
-          @update:model-value="emit('toggleFullscreenMode')"
-        />
-      </div>
-    </section>
-
-    <section class="settings-section">
-      <SettingsSectionHeader
-        title="背景"
-        resettable
-        @reset="store.resetSettings(BACKGROUND_KEYS)"
-      />
-      <SettingToggleRow
-        v-model="settings.dynamicBackground"
-        label="动态封面背景"
-        description="使用当前封面渲染背景"
-      />
-      <!-- 关掉封面背景后这两项没有作用对象,收起来而不是留一排拖不动结果的滑块 -->
-      <Collapse :expanded="settings.dynamicBackground">
-        <SettingSlider
-          v-model="settings.backgroundBlur"
-          label="背景模糊"
-          :value-text="`${settings.backgroundBlur}px`"
-          :min="45"
-          :max="130"
-        />
-        <SettingSlider
-          v-model="settings.backgroundSaturation"
-          label="背景饱和度"
-          :value-text="backgroundSaturationLabel"
-          :min="0.7"
-          :max="1.8"
-          :step="0.05"
-        />
-      </Collapse>
-      <SettingToggleRow
-        v-model="settings.beatFlash"
-        label="节奏闪光"
-        description="背景随音乐的节奏亮起"
-      />
-      <!-- 同上:闪光关掉后亮度 / 频率 / 延迟都无处生效 -->
-      <Collapse :expanded="settings.beatFlash">
-        <BeatAnalysisSettings :status="beatBuild" @retry="emit('beatBuildRetry')" />
-        <SettingSlider
-          v-model="settings.beatBrightness"
-          label="节奏亮度"
-          :value-text="beatBrightnessLabel"
-          :min="0"
-          :max="0.65"
-          :step="0.05"
-        />
-        <SettingSlider
-          v-model="beatFlashRateIndex"
-          label="闪烁频率"
-          :value-text="beatFlashRateLabel"
-          :min="0"
-          :max="BEAT_FLASH_RATE_STEPS.length - 1"
-        />
-        <SettingSlider
-          v-model="settings.beatVisualDelay"
-          label="闪光延迟"
-          description="闪光比声音早就调大,晚就调小"
-          :value-text="beatVisualDelayLabel"
-          :min="-100"
-          :max="300"
-          :step="10"
-        />
-      </Collapse>
-    </section>
-
-    <section v-if="debugSettingsAvailable" class="settings-section">
-      <SettingsSectionHeader title="调试" />
-      <SettingToggleRow
-        v-model="settings.debugPanelEnabled"
-        label="播放器调试面板"
-        description="开启后可从顶部查看播放与预分析状态"
-      />
-    </section>
-
-    <section class="settings-section about-section">
-      <SettingsSectionHeader title="关于" />
-      <button
-        v-if="capabilities.canInstall && !capabilities.isInstalled"
-        class="setting-row install-row"
-        @click="emit('installPwa')"
-      >
-        <span><strong>安装 Meliora</strong><small>添加到桌面并支持离线启动</small></span>
-        <Download :size="19" />
-      </button>
-      <button
-        v-if="capabilities.iosInstallAvailable && !capabilities.canInstall"
-        class="setting-row install-row"
-        @click="emit('showIosInstallGuide')"
-      >
-        <span><strong>安装 Meliora</strong><small>通过 Safari 分享菜单添加到主屏幕</small></span>
-        <Download :size="19" />
-      </button>
-      <div class="about-block">
-        <div class="about-headline">
-          <span class="about-name">Meliora</span>
-          <span class="about-version">v{{ APP_VERSION }}</span>
+          <span>
+            <strong>歌词小窗</strong>
+            <small>{{
+              capabilities.lyricsWindowOpen
+                ? '小窗已打开'
+                : capabilities.hasCurrentTrack
+                  ? '在独立小窗中显示歌曲与歌词'
+                  : '选择歌曲后可用'
+            }}</small>
+          </span>
+          <PictureInPicture2 :size="20" />
+        </button>
+      </section>
+      <section class="settings-section song-info-section">
+        <SettingsSectionHeader title="歌曲信息" />
+        <!-- 固定信息槽位,异步字段只替换内容,不再插入/移除整行挤动下方设置。 -->
+        <div class="song-info-content" :aria-busy="songInfoLoading">
+          <p class="song-info-title" :title="songTitle">
+            <SongInfoValue :loading="songInfoLoading" :value-key="songTitle">{{
+              songTitle || '尚未选择歌曲'
+            }}</SongInfoValue>
+          </p>
+          <p class="song-info-artist" :title="songInfo?.track?.artist">
+            <SongInfoValue :loading="songInfoLoading" :value-key="songInfo?.track?.artist">{{
+              songInfo?.track ? songInfo.track.artist || '未知歌手' : '选择歌曲后查看歌曲和歌词来源'
+            }}</SongInfoValue>
+          </p>
+          <dl class="song-info-details">
+            <div class="song-info-row">
+              <dt>专辑</dt>
+              <dd class="song-info-album" :title="songInfo?.track?.album">
+                <SongInfoValue :loading="songInfoLoading" :value-key="songInfo?.track?.album">{{
+                  songInfo?.track?.album || '未提供'
+                }}</SongInfoValue>
+              </dd>
+            </div>
+            <div class="song-info-row">
+              <dt>时长</dt>
+              <dd class="song-info-duration" :aria-busy="durationLoading">
+                <SongInfoValue
+                  :loading="durationLoading"
+                  :value-key="songDuration"
+                  loading-label="正在加载时长"
+                >
+                  {{ songDuration || (songInfo?.track ? '暂不可用' : '—') }}
+                </SongInfoValue>
+              </dd>
+            </div>
+            <div class="song-info-row">
+              <dt>音乐类型</dt>
+              <dd>
+                <SongInfoValue :loading="songInfoLoading" :value-key="songInfo?.track?.kind">{{
+                  songInfo?.track ? MUSIC_KIND_LABELS[songInfo.track.kind] : '—'
+                }}</SongInfoValue>
+              </dd>
+            </div>
+            <div
+              class="song-info-row song-info-lyrics"
+              aria-live="polite"
+              aria-atomic="true"
+              :aria-busy="lyricSourceLoading"
+            >
+              <dt>歌词来源</dt>
+              <dd class="song-info-lyric-value">
+                <SongInfoValue
+                  :loading="lyricSourceLoading"
+                  :value-key="lyricSourceKey"
+                  loading-label="正在加载歌词来源"
+                >
+                  <span class="song-info-lyric-result">
+                    <span class="song-info-source" :title="lyricSourceLabel">
+                      {{ songInfo?.track ? lyricSourceLabel : '—' }}
+                    </span>
+                    <span v-if="lyricSourceReady" class="song-info-timing">
+                      {{ songInfo?.hasWordTiming ? '逐字' : '逐行' }}
+                    </span>
+                  </span>
+                </SongInfoValue>
+              </dd>
+            </div>
+          </dl>
         </div>
-        <a class="about-repo" :href="REPO_URL" target="_blank" rel="noopener noreferrer">
-          <GitFork :size="16" />
-          <span>GitHub 仓库</span>
-        </a>
-      </div>
-    </section>
-  </div>
+        <SongLyricsSettings
+          :get-calibration-lyrics="getCalibrationLyrics"
+          :get-playback-state="getPlaybackState"
+        />
+      </section>
+    </template>
+    <template #appearance>
+      <section class="settings-section">
+        <SettingsSectionHeader title="显示" resettable @reset="store.resetSettings(DISPLAY_KEYS)" />
+        <SettingToggleRow
+          v-model="settings.autoHideChrome"
+          label="自动隐藏上下控件"
+          description="鼠标闲置 30 秒后只保留歌曲内容"
+        />
+        <div
+          v-if="!capabilities.portableDevice && capabilities.fullscreenSupported"
+          class="setting-row toggle-row"
+        >
+          <span
+            ><strong>全屏模式</strong
+            ><small>{{
+              capabilities.fullscreenActive ? '已进入全屏' : '让播放器占满整个屏幕'
+            }}</small></span
+          >
+          <ToggleSwitch
+            :model-value="capabilities.fullscreenActive"
+            aria-label="全屏模式"
+            @update:model-value="emit('toggleFullscreenMode')"
+          />
+        </div>
+      </section>
+      <section class="settings-section">
+        <SettingsSectionHeader
+          title="背景"
+          resettable
+          @reset="store.resetSettings(BACKGROUND_KEYS)"
+        />
+        <SettingToggleRow
+          v-model="settings.dynamicBackground"
+          label="动态封面背景"
+          description="使用当前封面渲染背景"
+        />
+        <!-- 关掉封面背景后这两项没有作用对象,收起来而不是留一排拖不动结果的滑块 -->
+        <Collapse :expanded="settings.dynamicBackground">
+          <SettingSlider
+            v-model="settings.backgroundBlur"
+            label="背景模糊"
+            :value-text="`${settings.backgroundBlur}px`"
+            :min="45"
+            :max="130"
+          />
+          <SettingSlider
+            v-model="settings.backgroundSaturation"
+            label="背景饱和度"
+            :value-text="backgroundSaturationLabel"
+            :min="0.7"
+            :max="1.8"
+            :step="0.05"
+          />
+        </Collapse>
+        <SettingToggleRow
+          v-model="settings.beatFlash"
+          label="节奏闪光"
+          description="背景随音乐的节奏亮起"
+        />
+        <!-- 同上:闪光关掉后亮度 / 频率 / 延迟都无处生效 -->
+        <Collapse :expanded="settings.beatFlash">
+          <BeatAnalysisSettings :status="beatBuild" @retry="emit('beatBuildRetry')" />
+          <SettingSlider
+            v-model="settings.beatBrightness"
+            label="节奏亮度"
+            :value-text="beatBrightnessLabel"
+            :min="0"
+            :max="0.65"
+            :step="0.05"
+          />
+          <SettingSlider
+            v-model="beatFlashRateIndex"
+            label="闪烁频率"
+            :value-text="beatFlashRateLabel"
+            :min="0"
+            :max="BEAT_FLASH_RATE_STEPS.length - 1"
+          />
+          <SettingSlider
+            v-model="settings.beatVisualDelay"
+            label="闪光延迟"
+            description="闪光比声音早就调大,晚就调小"
+            :value-text="beatVisualDelayLabel"
+            :min="-100"
+            :max="300"
+            :step="10"
+          />
+        </Collapse>
+      </section>
+    </template>
+    <template #more="{ visited }">
+      <section class="settings-section">
+        <SettingsSectionHeader
+          title="性能与多标签页"
+          resettable
+          @reset="store.resetSettings(SYSTEM_KEYS)"
+        />
+        <SettingToggleRow
+          v-model="settings.adaptivePerformance"
+          label="自动性能调整"
+          description="卡顿或缓冲时，自动降低背景动效和预分析负担"
+        />
+        <SettingToggleRow
+          v-model="settings.tabCoordination"
+          label="多标签页协调"
+          description="只让一个页面出声；关闭后，各页面独立播放"
+        />
+        <Collapse :expanded="settings.tabCoordination">
+          <SettingToggleRow
+            v-model="settings.syncTabPlayback"
+            label="同步所有标签页播放"
+            description="共享歌曲、歌词和进度，在任意页面控制播放"
+          />
+        </Collapse>
+      </section>
+      <ListeningStatsSection
+        v-if="listeningStats && clearListeningHistory"
+        :stats="listeningStats"
+        :track="songInfo?.track"
+        :on-clear="clearListeningHistory"
+      />
+      <CacheManagementSection v-if="visited" :current-track="songInfo?.track" />
+      <section v-if="debugSettingsAvailable" class="settings-section">
+        <SettingsSectionHeader title="调试" />
+        <SettingToggleRow
+          v-model="settings.debugPanelEnabled"
+          label="播放器调试面板"
+          description="开启后可从顶部查看播放与预分析状态"
+        />
+      </section>
+      <section class="settings-section about-section">
+        <SettingsSectionHeader title="关于" />
+        <button
+          v-if="capabilities.canInstall && !capabilities.isInstalled"
+          class="setting-row install-row"
+          @click="emit('installPwa')"
+        >
+          <span><strong>安装 Meliora</strong><small>添加到桌面并支持离线启动</small></span>
+          <Download :size="19" />
+        </button>
+        <button
+          v-if="capabilities.iosInstallAvailable && !capabilities.canInstall"
+          class="setting-row install-row"
+          @click="emit('showIosInstallGuide')"
+        >
+          <span><strong>安装 Meliora</strong><small>通过 Safari 分享菜单添加到主屏幕</small></span>
+          <Download :size="19" />
+        </button>
+        <div class="about-block">
+          <div class="about-headline">
+            <span class="about-name">Meliora</span>
+            <span class="about-version">v{{ APP_VERSION }}</span>
+          </div>
+          <a class="about-repo" :href="REPO_URL" target="_blank" rel="noopener noreferrer">
+            <GitFork :size="16" />
+            <span>GitHub 仓库</span>
+          </a>
+        </div>
+      </section>
+    </template>
+  </SettingsTabs>
 </template>
 
 <style scoped lang="scss">
@@ -593,24 +622,6 @@
     color: var(--text-subtle);
     font-size: 0.73rem;
     line-height: 1.6;
-  }
-  .settings-scroll {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-    padding-right: 2px;
-    padding-bottom: 18px;
-    mask-image: linear-gradient(
-      180deg,
-      transparent 0,
-      #000 24px,
-      #000 calc(100% - 34px),
-      transparent 100%
-    );
-    scrollbar-width: none;
-  }
-  .settings-scroll::-webkit-scrollbar {
-    display: none;
   }
   .settings-section {
     overflow: hidden;
@@ -843,17 +854,6 @@
   }
 
   @media (max-width: 720px) {
-    .settings-scroll {
-      margin: 0 -2px;
-      padding: 0 2px max(56px, calc(18px + env(safe-area-inset-bottom)));
-      mask-image: linear-gradient(
-        180deg,
-        transparent 0,
-        #000 18px,
-        #000 calc(100% - 72px),
-        transparent 100%
-      );
-    }
     .settings-section {
       margin-top: 9px;
       border-radius: 20px;

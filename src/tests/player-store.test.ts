@@ -518,6 +518,10 @@ describe('player settings migration', () => {
     expect(result.volume).toBe(0.72)
     expect(result.playMode).toBe('loop')
     expect(result.smoothTrackChange).toBe(true)
+    expect(result.autoTransitionMode).toBe('standard')
+    expect(migrateSettings({ autoTransitionMode: 'smart-mix' }).autoTransitionMode).toBe(
+      'smart-mix',
+    )
     expect(result.autoHideChrome).toBe(true)
     expect(result.debugPanelEnabled).toBe(false)
     expect(result.lyricTranslation).toBe(true)

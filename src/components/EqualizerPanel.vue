@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import SegmentedControl from './SegmentedControl.vue'
   import { computed } from 'vue'
   import {
     EQ_BAND_LABELS,
@@ -65,20 +66,17 @@
         <label
           ><span><strong>预设</strong></span></label
         >
-        <div class="eq-preset-list">
+        <SegmentedControl :value="preset" wrap role="group" aria-label="均衡器预设">
           <button
             v-for="item in EQ_PRESET_LIST"
             :key="item.id"
-            class="eq-preset-button"
-            :class="{
-              active: preset === item.id,
-              'is-custom': item.id === 'custom',
-            }"
+            type="button"
+            :aria-pressed="preset === item.id"
             @click="selectPreset(item.id)"
           >
             {{ item.name }}
           </button>
-        </div>
+        </SegmentedControl>
       </div>
       <div class="setting-group eq-bands">
         <label v-for="(label, index) in EQ_BAND_LABELS" :key="label" class="eq-band-row">
@@ -162,49 +160,6 @@
     flex-direction: column;
     align-items: stretch;
     gap: 10px;
-  }
-  .eq-preset-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .eq-preset-button {
-    padding: 7px 12px;
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    border-radius: 12px;
-    corner-shape: squircle;
-    background: rgba(255, 255, 255, 0.06);
-    color: rgba(255, 255, 255, 0.74);
-    font-family: inherit;
-    font-size: 0.8rem;
-    font-weight: 560;
-    cursor: pointer;
-    transition:
-      color 0.18s ease,
-      background 0.18s ease,
-      border-color 0.18s ease,
-      opacity 0.18s ease;
-  }
-  .eq-preset-button:hover:not(:disabled) {
-    color: #fff;
-    background: rgba(255, 255, 255, 0.1);
-  }
-  .eq-preset-button.active {
-    color: rgba(255, 255, 255, 0.96);
-    background: rgba(var(--accent-rgb), 0.16);
-    border-color: rgba(var(--accent-rgb), 0.32);
-  }
-  .eq-preset-button:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-  .eq-preset-button.active:disabled {
-    color: rgba(255, 255, 255, 0.74);
-    background: rgba(255, 255, 255, 0.06);
-    border-color: rgba(255, 255, 255, 0.14);
-  }
-  .eq-preset-button.is-custom {
-    font-style: italic;
   }
   .eq-bands {
     display: flex;

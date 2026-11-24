@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { hasTrackLyricsSource, loadTrackLyrics } from '../services/lyrics'
 import { loadConfiguredTracks, loadMusicConfig } from '../services/music'
 import type { PublicMusicConfig } from '../../shared/music-config'
+import { trackIdentity } from '../core/library/tracks'
 import type { MusicProviderAdapter } from '../services/music-adapters/types'
 
 function createDeferred<T>() {
@@ -40,7 +41,13 @@ describe('music service', () => {
         { server: 'tencent', playlistId: 'two' },
       ],
       localTracks: [
-        { id: 'local', title: 'Local Song', artist: 'Artist', audio: '/music/local.mp3' },
+        {
+          id: 'local',
+          title: 'Local Song',
+          artist: 'Artist',
+          audio: '/music/local.mp3',
+          cover: '/local-cover.jpg',
+        },
       ],
     }
     vi.stubGlobal(
@@ -57,6 +64,7 @@ describe('music service', () => {
     )
 
     const result = await loadConfiguredTracks(config)
+    expect(result.playlists.find((item) => item.id === 'local')?.cover).toBe('/local-cover.jpg')
     expect(result.failedSources).toBe(1)
     expect(result.tracks.map((track) => track.title)).toEqual(['Remote Song', 'Local Song'])
     expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual([
@@ -69,7 +77,9 @@ describe('music service', () => {
     const config: PublicMusicConfig = {
       siteName: 'test',
       apiEndpoint: 'https://custom.example.com/music',
-      playlists: [{ server: 'netease', playlistId: 'adapter-source' }],
+      playlists: [
+        { server: 'netease', playlistId: 'adapter-source', name: '夜航', cover: '/night.jpg' },
+      ],
       localTracks: [],
     }
     const fetchMock = vi.fn()
@@ -94,6 +104,15 @@ describe('music service', () => {
     })
 
     expect(result).toEqual({
+      playlists: [
+        {
+          id: 'netease:adapter-source',
+          label: '夜航',
+          platform: '网易云音乐',
+          cover: '/night.jpg',
+          trackKeys: [trackIdentity(result.tracks[0]!)],
+        },
+      ],
       failedSources: 0,
       tracks: [
         {
@@ -162,7 +181,12 @@ describe('music service', () => {
         kind: 'remote',
       },
     ])
-    expect((await result).tracks).toEqual([first])
+    const loaded = await result
+    expect(loaded.tracks).toEqual([first])
+    expect(loaded.playlists.map(({ id, trackKeys }) => [id, trackKeys])).toEqual([
+      ['netease:slow', [trackIdentity(first)]],
+      ['local', [trackIdentity(first)]],
+    ])
     expect(first.id).toBe('local:first')
   })
 

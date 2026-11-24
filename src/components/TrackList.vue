@@ -24,10 +24,10 @@
     X,
   } from '@lucide/vue'
   import type { Track } from '../core/types'
-  import { LIBRARY_VIEWS, type LibraryView } from '../core/library/personal-library'
+  import type { LibraryPlaylist } from '../services/music'
   import { useCoverCache } from '../composables/useCoverCache'
-  import { isReducedMotion, onReducedMotionChange } from '../platform/web/reduced-motion'
   import Dropdown from './Dropdown.vue'
+  import PlaylistIdentity from './PlaylistIdentity.vue'
 
   const props = withDefaults(
     defineProps<{
@@ -37,7 +37,9 @@
       isPlaying: boolean
       loading: boolean
       query: string
-      view?: LibraryView
+      playlistId?: string
+      playlists?: readonly Omit<LibraryPlaylist, 'trackKeys'>[]
+      queueMode?: boolean
       favoriteIds?: readonly string[]
       loadFailed?: boolean
       /** 节拍分析不可用时(iOS 后台安全模式 / CORS 降级)回退显示序号而非静止频谱柱 */
@@ -46,7 +48,8 @@
     {
       loadFailed: false,
       spectrumAvailable: true,
-      view: 'all',
+      playlistId: '',
+      playlists: () => [],
       favoriteIds: () => [],
     },
   )
@@ -55,7 +58,7 @@
     'update:query': [value: string]
     select: [track: Track]
     reload: []
-    'update:view': [value: LibraryView]
+    'update:playlistId': [id: string]
     enqueue: [track: Track, next: boolean]
     remove: [id: string]
     move: [fromId: string, toId: string]
@@ -86,20 +89,26 @@
   const actionsTrackId = ref<string | null>(null)
   const sorting = ref(false)
   const sortButton = ref<HTMLButtonElement | null>(null)
-  const navigationRef = ref<HTMLElement | null>(null)
-  const libraryId = useId()
-  const selectedViewIndex = computed(() =>
-    Math.max(
-      0,
-      LIBRARY_VIEWS.findIndex((item) => item.value === props.view),
-    ),
+  const selectedPlaylist = computed(() =>
+    props.playlists.find((item) => item.id === props.playlistId),
   )
+  const choosingPlaylist = ref(false)
+  const playlistQuery = ref('')
+  const playlistTrigger = ref<HTMLButtonElement | null>(null)
+  const playlistList = ref<HTMLElement | null>(null)
+  const visiblePlaylists = computed(() => {
+    const query = playlistQuery.value.trim().toLowerCase()
+    return props.playlists.filter((item) =>
+      (item.label + ' ' + item.platform).toLowerCase().includes(query),
+    )
+  })
+  const libraryId = useId()
   const actionMenu = ref<InstanceType<typeof Dropdown> | null>(null)
   const actionsTrack = computed(() =>
     props.tracks.find((track) => track.id === actionsTrackId.value),
   )
   const favoriteIds = computed(() => new Set(props.favoriteIds))
-  const canSort = computed(() => props.view === 'queue' && !props.query.trim())
+  const canSort = computed(() => props.queueMode && !props.query.trim())
   const canReorder = computed(() => sorting.value && canSort.value)
   const dragTrackId = ref<string | null>(null)
   const dropTrackId = ref<string | null>(null)
@@ -119,36 +128,6 @@
   let longPressX = 0
   let longPressY = 0
   let suppressedClick: { id: string; until: number } | null = null
-  let categoryAnimation: Animation | null = null
-
-  function stopCategoryAnimation(): void {
-    categoryAnimation?.cancel()
-    categoryAnimation = null
-  }
-  const releaseReducedMotion = onReducedMotionChange((reduced) => {
-    if (reduced) stopCategoryAnimation()
-  })
-  watch(
-    () => props.view,
-    () => {
-      stopCategoryAnimation()
-      const list = containerRef.value
-      if (!list?.animate || isReducedMotion()) return
-      // Animate the bounded viewport, not the potentially thousands-of-pixels tall spacer.
-      const animation = list.animate(
-        [
-          { opacity: 0, filter: 'blur(4px)', transform: 'translateY(7px)' },
-          { opacity: 1, filter: 'blur(0)', transform: 'translateY(0)' },
-        ],
-        { duration: 320, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' },
-      )
-      categoryAnimation = animation
-      animation.onfinish = () => {
-        if (categoryAnimation === animation) categoryAnimation = null
-      }
-    },
-    { flush: 'post' },
-  )
 
   async function showActions(track: Track, event: MouseEvent | KeyboardEvent): Promise<void> {
     event.preventDefault()
@@ -169,47 +148,38 @@
     await actionMenu.value?.openAt(point, trigger)
   }
 
-  function selectCategory(view: LibraryView): void {
+  function togglePlaylistList(keyboard = false): void {
     actionMenu.value?.dismiss()
-    if (view !== props.view) emit('update:view', view)
-  }
-
-  function revealCategory(view: LibraryView): void {
-    const navigation = navigationRef.value
-    const button = navigation?.querySelector<HTMLElement>(`[data-library-view="${view}"]`)
-    if (!navigation || !button) return
-    const left = button.offsetLeft
-    const right = left + button.offsetWidth
-    const target =
-      left < navigation.scrollLeft
-        ? left
-        : right > navigation.scrollLeft + navigation.clientWidth
-          ? right - navigation.clientWidth
-          : navigation.scrollLeft
-    if (target !== navigation.scrollLeft) {
-      navigation.scrollTo({ left: target, behavior: isReducedMotion() ? 'auto' : 'smooth' })
+    playlistQuery.value = ''
+    choosingPlaylist.value = !choosingPlaylist.value
+    if (!choosingPlaylist.value) {
+      playlistTrigger.value?.focus({ preventScroll: true })
+    } else if (keyboard) {
+      void nextTick(() => {
+        const list = playlistList.value
+        const row = list?.querySelector<HTMLButtonElement>('[aria-current="true"]')
+        row?.focus({ preventScroll: true })
+        if (list && row) {
+          const top = row.offsetTop
+          if (top < list.scrollTop || top + row.offsetHeight > list.scrollTop + list.clientHeight) {
+            list.scrollTop = top
+          }
+        }
+      })
     }
   }
 
-  function handleCategoryKey(event: KeyboardEvent, index: number): void {
-    let nextIndex: number
-    if (event.key === 'ArrowRight') nextIndex = (index + 1) % LIBRARY_VIEWS.length
-    else if (event.key === 'ArrowLeft')
-      nextIndex = (index - 1 + LIBRARY_VIEWS.length) % LIBRARY_VIEWS.length
-    else if (event.key === 'Home') nextIndex = 0
-    else if (event.key === 'End') nextIndex = LIBRARY_VIEWS.length - 1
-    else return
-    const next = LIBRARY_VIEWS[nextIndex]
-    if (!next) return
-    event.preventDefault()
-    event.stopPropagation()
-    navigationRef.value
-      ?.querySelector<HTMLButtonElement>(`[data-library-view="${next.value}"]`)
-      ?.focus({ preventScroll: true })
-    selectCategory(next.value)
+  function choosePlaylist(id: string): void {
+    emit('update:playlistId', id)
+    togglePlaylistList()
   }
 
-  watch([() => props.view, navigationRef], () => revealCategory(props.view), { flush: 'post' })
+  watch(
+    () => props.playlists.length,
+    (count) => {
+      if (!count && choosingPlaylist.value) togglePlaylistList()
+    },
+  )
 
   function activateTrack(track: Track, event: MouseEvent): void {
     if (suppressedClick?.id === track.id && Date.now() <= suppressedClick.until) {
@@ -228,6 +198,12 @@
   }
 
   function handleEscape(event: KeyboardEvent): void {
+    if (choosingPlaylist.value) {
+      event.stopPropagation()
+      event.preventDefault()
+      togglePlaylistList()
+      return
+    }
     if (!sorting.value) return
     event.stopPropagation()
     event.preventDefault()
@@ -242,8 +218,7 @@
 
   function focusAvailableTrack(): void {
     const firstTrack = containerRef.value?.querySelector<HTMLButtonElement>('.track-select')
-    const target =
-      firstTrack ?? navigationRef.value?.querySelector<HTMLButtonElement>('[aria-selected="true"]')
+    const target = firstTrack ?? containerRef.value
     target?.focus({ preventScroll: true })
   }
 
@@ -441,7 +416,7 @@
   }
 
   watch(
-    () => [props.view, props.query],
+    () => [props.playlistId, props.query],
     () => {
       actionsTrackId.value = null
       sorting.value = false
@@ -568,7 +543,6 @@
       resizeObserver = new ResizeObserver((entries) => {
         const entry = entries[0]
         if (entry) containerHeight.value = entry.contentRect.height
-        revealCategory(props.view)
       })
       resizeObserver.observe(el)
     },
@@ -599,8 +573,6 @@
     },
   )
   onBeforeUnmount(() => {
-    stopCategoryAnimation()
-    releaseReducedMotion()
     cancelLongPress()
     endDrag()
     window.clearTimeout(scrollTimer)
@@ -616,10 +588,32 @@
 <template>
   <section class="track-panel" @keydown.esc="handleEscape">
     <header class="track-header">
-      <div class="track-heading">
-        <h2 class="library-title">曲库</h2>
-        <p>{{ total }} 首歌曲</p>
-      </div>
+      <button
+        ref="playlistTrigger"
+        type="button"
+        class="playlist-trigger"
+        :aria-controls="`${libraryId}-${choosingPlaylist ? 'panel' : 'playlists'}`"
+        :disabled="!playlists.length"
+        :aria-label="
+          choosingPlaylist
+            ? '返回歌曲列表'
+            : selectedPlaylist
+              ? `选择歌单，当前：${selectedPlaylist.label}`
+              : '选择歌单'
+        "
+        @click="togglePlaylistList($event.detail === 0)"
+      >
+        <span class="playlist-heading">
+          <Transition name="meta-swap" mode="out-in">
+            <span :key="selectedPlaylist?.id" class="playlist-heading-content">
+              <PlaylistIdentity
+                :playlist="selectedPlaylist"
+                :placeholder="loading ? '正在加载歌单' : '暂无歌单'"
+              />
+            </span>
+          </Transition>
+        </span>
+      </button>
       <span class="track-header-controls">
         <button v-if="sorting" ref="sortButton" class="sort-done" @click="finishSorting">
           完成排序
@@ -629,37 +623,35 @@
     </header>
 
     <div class="list-toolbar">
-      <div ref="navigationRef" class="library-navigation">
-        <div class="library-view-tabs" role="tablist" aria-label="曲库分类">
-          <button
-            v-for="(tab, index) in LIBRARY_VIEWS"
-            :id="`${libraryId}-tab-${tab.value}`"
-            :key="tab.value"
-            type="button"
-            class="library-view-tab"
-            role="tab"
-            :data-library-view="tab.value"
-            :aria-selected="view === tab.value"
-            :aria-controls="`${libraryId}-panel`"
-            :tabindex="view === tab.value ? 0 : -1"
-            @click="selectCategory(tab.value)"
-            @keydown="handleCategoryKey($event, index)"
-            @focus="revealCategory(tab.value)"
-          >
-            {{ tab.label }}
-          </button>
-          <span
-            class="library-view-indicator"
-            :style="{ transform: `translateX(calc(${selectedViewIndex} * (100% + 8px)))` }"
-            aria-hidden="true"
-          />
-        </div>
-      </div>
       <div class="search-row">
         <label class="search-box">
           <Search :size="16" />
-          <input v-model="debouncedQuery" type="search" aria-label="搜索歌曲" placeholder="搜索" />
-          <button v-if="debouncedQuery" aria-label="清空搜索" @click="clearSearch">
+          <input
+            v-if="choosingPlaylist"
+            v-model="playlistQuery"
+            type="search"
+            aria-label="搜索歌单"
+            placeholder="搜索歌单"
+          />
+          <input
+            v-else
+            v-model="debouncedQuery"
+            type="search"
+            aria-label="搜索歌曲"
+            placeholder="搜索"
+          />
+          <button
+            v-if="choosingPlaylist && playlistQuery"
+            aria-label="清空歌单搜索"
+            @click="playlistQuery = ''"
+          >
+            <X :size="14" />
+          </button>
+          <button
+            v-else-if="!choosingPlaylist && debouncedQuery"
+            aria-label="清空搜索"
+            @click="clearSearch"
+          >
             <X :size="14" />
           </button>
         </label>
@@ -675,103 +667,128 @@
       </div>
     </div>
 
-    <div
-      :id="`${libraryId}-panel`"
-      ref="containerRef"
-      class="track-list"
-      role="tabpanel"
-      :aria-labelledby="`${libraryId}-tab-${view}`"
-      :tabindex="tracks.length ? undefined : 0"
-      :class="{ scrolling: isScrolling }"
-      @scroll.passive="handleScroll"
-      @lostpointercapture="endDrag()"
-    >
-      <div
-        v-if="virtualItems.total > 0"
-        class="track-virtual-spacer"
-        :style="{ height: `${virtualItems.totalHeight}px` }"
-      >
+    <div class="library-content" :class="{ choosing: choosingPlaylist }">
+      <div class="library-pages">
         <div
-          v-for="{ track, display, index, offset } in virtualItems.items"
-          :key="track.id"
-          class="track-item"
-          :class="{
-            active: track.id === currentTrackId,
-            focused: track.id === focusPulseTrackId,
-            'drop-target': dropTrackId === track.id,
-            dragging: dragTrackId === track.id,
-            reorderable: canReorder,
-          }"
-          :style="{ position: 'absolute', top: `${offset}px`, left: '0', right: '0' }"
+          :id="`${libraryId}-panel`"
+          ref="containerRef"
+          :inert="choosingPlaylist || undefined"
+          class="track-list"
+          role="region"
+          :aria-label="selectedPlaylist?.label ?? '歌曲列表'"
+          :tabindex="tracks.length ? undefined : 0"
+          :class="{ scrolling: isScrolling }"
+          @scroll.passive="handleScroll"
+          @lostpointercapture="endDrag()"
+        >
+          <div
+            v-if="virtualItems.total > 0"
+            class="track-virtual-spacer"
+            :style="{ height: `${virtualItems.totalHeight}px` }"
+          >
+            <div
+              v-for="{ track, display, index, offset } in virtualItems.items"
+              :key="track.id"
+              class="track-item"
+              :class="{
+                active: track.id === currentTrackId,
+                focused: track.id === focusPulseTrackId,
+                'drop-target': dropTrackId === track.id,
+                dragging: dragTrackId === track.id,
+                reorderable: canReorder,
+              }"
+              :style="{ position: 'absolute', top: `${offset}px`, left: '0', right: '0' }"
+            >
+              <button
+                v-if="canReorder"
+                class="track-drag"
+                :data-reorder-track="track.id"
+                :aria-label="`移动 ${track.title}，方向键上下调整`"
+                title="拖动排序，也可使用上下方向键"
+                @pointerdown="startDrag($event, track)"
+                @keydown.up.prevent="moveTrack(track.id, -1, true)"
+                @keydown.down.prevent="moveTrack(track.id, 1, true)"
+              >
+                <GripVertical :size="16" />
+              </button>
+              <button
+                class="track-select"
+                :data-track-id="track.id"
+                :aria-label="`${sorting ? '排序中' : '播放'} ${track.title} · ${track.artist}`"
+                @click="activateTrack(track, $event)"
+                @contextmenu.prevent="showActions(track, $event)"
+                @keydown="handleActionsKey($event, track)"
+                @pointerdown="startLongPress($event, track)"
+              >
+                <span class="thumb" :class="{ loaded: loadedCovers.has(track.cover ?? track.id) }">
+                  <span class="cover-placeholder"><Music :size="20" fill="currentColor" /></span>
+                  <img
+                    v-if="track.cover && !failedCovers.has(track.cover ?? track.id)"
+                    :src="track.cover"
+                    alt=""
+                    loading="lazy"
+                    @load="markCoverLoaded(track.id, track.cover)"
+                    @error="markCoverFailed(track.id, track.cover)"
+                  />
+                </span>
+                <span class="track-copy">
+                  <strong>
+                    <span class="track-title-main">{{ display.title }}</span>
+                    <span v-if="display.versions.length" class="track-title-versions">
+                      <span
+                        v-for="version in display.versions"
+                        :key="version"
+                        class="track-title-version"
+                      >
+                        {{ version }}
+                      </span>
+                    </span>
+                  </strong>
+                  <small>{{ track.artist }}</small>
+                </span>
+                <span class="track-status">
+                  <span
+                    v-if="track.id === currentTrackId && isPlaying && spectrumAvailable"
+                    :ref="setSpectrumMeter"
+                    class="spectrum-meter"
+                    aria-label="正在播放"
+                  >
+                    <i v-for="band in 5" :key="band" />
+                  </span>
+                  <span v-else>{{ index + 1 }}</span>
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <div v-if="loading && !total" class="list-state"><span class="loader" />正在载入音乐</div>
+          <div v-else-if="loadFailed && !tracks.length" class="list-state">
+            <span class="empty-line">音乐列表载入失败,请稍后重试</span>
+          </div>
+          <div v-else-if="!tracks.length" class="list-state">
+            <span class="empty-line">{{ query ? '没有找到匹配的歌曲' : '暂无歌曲' }}</span>
+          </div>
+        </div>
+        <div
+          :id="`${libraryId}-playlists`"
+          ref="playlistList"
+          :inert="!choosingPlaylist || undefined"
+          class="track-list playlist-list"
+          role="region"
+          aria-label="歌单列表"
         >
           <button
-            v-if="canReorder"
-            class="track-drag"
-            :data-reorder-track="track.id"
-            :aria-label="`移动 ${track.title}，方向键上下调整`"
-            title="拖动排序，也可使用上下方向键"
-            @pointerdown="startDrag($event, track)"
-            @keydown.up.prevent="moveTrack(track.id, -1, true)"
-            @keydown.down.prevent="moveTrack(track.id, 1, true)"
+            v-for="playlist in visiblePlaylists"
+            :key="playlist.id"
+            type="button"
+            class="playlist-row"
+            :aria-current="playlist.id === playlistId ? true : undefined"
+            @click="choosePlaylist(playlist.id)"
           >
-            <GripVertical :size="16" />
+            <PlaylistIdentity :playlist="playlist" />
           </button>
-          <button
-            class="track-select"
-            :data-track-id="track.id"
-            :aria-label="`${sorting ? '排序中' : '播放'} ${track.title} · ${track.artist}`"
-            @click="activateTrack(track, $event)"
-            @contextmenu.prevent="showActions(track, $event)"
-            @keydown="handleActionsKey($event, track)"
-            @pointerdown="startLongPress($event, track)"
-          >
-            <span class="thumb" :class="{ loaded: loadedCovers.has(track.cover ?? track.id) }">
-              <span class="cover-placeholder"><Music :size="20" fill="currentColor" /></span>
-              <img
-                v-if="track.cover && !failedCovers.has(track.cover ?? track.id)"
-                :src="track.cover"
-                alt=""
-                loading="lazy"
-                @load="markCoverLoaded(track.id, track.cover)"
-                @error="markCoverFailed(track.id, track.cover)"
-              />
-            </span>
-            <span class="track-copy">
-              <strong>
-                <span class="track-title-main">{{ display.title }}</span>
-                <span v-if="display.versions.length" class="track-title-versions">
-                  <span
-                    v-for="version in display.versions"
-                    :key="version"
-                    class="track-title-version"
-                  >
-                    {{ version }}
-                  </span>
-                </span>
-              </strong>
-              <small>{{ track.artist }}</small>
-            </span>
-            <span class="track-status">
-              <span
-                v-if="track.id === currentTrackId && isPlaying && spectrumAvailable"
-                :ref="setSpectrumMeter"
-                class="spectrum-meter"
-                aria-label="正在播放"
-              >
-                <i v-for="band in 5" :key="band" />
-              </span>
-              <span v-else>{{ index + 1 }}</span>
-            </span>
-          </button>
+          <div v-if="!visiblePlaylists.length" class="list-state">没有找到匹配的歌单</div>
         </div>
-      </div>
-
-      <div v-if="loading && !total" class="list-state"><span class="loader" />正在载入音乐</div>
-      <div v-else-if="loadFailed && !tracks.length" class="list-state">
-        <span class="empty-line">音乐列表载入失败,请稍后重试</span>
-      </div>
-      <div v-else-if="!tracks.length" class="list-state">
-        <span class="empty-line">{{ query ? '没有找到匹配的歌曲' : '暂无歌曲' }}</span>
       </div>
     </div>
     <Dropdown ref="actionMenu" class="track-context-host" teleport label="歌曲操作">
@@ -799,7 +816,7 @@
               :fill="favoriteIds.has(actionsTrack.id) ? 'currentColor' : 'none'"
             />{{ favoriteIds.has(actionsTrack.id) ? '取消收藏' : '收藏' }}
           </button>
-          <template v-if="view === 'queue'">
+          <template v-if="queueMode">
             <button
               class="library-menu-item"
               :disabled="!canSort || actionsTrack.id === tracks[0]?.id"
@@ -842,23 +859,16 @@
   }
 
   .track-header {
+    position: relative;
+    z-index: 3;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
     flex: 0 0 auto;
-    padding: 0 10px 18px;
-
-    p {
-      margin: 4px 0 0;
-      color: var(--text-subtle);
-      font-size: 0.72rem;
-    }
+    padding: 0 10px 18px 0;
   }
 
-  .track-heading {
-    min-width: 0;
-  }
   .track-header-controls {
     display: flex;
     align-items: center;
@@ -966,6 +976,35 @@
     }
   }
 
+  .library-content {
+    display: grid;
+    grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+    flex: 1;
+    min-height: 0;
+    overflow: clip;
+  }
+  .library-pages {
+    display: grid;
+    grid-template: minmax(0, 1fr) / 100% 100%;
+    min-width: 0;
+    min-height: 0;
+    transform: translateX(-100%);
+  }
+  .library-pages > .track-list {
+    grid-area: 1 / 2;
+    min-width: 0;
+  }
+  .library-pages > .playlist-list {
+    grid-area: 1 / 1;
+  }
+  .library-content.choosing .library-pages {
+    transform: translateX(0);
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .library-pages {
+      transition: transform 320ms cubic-bezier(0.4, 0, 0.2, 1);
+    }
+  }
   .track-list {
     --track-focus-offset: 30px;
     position: relative;
@@ -1023,13 +1062,9 @@
     gap: 8px;
     padding: 8px 10px;
     border: 0;
-    border-radius: 14px;
-    corner-shape: squircle;
-    background: transparent;
     color: var(--text);
     text-align: left;
     cursor: pointer;
-    transition: background 130ms ease;
 
     &.reorderable {
       grid-template-columns: 32px minmax(0, 1fr);
@@ -1039,23 +1074,6 @@
     }
     &.dragging {
       opacity: 0.55;
-    }
-
-    &:hover {
-      background: rgba(255, 255, 255, 0.07);
-    }
-
-    &.active {
-      background: color-mix(in srgb, var(--accent) 17%, transparent);
-
-      .track-copy strong,
-      .track-status {
-        color: var(--accent);
-      }
-
-      .track-title-version {
-        color: color-mix(in srgb, var(--accent) 68%, rgba(255, 255, 255, 0.52));
-      }
     }
 
     &.focused {
@@ -1107,72 +1125,86 @@
     cursor: grab;
     padding: 0;
   }
-  .library-title {
-    margin: 0;
-    color: var(--text);
-    font-size: 1.18rem;
-    font-weight: 700;
-    letter-spacing: -0.035em;
-  }
-  .library-navigation {
+  .playlist-trigger,
+  .playlist-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
     min-width: 0;
-    margin-bottom: 8px;
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
-    scrollbar-width: none;
-
-    &::-webkit-scrollbar {
-      display: none;
-    }
-  }
-  .library-view-tabs {
-    position: relative;
-    display: grid;
-    grid-template-columns: repeat(5, minmax(44px, 1fr));
-    gap: 8px;
-    min-width: 252px;
-  }
-  .library-view-tab {
-    min-width: 0;
-    min-height: 44px;
-    padding: 9px 4px 12px;
     border: 0;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text-subtle);
+    color: var(--text-muted);
     font: inherit;
-    font-size: 0.78rem;
-    font-weight: 550;
-    white-space: nowrap;
     cursor: pointer;
-    transition: color 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .playlist-trigger {
+    --playlist-title-size: 1.12rem;
+    --playlist-art-size: 52px;
+    flex: 1;
+    padding: 6px 10px;
+    border-radius: 12px;
+    background: transparent;
+  }
+  .playlist-heading {
+    flex: 1;
+    min-width: 0;
+    min-height: var(--playlist-art-size);
+  }
+  .playlist-heading-content {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .playlist-trigger:disabled {
+    cursor: default;
+  }
+  .playlist-row {
+    width: 100%;
+    min-height: 66px;
+    padding: 8px 10px;
+  }
+  .track-item,
+  .playlist-row {
+    border-radius: 14px;
+    corner-shape: squircle;
+    background: transparent;
+    transition: background 130ms ease;
 
     &:hover {
-      color: var(--text-muted);
-    }
-    &[aria-selected='true'] {
-      color: var(--text);
+      background: rgba(255, 255, 255, 0.07);
     }
   }
-  .library-view-indicator {
-    position: absolute;
-    inset: auto auto 2px 0;
-    width: calc((100% - 32px) / 5);
-    height: 2px;
-    color: var(--text);
-    font-size: 0.78rem;
-    pointer-events: none;
-    transition: transform 280ms cubic-bezier(0.16, 1, 0.3, 1);
+  .track-item.active,
+  .playlist-row[aria-current='true'] {
+    background: color-mix(in srgb, var(--accent) 17%, transparent);
 
-    &::after {
-      content: '';
-      position: absolute;
-      inset: 0 auto 0 calc(50% - 0.65em);
-      width: 1.3em;
-      border-radius: 2px;
-      background: currentColor;
-      opacity: 0.85;
+    .track-copy strong,
+    .track-status,
+    :deep(.playlist-copy strong) {
+      color: var(--accent);
     }
+
+    .track-title-version {
+      color: color-mix(in srgb, var(--accent) 68%, rgba(255, 255, 255, 0.52));
+    }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .playlist-trigger {
+      transition: background-color 120ms ease-out;
+    }
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .playlist-trigger:not(:disabled):hover {
+      background-color: rgba(255, 255, 255, 0.06);
+    }
+  }
+  .playlist-trigger:focus-visible,
+  .playlist-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .track-list.playlist-list {
+    padding-top: 8px;
+    mask-image: none;
   }
   .library-menu-item {
     display: flex;
@@ -1227,7 +1259,6 @@
   }
   .track-select:focus-visible,
   .sort-done:focus-visible,
-  .library-view-tab:focus-visible,
   .library-menu-item:focus-visible,
   .track-drag:focus-visible {
     outline: 2px solid rgba(255, 255, 255, 0.65);
@@ -1240,8 +1271,6 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .sort-done,
-    .library-view-tab,
-    .library-view-indicator,
     .library-menu-item,
     .track-drag {
       transition: none;
@@ -1253,13 +1282,9 @@
   }
   @media (prefers-contrast: more) {
     .sort-done,
-    .library-view-tab,
     .track-drag,
     .library-menu-item {
       color: var(--text);
-    }
-    .library-view-indicator {
-      height: 3px;
     }
   }
 
@@ -1452,15 +1477,7 @@
     }
 
     .track-header {
-      padding: 2px 10px 16px;
-
-      .library-title {
-        font-size: 1.22rem;
-      }
-      p {
-        margin-top: 4px;
-        font-size: 0.68rem;
-      }
+      padding: 2px 10px 16px 0;
     }
 
     .list-toolbar {
@@ -1496,8 +1513,8 @@
       );
     }
 
-    .track-item {
-      padding: 8px 10px;
+    .track-item,
+    .playlist-row {
       border-radius: 15px;
     }
 
@@ -1524,13 +1541,6 @@
 
     .track-header {
       padding-bottom: 10px;
-
-      .library-title {
-        font-size: 1.08rem;
-      }
-      p {
-        font-size: 0.62rem;
-      }
     }
 
     .search-box {

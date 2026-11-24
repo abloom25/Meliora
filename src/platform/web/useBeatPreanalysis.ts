@@ -26,6 +26,8 @@ import { listeningTrackKey } from '../../core/playback/listening-stats'
 import { isFrequentListeningTrack } from './listening-history'
 import { BEAT_THIS_MODELS, type BeatThisModelId } from '../../core/analysis/beat-this-models'
 import { LruCache } from '../../core/util/lru-cache'
+import { measureMixSilence, type MixAnalysis, type MixSilence } from '../../core/audio/smart-mix'
+import type { BeatAudioData } from './beat-audio-cache'
 import {
   buildBeatTimeline,
   persistKnownBeatCheckpoint,
@@ -47,6 +49,7 @@ const checkpoints = new WeakMap<BeatTimeline, BeatAnalysisCheckpoint>()
 const INTRO_SECONDS = 20
 
 export interface BeatPreanalysisOptions {
+  smartMixEnabled?: Ref<boolean>
   resourcePressure?: Readonly<Ref<PlaybackResourcePressure>>
   track?: Ref<Track | null>
   source: Ref<string>
@@ -136,6 +139,7 @@ export function useBeatPreanalysis(
   const jobRevision = shallowRef(0)
   const backgroundFailures = new Map<string, string>()
   const buildMetrics = new LruCache<string, BeatAnalysisMetrics>(3)
+  const mixSilence = new LruCache<string, { identity?: string; cues: MixSilence }>(4)
   const schedulingPauses = new Set<SchedulingPause>()
   let activePause: SchedulingPause | null = null
   let job: AnalysisJob | null = null
@@ -551,6 +555,15 @@ export function useBeatPreanalysis(
     job = candidate
     publish(candidate)
     const signal = candidate.controller.signal
+    const rememberSilence = (audio: BeatAudioData): void => {
+      if (!options.smartMixEnabled?.value || !isLive(candidate)) return
+      const previous = mixSilence.peek(source)
+      if (previous && previous.identity === audio.identity) return
+      mixSilence.set(source, {
+        identity: audio.identity,
+        cues: measureMixSilence(audio.channels, audio.sampleRate),
+      })
+    }
     void Promise.resolve()
       .then(() => {
         signal.throwIfAborted()
@@ -564,6 +577,7 @@ export function useBeatPreanalysis(
           },
           {
             durationSeconds: candidate.durationSeconds,
+            ...(options.smartMixEnabled?.value ? { onDecodedAudio: rememberSilence } : {}),
             ...(trackKey
               ? { persistent: { trackKey, eligible: () => isFrequentListeningTrack(trackKey) } }
               : {}),
@@ -873,6 +887,14 @@ export function useBeatPreanalysis(
     status,
     timeline,
     provisionalTimeline: shallowReadonly(provisionalTimeline),
+    mixAnalysis(source: string): MixAnalysis {
+      const key = cacheKey(source)
+      const result = job?.key === key && isLive(job) ? job.timeline : null
+      return {
+        timeline: result ?? cache.peek(key) ?? null,
+        silence: mixSilence.peek(source)?.cues,
+      }
+    },
     start,
     reset,
     retry,

@@ -26,8 +26,6 @@
   import { hasTrackLyricsSource } from '../services/lyrics'
   import { usePlayerStore } from '../stores/player'
   import { useLibraryStore } from '../stores/library'
-  import { selectLibraryTracks, type LibraryView } from '../core/library/personal-library'
-  import { filterTracks } from '../core/library/tracks'
   import { usePlayerLibrary } from '../composables/usePlayerLibrary'
   import { usePlayerArtwork } from '../composables/usePlayerArtwork'
   import { usePlayerPanels } from '../composables/usePlayerPanels'
@@ -157,7 +155,6 @@
     next,
     previous,
     selectAndPlay,
-    selectQueuedAndPlay,
     beatBuildStatus,
     retryBeatBuild,
     beatDebug,
@@ -256,29 +253,27 @@
   const lyricsPanelRef = ref<InstanceType<typeof LyricsPanel> | null>(null)
   const getCalibrationLyrics = () => lyricsPanelRef.value?.getCalibrationLyrics() ?? null
   const notice = ref('')
-  const { runtimeConfig, query, loading, loadFailed, sourceWarning, loadTracks } = usePlayerLibrary(
-    {
-      showNotice,
-      clearNotice,
-      onOpenSharedTrack: (track, seconds) => {
-        pause()
-        store.selectTrack(track, store.tracks)
-        seek(seconds ?? 0)
-      },
+  const {
+    runtimeConfig,
+    query,
+    loading,
+    loadFailed,
+    sourceWarning,
+    playlists,
+    selectedPlaylistId,
+    playlistTracks,
+    filteredTracks,
+    loadTracks,
+  } = usePlayerLibrary({
+    showNotice,
+    clearNotice,
+    onOpenSharedTrack: (track, seconds) => {
+      pause()
+      store.selectTrack(track, store.tracks)
+      seek(seconds ?? 0)
     },
-  )
+  })
   const library = useLibraryStore()
-  const libraryView = ref<LibraryView>('all')
-  const libraryTracks = computed(() =>
-    selectLibraryTracks(
-      tracks.value,
-      store.queue,
-      listeningStats.value.trackedTracks,
-      library.favorites,
-      libraryView.value,
-    ),
-  )
-  const filteredTracks = computed(() => filterTracks(libraryTracks.value, query.value))
   const favoriteIds = computed(() =>
     tracks.value.filter(library.isFavorite).map((track) => track.id),
   )
@@ -460,8 +455,7 @@
 
   function selectTrack(track: Track) {
     triggerHaptic('selection')
-    if (libraryView.value === 'queue') void selectQueuedAndPlay(track)
-    else void selectAndPlay(track, filteredTracks.value)
+    void selectAndPlay(track, filteredTracks.value)
   }
 
   function enqueueTrack(track: Track, next: boolean) {
@@ -980,9 +974,10 @@
         />
         <TrackList
           ref="trackListRef"
+          v-model:playlist-id="selectedPlaylistId"
           :tracks="filteredTracks"
-          :total="libraryTracks.length"
-          :view="libraryView"
+          :total="playlistTracks.length"
+          :playlists="playlists"
           :favorite-ids="favoriteIds"
           :current-track-id="currentTrackId"
           :is-playing="isPlaying"
@@ -991,7 +986,6 @@
           :query="query"
           :spectrum-available="spectrumAvailable"
           @update:query="query = $event"
-          @update:view="libraryView = $event"
           @select="selectTrack"
           @enqueue="enqueueTrack"
           @favorite="toggleFavorite"
@@ -1068,8 +1062,7 @@
         />
         <header>
           <div>
-            <h2>播放设置</h2>
-            <p>调整播放、歌词与显示</p>
+            <h2>播放器设置</h2>
           </div>
           <button
             v-if="isCompactLandscape"

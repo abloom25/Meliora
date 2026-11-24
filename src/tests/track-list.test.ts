@@ -3,7 +3,6 @@ import { DOMWrapper, enableAutoUnmount, mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick, ref, type Ref } from 'vue'
 import TrackList from '../components/TrackList.vue'
 import type { Track } from '../core/types'
-import type { LibraryView } from '../core/library/personal-library'
 
 enableAutoUnmount(afterEach)
 afterEach(() => {
@@ -24,7 +23,7 @@ function makeTracks(count: number): Track[] {
 function createList(
   overrides: {
     tracks?: Track[]
-    view?: LibraryView
+    queueMode?: boolean
     currentTrackId?: string | null
     favoriteIds?: string[]
     spectrumAvailable?: boolean
@@ -55,7 +54,7 @@ function createQueue(tracks: Ref<Track[]>) {
         isPlaying: false,
         loading: false,
         query: '',
-        view: 'queue',
+        queueMode: true,
         onRemove: (id: string) => {
           tracks.value = tracks.value.filter((track) => track.id !== id)
         },
@@ -123,70 +122,52 @@ describe('TrackList', () => {
     expect(wrapper.find('.spectrum-meter').exists()).toBe(false)
     expect(wrapper.findAll('.track-status')[1]?.text()).toBe('2')
   })
-  it('shows categories directly and connects the selected tab to the song list', async () => {
+  it('lists configured playlists and selects one without starting playback', async () => {
     const wrapper = createList()
-    expect(wrapper.get('[role="tablist"]').attributes('aria-label')).toBe('曲库分类')
-    expect(wrapper.findAll('[role="tab"]').map((tab) => tab.text())).toEqual([
-      '全部',
-      '队列',
-      '最近',
-      '常听',
-      '收藏',
-    ])
-    expect(wrapper.find('.library-category').exists()).toBe(false)
-    expect(wrapper.find('[aria-haspopup="menu"]').exists()).toBe(false)
-    expect(wrapper.find('.manage-button').exists()).toBe(false)
-    expect(wrapper.find('.sort-done').exists()).toBe(false)
-    expect(wrapper.find('.track-drag').exists()).toBe(false)
-    const favorites = wrapper.get('[data-library-view="favorites"]')
-    await favorites.trigger('click')
-    expect(wrapper.emitted('update:view')).toEqual([['favorites']])
-    await wrapper.setProps({ view: 'favorites' })
-    expect(favorites.attributes('aria-selected')).toBe('true')
-    expect(favorites.attributes('tabindex')).toBe('0')
-    expect(wrapper.get('[data-library-view="all"]').attributes('tabindex')).toBe('-1')
-    expect(wrapper.get('[role="tabpanel"]').attributes('id')).toBe(
-      favorites.attributes('aria-controls'),
-    )
-    expect(wrapper.get('[role="tabpanel"]').attributes('aria-labelledby')).toBe(
-      favorites.attributes('id'),
-    )
+    expect(wrapper.get('.playlist-trigger').attributes('disabled')).toBeDefined()
+    await wrapper.setProps({
+      playlists: [
+        { id: 'netease:42', label: '散步', platform: '网易云音乐', cover: '/walk.jpg' },
+        { id: 'local', label: '本地音乐', platform: '本地曲库' },
+      ],
+      playlistId: 'netease:42',
+    })
+    const trigger = wrapper.get('.playlist-trigger')
+    expect(trigger.get('strong').text()).toBe('散步')
+    expect(trigger.get('small').text()).toBe('网易云音乐')
+    expect(trigger.get('img').attributes('src')).toBe('/walk.jpg')
+    await trigger.trigger('click')
+    expect(wrapper.get('.track-list').attributes('inert')).toBeDefined()
+    const list = wrapper.get('[aria-label="歌单列表"]')
+    expect(trigger.attributes('aria-label')).toBe('返回歌曲列表')
+    expect(trigger.attributes('aria-controls')).toBe(wrapper.get('.track-list').attributes('id'))
+    const items = list.findAll('.playlist-row')
+    expect(items.map((item) => item.get('strong').text())).toEqual(['散步', '本地音乐'])
+    expect(items[0]!.attributes('aria-current')).toBe('true')
+    await items[0]!.trigger('keydown', { key: 'Escape' })
+    expect(trigger.attributes('aria-label')).toBe('选择歌单，当前：散步')
+    expect(trigger.attributes('aria-controls')).toBe(list.attributes('id'))
+    expect(document.activeElement).toBe(trigger.element)
+    await trigger.trigger('click')
+    await wrapper.get('[aria-label="搜索歌单"]').setValue('本地')
+    expect(wrapper.findAll('.playlist-row')).toHaveLength(1)
+    await wrapper.get('.playlist-row').trigger('click')
+    expect(list.attributes('inert')).toBeDefined()
+    expect(wrapper.get('.track-list').attributes('inert')).toBeUndefined()
+    expect(wrapper.emitted('update:playlistId')).toEqual([['local']])
+    expect(wrapper.emitted('select')).toBeUndefined()
+    await wrapper.setProps({ playlistId: 'local' })
+    expect(wrapper.get('[role="region"]').attributes('aria-label')).toBe('本地音乐')
   })
-  it('supports category arrow keys and Home/End without triggering player shortcuts', async () => {
-    const wrapper = createList()
-    const shortcuts = vi.fn()
-    document.addEventListener('keydown', shortcuts)
-    try {
-      await wrapper.get('[data-library-view="all"]').trigger('keydown', { key: 'End' })
-      expect(document.activeElement).toBe(wrapper.get('[data-library-view="favorites"]').element)
-      await wrapper.setProps({ view: 'favorites' })
-      await wrapper.get('[data-library-view="favorites"]').trigger('keydown', { key: 'ArrowRight' })
-      expect(document.activeElement).toBe(wrapper.get('[data-library-view="all"]').element)
-      await wrapper.setProps({ view: 'all' })
-      await wrapper.get('[data-library-view="all"]').trigger('keydown', { key: 'ArrowLeft' })
-      await wrapper.setProps({ view: 'favorites' })
-      await wrapper.get('[data-library-view="favorites"]').trigger('keydown', { key: 'Home' })
-      expect(wrapper.emitted('update:view')).toEqual([
-        ['favorites'],
-        ['all'],
-        ['favorites'],
-        ['all'],
-      ])
-      expect(document.activeElement).toBe(wrapper.get('[data-library-view="all"]').element)
-      expect(shortcuts).not.toHaveBeenCalled()
-    } finally {
-      document.removeEventListener('keydown', shortcuts)
-    }
-  })
-  it('restores focus to the selected category after removing the last queued song', async () => {
+  it('restores focus to the empty list after removing the last queued song', async () => {
     const tracks = ref(makeTracks(1))
     const wrapper = createQueue(tracks)
     await wrapper.get('.track-select').trigger('contextmenu')
     await action('移出队列').trigger('click')
     await nextTick()
     expect(wrapper.find('.track-select').exists()).toBe(false)
-    expect(document.activeElement).toBe(wrapper.get('[data-library-view="queue"]').element)
-    expect(wrapper.get('[role="tabpanel"]').attributes('tabindex')).toBe('0')
+    expect(document.activeElement).toBe(wrapper.get('[role="region"]').element)
+    expect(wrapper.get('[role="region"]').attributes('tabindex')).toBe('0')
   })
   it('plays on normal click and opens a single floating action menu on right click', async () => {
     const wrapper = createList({ currentTrackId: '1', favoriteIds: ['2'] })
@@ -221,7 +202,7 @@ describe('TrackList', () => {
     }
   })
   it('keeps removal and current-track restrictions in the menu', async () => {
-    const wrapper = createList({ view: 'queue', currentTrackId: '1' })
+    const wrapper = createList({ queueMode: true, currentTrackId: '1' })
     await wrapper.get('[data-track-id="1"]').trigger('contextmenu')
     expect(action('移出队列').element.disabled).toBe(true)
     expect(action('下一首播放').element.disabled).toBe(true)
@@ -231,7 +212,7 @@ describe('TrackList', () => {
     expect(wrapper.emitted('select')).toBeUndefined()
   })
   it('shows grips only while sorting a queue and exits sorting when searching', async () => {
-    const wrapper = createList({ view: 'queue' })
+    const wrapper = createList({ queueMode: true })
     await sortFrom(wrapper.get('.track-select').element)
     expect(document.activeElement).toBe(wrapper.get('.sort-done').element)
     await wrapper.findAll('.track-drag')[1]!.trigger('keydown', { key: 'ArrowUp' })
@@ -244,7 +225,7 @@ describe('TrackList', () => {
     expect(action('拖动排序').element.disabled).toBe(true)
   })
   it('returns from sorting to ordinary playback', async () => {
-    const wrapper = createList({ view: 'queue' })
+    const wrapper = createList({ queueMode: true })
     await sortFrom(wrapper.get('.track-select').element)
     await wrapper.get('.sort-done').trigger('click')
     expect(wrapper.find('.track-drag').exists()).toBe(false)
@@ -252,7 +233,7 @@ describe('TrackList', () => {
     expect(wrapper.emitted('select')).toHaveLength(1)
   })
   it('commits a drag only for the initiating pointer and cancels without reordering', async () => {
-    const wrapper = createList({ view: 'queue' })
+    const wrapper = createList({ queueMode: true })
     vi.spyOn(wrapper.get('.track-list').element, 'getBoundingClientRect').mockReturnValue({
       top: 0,
       bottom: 300,

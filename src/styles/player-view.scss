@@ -411,25 +411,6 @@
 .lyrics-hidden .primary-meta p {
   text-align: center;
 }
-.meta-swap-enter-active,
-.meta-swap-leave-active {
-  transition:
-    opacity 300ms cubic-bezier(0.22, 1, 0.36, 1),
-    filter 300ms ease,
-    transform 380ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-.meta-swap-enter-from,
-.meta-swap-leave-to {
-  opacity: 0;
-  filter: blur(12px);
-  transform: translateY(10px);
-}
-.meta-swap-enter-to,
-.meta-swap-leave-from {
-  opacity: 1;
-  filter: blur(0);
-  transform: translateY(0);
-}
 .lyrics-column {
   position: absolute;
   top: 78px;
@@ -1557,22 +1538,14 @@
     flex: none;
     gap: 12px;
   }
-  .library-drawer :deep(.track-heading) {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-  }
-  .library-drawer :deep(.library-title) {
-    font-size: 18px;
+  .library-drawer :deep(.playlist-trigger) {
+    --playlist-art-size: 42px;
+    --playlist-title-size: 1rem;
   }
   .library-drawer :deep(.list-toolbar) {
     flex: none;
   }
-  .library-drawer :deep(.library-navigation) {
-    min-height: 44px;
-    margin-bottom: 4px;
-  }
-  .library-drawer :deep(.track-list) {
+  .library-drawer :deep(.library-content) {
     min-height: 66px;
   }
   .library-drawer :deep(.search-box input) {
@@ -1626,11 +1599,8 @@
       grid-area: 1 / 1;
       padding: 0;
     }
-    .library-drawer :deep(.track-heading p) {
-      display: none;
-    }
-    .library-drawer :deep(.library-title) {
-      font-size: 16px;
+    .library-drawer :deep(.playlist-trigger) {
+      --playlist-art-size: 36px;
     }
     .library-drawer :deep(.list-toolbar) {
       grid-area: 2 / 1;
@@ -1638,14 +1608,13 @@
       margin: 0;
       padding: 0;
     }
-    .library-drawer :deep(.library-navigation) {
-      margin-bottom: 2px;
-    }
     .library-drawer :deep(.search-row) {
       margin: 0;
     }
-    .library-drawer :deep(.track-list) {
+    .library-drawer :deep(.library-content) {
       grid-area: 3 / 1;
+    }
+    .library-drawer :deep(.track-list) {
       padding-block: 0;
       mask-image: none;
     }

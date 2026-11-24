@@ -1,4 +1,5 @@
 import type { AudioChannel } from '../../core/audio/backend'
+import { equalPowerGains } from '../../core/audio/smart-mix'
 import {
   CROSSFADE_DURATION_MS,
   crossfadeGains,
@@ -22,16 +23,19 @@ export function createAudioGain() {
     targets: AudioChannel[],
     update: (progress: number) => void,
     duration: number,
+    continueWhenHidden = false,
   ): Promise<boolean> {
     for (const channel of targets) cancelGainAnimation(channel)
     return new Promise<boolean>((resolve) => {
       let frame = 0
+      let timer = 0
       let settled = false
       const startedAt = performance.now()
       function finish(completed: boolean): void {
         if (settled) return
         settled = true
         window.cancelAnimationFrame(frame)
+        window.clearTimeout(timer)
         document.removeEventListener('visibilitychange', onVisibilityChange)
         if (completed) update(1)
         for (const channel of targets) {
@@ -40,33 +44,43 @@ export function createAudioGain() {
         resolve(completed)
       }
       function onVisibilityChange(): void {
-        if (document.hidden) finish(true)
+        if (!continueWhenHidden && document.hidden) return finish(true)
+        window.cancelAnimationFrame(frame)
+        window.clearTimeout(timer)
+        step(performance.now())
       }
       function step(now: number): void {
         if (settled) return
         const progress = fadeProgress(now - startedAt, duration)
-        if (progress >= 1 || document.hidden) return finish(true)
+        if (progress >= 1 || (document.hidden && !continueWhenHidden)) return finish(true)
         update(progress)
-        frame = window.requestAnimationFrame(step)
+        if (document.hidden) timer = window.setTimeout(() => step(performance.now()), 50)
+        else frame = window.requestAnimationFrame(step)
       }
       for (const channel of targets) owners.set(channel, finish)
-      if (document.hidden) finish(true)
+      if (document.hidden && !continueWhenHidden) finish(true)
       else {
         document.addEventListener('visibilitychange', onVisibilityChange)
-        frame = window.requestAnimationFrame(step)
+        step(startedAt)
       }
     })
   }
 
-  function crossfadePlayers(outgoing: AudioChannel, incoming: AudioChannel): Promise<boolean> {
+  function crossfadePlayers(
+    outgoing: AudioChannel,
+    incoming: AudioChannel,
+    mixDurationMs?: number,
+  ): Promise<boolean> {
     return animateGain(
       [outgoing, incoming],
       (progress) => {
-        const gains = crossfadeGains(progress)
+        const gains =
+          mixDurationMs === undefined ? crossfadeGains(progress) : equalPowerGains(progress)
         outgoing.setGain(gains.outgoing)
         incoming.setGain(gains.incoming)
       },
-      CROSSFADE_DURATION_MS,
+      mixDurationMs ?? CROSSFADE_DURATION_MS,
+      mixDurationMs !== undefined,
     )
   }
 

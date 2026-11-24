@@ -1,12 +1,16 @@
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, shallowRef } from 'vue'
 import { usePlayerStore } from '../stores/player'
 import { musicConfig } from '../config/music'
-import { loadConfiguredTracks, loadMusicConfig } from '../services/music'
-import { filterTracks, trackMatchesShareId } from '../core/library/tracks'
+import { loadConfiguredTracks, loadMusicConfig, type LibraryPlaylist } from '../services/music'
+import { filterTracks, trackIdentity, trackMatchesShareId } from '../core/library/tracks'
 import { parseTrackShareTime } from '../core/library/track-share'
 import type { Track } from '../core/types'
 import { applySiteIntegrations } from '../platform/web/site-integrations'
 import type { PublicMusicConfig } from '../../shared/music-config'
+import { isMusicSourceEnabled } from '../../shared/music-sources'
+import { usePlaylistDetails } from './usePlaylistDetails'
+
+const ALL_TRACKS_ID = 'all'
 
 /** 曲库加载、分享定位和站点配置应用；只有最新请求可以提交结果。 */
 export function usePlayerLibrary(options: {
@@ -22,7 +26,44 @@ export function usePlayerLibrary(options: {
   const loading = ref(true)
   const loadFailed = ref(false)
   const sourceWarning = ref('')
-  const filteredTracks = computed(() => filterTracks(store.tracks, query.value))
+  const loadedPlaylists = shallowRef<LibraryPlaylist[]>([])
+  const details = usePlaylistDetails(() =>
+    isMusicSourceEnabled(runtimeConfig.value, 'meting')
+      ? runtimeConfig.value.playlists.filter((item) => item.enabled !== false)
+      : [],
+  )
+  const playlists = computed(() => [
+    { id: ALL_TRACKS_ID, label: '全部歌曲', platform: `共 ${store.tracks.length} 首` },
+    ...loadedPlaylists.value.map((item) => {
+      const metadata = details.get(item.id)
+      return metadata
+        ? { ...item, label: metadata.name, cover: metadata.cover || item.cover }
+        : item
+    }),
+  ])
+  const selectedPlaylistId = ref('')
+  const tracksByKey = computed(
+    () => new Map(store.tracks.map((track) => [trackIdentity(track), track])),
+  )
+  const playlistTracks = computed(() => {
+    if (selectedPlaylistId.value === ALL_TRACKS_ID) return store.tracks
+    const playlist = loadedPlaylists.value.find((item) => item.id === selectedPlaylistId.value)
+    if (!playlist) return []
+    const byKey = tracksByKey.value
+    return playlist.trackKeys.flatMap((key) => byKey.get(key) ?? [])
+  })
+  const filteredTracks = computed(() => filterTracks(playlistTracks.value, query.value))
+
+  function updatePlaylists(next: LibraryPlaylist[]) {
+    loadedPlaylists.value = next
+    if (
+      selectedPlaylistId.value !== ALL_TRACKS_ID &&
+      !next.some((item) => item.id === selectedPlaylistId.value)
+    ) {
+      selectedPlaylistId.value =
+        (next.find((item) => item.trackKeys.length) ?? next[0])?.id ?? ALL_TRACKS_ID
+    }
+  }
 
   function resolveSiteIcon(icon: string | undefined): string {
     if (!icon) return `${import.meta.env.BASE_URL}favicon.svg`
@@ -99,12 +140,14 @@ export function usePlayerLibrary(options: {
         onProgress: (partial) => {
           if (requestId !== loadTracksRequestId || !progressive || !partial.tracks.length) return
           store.setTracks(partial.tracks, { complete: false })
+          updatePlaylists(partial.playlists)
           loading.value = false
           resolveShare(false)
         },
       })
       if (requestId !== loadTracksRequestId) return
       store.setTracks(result.tracks)
+      updatePlaylists(result.playlists)
       resolveShare(true)
       loadFailed.value = !result.tracks.length && result.failedSources > 0
       if (result.failedSources) {
@@ -125,5 +168,16 @@ export function usePlayerLibrary(options: {
     }
   }
 
-  return { runtimeConfig, query, loading, loadFailed, sourceWarning, filteredTracks, loadTracks }
+  return {
+    runtimeConfig,
+    query,
+    loading,
+    loadFailed,
+    sourceWarning,
+    playlists,
+    selectedPlaylistId,
+    playlistTracks,
+    filteredTracks,
+    loadTracks,
+  }
 }

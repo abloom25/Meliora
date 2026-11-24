@@ -19,6 +19,12 @@
     tracks.value.slice(page.value * pageSize, (page.value + 1) * pageSize),
   )
   const modelIds = ['small', 'standard'] as const
+  const visibleModelIds = computed(() =>
+    modelIds.filter((id) => {
+      const phase = models.value[id].phase
+      return modelBytes.value[id] > 0 || ['downloading', 'ready', 'removing'].includes(phase)
+    }),
+  )
   watch(
     () => beat.value.maxBytes,
     (bytes) => {
@@ -126,10 +132,11 @@
         </Collapse>
       </div>
       <div class="cache-group">
-        <div v-for="id in modelIds" :key="id" class="cache-model">
+        <p v-if="!visibleModelIds.length && !modelBytes.runtime" class="cache-note">暂无模型缓存</p>
+        <div v-for="id in visibleModelIds" :key="id" class="cache-model">
           <SettingsSectionHeader
             :title="id === 'small' ? 'Beat This! Small' : 'Beat This! 标准版'"
-            :resettable="modelBytes[id] > 0 || models[id].phase === 'downloading'"
+            :resettable="models[id].phase !== 'removing'"
             reset-label="删除模型"
             confirm-label="再次点击删除"
             :reset-disabled="!!busy"
@@ -142,13 +149,13 @@
                 ? ' · 正在下载'
                 : models[id].phase === 'ready'
                   ? ' · 已下载'
-                  : modelBytes[id] > 0
-                    ? ' · 部分下载'
-                    : ' · 未下载'
+                  : models[id].phase === 'removing'
+                    ? ' · 正在删除'
+                    : ' · 部分下载'
             }}
           </p>
         </div>
-        <p class="cache-note">
+        <p v-if="modelBytes.runtime > 0" class="cache-note">
           共用运行文件 {{ size(modelBytes.runtime) }}，删除最后一个模型时一并清理。
         </p>
       </div>
